@@ -53,7 +53,6 @@
     "rex-daemon": "./packages/infra/harness-daemon/dist/index.js"
   },
   "scripts": {
-    "agentlab:build-experiment": "bun run scripts/agentlab/build_experiment.ts",
     "prepublishOnly": "bun run build",
     "build": "bun run build:packages && bun run build:apps",
     "build:packages": "bun run --cwd packages/external/prompt-protocol build && bun run --cwd packages/core/protocol build && bun run --cwd packages/plugins/semantic-compiler build && bun run --cwd packages/core/types build && bun run --cwd packages/core/shared build && bun run --cwd packages/core/work build && bun run --cwd packages/core/llm build && bun run --cwd packages/core/context build && bun run --cwd packages/core/tools build && bun run --cwd packages/core/agent build && bun run --cwd packages/infra/comms-bus build && bun run --cwd packages/infra/harness-client build && bun run --cwd packages/plugins/agent-memory build && bun run --cwd packages/plugins/memory-injector build && bun run --cwd packages/infra/decision-watcher build && bun run --cwd packages/core/orchestrator build && bun run --cwd packages/infra/graphd build && bun run --cwd packages/plugins/entity-graph build",

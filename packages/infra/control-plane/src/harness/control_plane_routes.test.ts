@@ -771,7 +771,7 @@ describe('control-plane cockpit session model routes', () => {
     }> = [];
     const selections = {
       standard: { provider: 'openai', model: 'gpt-4o-mini' },
-      watcher: { provider: 'openai', model: 'gpt-4o-mini' },
+      observer: { provider: 'openai', model: 'gpt-4o-mini' },
     };
     const ctx: ControlPlaneContext = {
       ...harness.ctx,

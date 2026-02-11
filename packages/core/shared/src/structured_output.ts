@@ -230,7 +230,8 @@ export function parseAndValidateOutput<T extends OutputSchemaName>(
   const coerced = coerceStructuredOutput(rawValue);
   if (!coerced) return null;
 
-  // Unwrap "result" envelope added by zodToJsonSchema for union schemas
+  // Unwrap provider-added "result" envelopes used by adapters that require
+  // root object schemas without top-level combinators.
   const unwrapped = unwrapStructuredOutput(coerced);
 
   // Then validate against schema

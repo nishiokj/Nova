@@ -12,7 +12,7 @@ import {
   isWatcherTrigger,
   type WatcherActionType,
   type WatcherTrigger,
-} from 'shared'
+} from '../../watcher/contract.js'
 
 // ============ Execution Metrics ============
 

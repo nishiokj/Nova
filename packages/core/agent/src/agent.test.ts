@@ -95,7 +95,7 @@ describe('Agent', () => {
     expect(result.response).toBe('done');
   });
 
-  it('preserves watcher stop_work_item structured output', async () => {
+  it('preserves observer stop_work_item structured output', async () => {
     const llm = createMockLLM({
       content: JSON.stringify({
         action: 'done',
@@ -113,8 +113,8 @@ describe('Agent', () => {
     });
 
     const config: AgentConfig = {
-      type: 'watcher',
-      systemPrompt: 'Watcher test prompt',
+      type: 'observer',
+      systemPrompt: 'Observer test prompt',
       tools: [],
       budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 1000 },
       outputSchema: { name: 'watcher_action_output', schema: { type: 'object' }, strict: true, schemaId: 'watcher_action' },

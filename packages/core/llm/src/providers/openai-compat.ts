@@ -20,6 +20,7 @@ import {
 } from '../rate-limits.js';
 import { parseApiErrorResponse, formatApiError } from '../response_schemas.js';
 import { profiler } from 'shared';
+import { compileSchemaForOpenAI } from './schema_compiler.js';
 
 function parseApiError(provider: string, status: number, responseText: string): Error {
   const parsed = parseApiErrorResponse(provider, status, responseText);
@@ -280,11 +281,15 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       if (responseFormat === 'json_object') {
         body.response_format = { type: 'json_object' };
       } else {
+        const compiledSchema = compileSchemaForOpenAI(
+          params.responseSchema.schema,
+          params.responseSchema.schemaId
+        );
         body.response_format = {
           type: 'json_schema',
           json_schema: {
             name: params.responseSchema.name,
-            schema: params.responseSchema.schema,
+            schema: compiledSchema,
             strict: params.responseSchema.strict ?? true,
           },
         };
@@ -501,11 +506,15 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       if (responseFormat === 'json_object') {
         body.response_format = { type: 'json_object' };
       } else {
+        const compiledSchema = compileSchemaForOpenAI(
+          params.responseSchema.schema,
+          params.responseSchema.schemaId
+        );
         body.response_format = {
           type: 'json_schema',
           json_schema: {
             name: params.responseSchema.name,
-            schema: params.responseSchema.schema,
+            schema: compiledSchema,
             strict: params.responseSchema.strict ?? true,
           },
         };

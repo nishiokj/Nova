@@ -1,5 +1,5 @@
 import { computeInputLayout, InputBuffer } from "./buffer.js";
-import type { MessageEntry, Role, TUIState, UIMode, WizardType, AgentQuestion, QuestionType, EventLevel, EventKind, ResponseContent, ModelEntry, SessionEntry, UsageSessionSummary, UsageDayStats, UsageProviderStats, PermissionRequestData, TextSegment } from "./types.js";
+import type { MessageEntry, Role, TUIState, UIMode, WizardType, EventLevel, EventKind, ResponseContent, ModelEntry, SessionEntry, UsageSessionSummary, UsageDayStats, UsageProviderStats, PermissionRequestData, TextSegment } from "./types.js";
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
 import { highlightCode, isLanguageSupported } from "./utils/syntax.js";
@@ -15,7 +15,6 @@ import { toGatewayModel } from "types";
  *   Reasoning    - extended thinking display
  *   Input        - text buffer, cursor, autocomplete
  *   UI Mode      - mode switching, scroll, visibility flags
- *   Question     - interactive prompts, multi-question sequences
  *   Models       - model list, cursor, selection per agent type
  *   Sessions     - session list, cursor
  *   Usage        - usage analytics, stats
@@ -42,7 +41,6 @@ import { toGatewayModel } from "types";
 
 // Resource limits to prevent memory exhaustion
 const MAX_STREAMING_BYTES = 5 * 1024 * 1024;  // 5MB - cap streaming text
-const MAX_INPUT_LENGTH = 100 * 1024;           // 100KB - cap input buffer
 
 const GATEWAY_PROVIDER_ID = "vercel-gateway";
 const GATEWAY_MODEL_PROVIDERS = new Set<string>([
@@ -146,14 +144,6 @@ export interface StoreSnapshot {
   };
   requestCount: number;
   historyVersion: number;
-  // Question flow state
-  activeQuestion: AgentQuestion | null;
-  questionSelection: number[];
-  questionCursor: number;
-  questionInput: string;
-  questionQueue: AgentQuestion[];
-  questionAnswers: Map<string, unknown>;
-  questionRequestId: string | null;
   // Paste state
   pasteInProgress: boolean;
   pasteBytesReceived: number;
@@ -242,16 +232,6 @@ export class Store {
   private newMessages = false;
   private helpVisible = false;
   private voiceMode = false;
-
-  // ─── Question Flow ───
-  private activeQuestion: AgentQuestion | null = null;
-  private questionSelection: number[] = [];
-  private questionCursor = 0;
-  private questionInput = "";
-  private questionQueue: AgentQuestion[] = [];
-  private questionAnswers = new Map<string, unknown>();
-  private questionRequestId: string | null = null;
-  private questionProcessing = false;
 
   // ─── Models ───
   private modelsList: ModelEntry[] = [];
@@ -368,14 +348,6 @@ export class Store {
       capabilities: { ...this.capabilities },
       requestCount: this.requestCount,
       historyVersion: this.historyVersion,
-      // Question flow state
-      activeQuestion: this.activeQuestion,
-      questionSelection: [...this.questionSelection],
-      questionCursor: this.questionCursor,
-      questionInput: this.questionInput,
-      questionQueue: [...this.questionQueue],
-      questionAnswers: new Map(this.questionAnswers),
-      questionRequestId: this.questionRequestId,
       // Paste state
       pasteInProgress: this.pasteInProgress,
       pasteBytesReceived: this.pasteBytesReceived,
@@ -1026,205 +998,6 @@ export class Store {
     };
 
     return normalizedLines;
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // QUESTION FLOW METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  /**
-   * Sets the active question and enters question mode.
-   * For single questions from the harness.
-   */
-  setActiveQuestion(question: AgentQuestion | null, requestId?: string): void {
-    this.activeQuestion = question;
-    this.questionSelection = [];
-    this.questionCursor = 0;
-    this.questionInput = question?.defaultValue || "";
-    if (requestId) {
-      this.questionRequestId = requestId;
-    }
-    if (question) {
-      this.uiMode = "question";
-    }
-    this.emit();
-  }
-
-  /**
-   * Sets a queue of questions to ask in sequence.
-   */
-  setQuestionQueue(questions: AgentQuestion[], requestId: string): void {
-    this.questionQueue = questions.slice(1); // Queue all but the first
-    this.questionAnswers.clear();
-    this.questionRequestId = requestId;
-    // Start with the first question
-    if (questions.length > 0) {
-      this.setActiveQuestion(questions[0], requestId);
-    }
-  }
-
-  /**
-   * Returns info about the question queue.
-   */
-  getQuestionQueueInfo(): { current: number; total: number } {
-    const answered = this.questionAnswers.size;
-    const remaining = this.questionQueue.length;
-    const total = answered + remaining + (this.activeQuestion ? 1 : 0);
-    return { current: answered + 1, total };
-  }
-
-  /**
-   * Navigates up or down in the question options.
-   */
-  selectQuestionOption(delta: number): void {
-    if (!this.activeQuestion?.options) return;
-    const count = this.activeQuestion.options.length;
-    if (count === 0) return;
-    this.questionCursor = (this.questionCursor + delta + count) % count;
-    this.emit();
-  }
-
-  /**
-   * Toggles selection of the current option.
-   * For single-select (multiple_choice, yes_no), replaces selection.
-   * For multi-select, toggles the current option.
-   */
-  toggleQuestionSelection(): void {
-    if (!this.activeQuestion) return;
-
-    if (
-      this.activeQuestion.type === "multiple_choice" ||
-      this.activeQuestion.type === "yes_no" ||
-      this.activeQuestion.type === "plan_mode_exit" ||
-      this.activeQuestion.type === "spec_review"
-    ) {
-      // Single selection - replace
-      this.questionSelection = [this.questionCursor];
-    } else if (this.activeQuestion.type === "multi_select") {
-      // Toggle selection
-      const idx = this.questionSelection.indexOf(this.questionCursor);
-      if (idx >= 0) {
-        this.questionSelection.splice(idx, 1);
-      } else {
-        this.questionSelection.push(this.questionCursor);
-      }
-    }
-    this.emit();
-  }
-
-  /**
-   * Updates the text input for fill_in_blank/free_text questions.
-   */
-  setQuestionInput(text: string): void {
-    // Enforce input limit
-    this.questionInput = text.slice(0, MAX_INPUT_LENGTH);
-    this.emit();
-  }
-
-  /**
-   * Appends text to the question input.
-   */
-  appendQuestionInput(text: string): void {
-    // Enforce input limit
-    const available = MAX_INPUT_LENGTH - this.questionInput.length;
-    if (available <= 0) return;
-    this.questionInput += text.slice(0, available);
-    this.emit();
-  }
-
-  /**
-   * Backspaces one character from question input.
-   */
-  backspaceQuestionInput(): void {
-    if (this.questionInput.length > 0) {
-      this.questionInput = this.questionInput.slice(0, -1);
-      this.emit();
-    }
-  }
-
-  /**
-   * Gets the answer in the appropriate format for the question type.
-   */
-  getQuestionAnswer(): unknown {
-    if (!this.activeQuestion) return null;
-
-    switch (this.activeQuestion.type) {
-      case "multiple_choice":
-      case "yes_no":
-      case "plan_mode_exit":
-      case "spec_review":
-        if (this.questionSelection.length === 0) return null;
-        return this.activeQuestion.options?.[this.questionSelection[0]]?.id;
-      case "multi_select":
-        return this.questionSelection.map(
-          (i) => this.activeQuestion!.options![i]?.id
-        );
-      case "fill_in_blank":
-      case "free_text":
-        return this.questionInput;
-      default:
-        return null;
-    }
-  }
-
-  /**
-   * Saves the current answer and advances to next question or completes.
-   * Returns true if there are more questions, false if done.
-   */
-  saveAnswerAndAdvance(): boolean {
-    // Guard against re-entrance (rapid double-submit)
-    if (this.questionProcessing || !this.activeQuestion) return false;
-    this.questionProcessing = true;
-
-    try {
-      // Save the current answer
-      const answer = this.getQuestionAnswer();
-      this.questionAnswers.set(this.activeQuestion.requestId, answer);
-
-      // Check if there are more questions in the queue
-      if (this.questionQueue.length > 0) {
-        const nextQuestion = this.questionQueue.shift()!;
-        this.activeQuestion = nextQuestion;
-        this.questionSelection = [];
-        this.questionCursor = 0;
-        this.questionInput = nextQuestion.defaultValue || "";
-        this.emit();
-        return true; // More questions remaining
-      }
-
-      return false; // No more questions
-    } finally {
-      this.questionProcessing = false;
-    }
-  }
-
-  /**
-   * Gets all collected answers (for multi-question flows).
-   */
-  getAllAnswers(): Map<string, unknown> {
-    return new Map(this.questionAnswers);
-  }
-
-  /**
-   * Gets the request ID for the current question flow.
-   */
-  getQuestionRequestId(): string | null {
-    return this.questionRequestId;
-  }
-
-  /**
-   * Clears the active question and returns to chat mode.
-   */
-  clearQuestion(): void {
-    this.activeQuestion = null;
-    this.questionSelection = [];
-    this.questionCursor = 0;
-    this.questionInput = "";
-    this.questionQueue = [];
-    this.questionAnswers.clear();
-    this.questionRequestId = null;
-    this.uiMode = "chat";
-    this.emit();
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

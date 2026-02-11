@@ -45,7 +45,7 @@ Replace `stopResult.reason` with `reason` at lines 2164, 2175, 2192, 2227.
 
 | terminationReason | What `reason` becomes | Current behavior (empty reason) | New behavior |
 |---|---|---|---|
-| `user_input_required` (line 2175) | Injected as user message | Silent termination — watcher's answer lost | Injects fallback, continues. Watcher still failed to provide content, but we don't lie about success |
+| `user_input_required` (line 2175) | Injected as user message | Silent termination — observer's answer lost | Injects fallback, continues. Observer still failed to provide content, but we don't lie about success |
 | `handoff_requested` (line 2192) | Injected as rejection feedback | Silent handoff success | Injects generic rejection. Planner revises |
 | bounds_exceeded (line 2227) | Becomes new work item goal | Silent termination | Creates work item with fallback goal |
 | Other reasons (line 2227) | Becomes new work item goal | Silent termination | Creates work item with fallback goal |
@@ -80,7 +80,7 @@ if (!Array.isArray(spec.workItems)) return false;
 
 2. **`handoff_requested` hook event now fires for empty handoffs.** Previously, no hook saw this scenario because the agent filtered it out. After fix, hooks registered for `handoff_requested` will receive a spec with `workItems: []`. Any hook that examines `workItems` must tolerate empty arrays. **Acceptable** — hooks should be defensive about input shape, and an empty array is a valid array.
 
-3. **Result `paused: true` is set.** Empty handoff now returns a paused result (line 2485) instead of a success result. The harness/UI will show "Planning complete. Ready to execute." instead of success. **Correct** — stops the system and waits for user/watcher decision.
+3. **Result `paused: true` is set.** Empty handoff now returns a paused result (line 2485) instead of a success result. The harness/UI will show "Planning complete. Ready to execute." instead of success. **Correct** — stops the system and waits for user/observer decision.
 
 4. **`parseHandoffSpec` return path:** With empty `workItems`, `parseHandoffSpec` returns `[]`. Line 2461's `workItems.length > 0` fails → falls through to warning at 2478 → pause at 2482. No items are enqueued. **Safe** — the empty array case is already handled.
 
@@ -149,7 +149,7 @@ private handleStopHookBlock(...): boolean {
 The old model: splits = progress → reset counter. The new model: every bounds_exceeded call counts, period. This is a deliberate rejection of the "splitting is progress" assumption. The infinite loop bug proves that assumption is exploitable.
 
 Concrete impact:
-- **Split-only sequence:** 3 consecutive splits now hits the cap at `maxRealigns=3`. Previously: unlimited. A legitimate watcher that decomposes work across 4+ bounds_exceeded events will now be capped. `maxRealigns` defaults to 3 — this is generous. If a real workflow needs more, the config can be increased.
+- **Split-only sequence:** 3 consecutive splits now hits the cap at `maxRealigns=3`. Previously: unlimited. A legitimate observer that decomposes work across 4+ bounds_exceeded events will now be capped. `maxRealigns` defaults to 3 — this is generous. If a real workflow needs more, the config can be increased.
 - **Mixed sequence:** realign→split→realign now counts as 3, not 1. The counter is cumulative and monotonic (within a single handleStopHookBlock lifetime).
 
 **2. Order of operations: bounds check before deferred work enqueue.**

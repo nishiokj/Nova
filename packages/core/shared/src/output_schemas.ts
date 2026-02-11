@@ -248,53 +248,12 @@ export type PlannerOutput = z.infer<typeof PlannerOutputSchema>;
 
 type JsonSchema = Record<string, unknown>;
 
-/**
- * Convert oneOf → anyOf recursively and enforce OpenAI Structured Outputs constraints.
- *
- * OpenAI requirements:
- * - anyOf instead of oneOf (Zod emits oneOf for discriminated unions)
- * - Root schema must be type: "object" with no top-level anyOf/oneOf/allOf
- *
- * For union schemas (z.union), we wrap the anyOf in a root object with a
- * single "result" property. Consumers must unwrap via unwrapStructuredOutput().
- */
-function normalizeForOpenAI(schema: JsonSchema): JsonSchema {
-  const result: JsonSchema = {};
-  for (const [key, value] of Object.entries(schema)) {
-    if (key === '$schema') continue;
-    if (key === 'oneOf') {
-      result['anyOf'] = (value as JsonSchema[]).map(normalizeForOpenAI);
-    } else if (Array.isArray(value)) {
-      result[key] = value.map(v =>
-        typeof v === 'object' && v !== null ? normalizeForOpenAI(v as JsonSchema) : v
-      );
-    } else if (typeof value === 'object' && value !== null) {
-      result[key] = normalizeForOpenAI(value as JsonSchema);
-    } else {
-      result[key] = value;
-    }
-  }
-  return result;
-}
-
-/**
- * Wrap a non-object root schema (e.g. anyOf union) in a root object.
- * OpenAI Structured Outputs requires root type: "object" with no top-level combinators.
- */
-function ensureRootObject(schema: JsonSchema): JsonSchema {
-  if (schema.type === 'object' && !schema.anyOf && !schema.oneOf && !schema.allOf) {
-    return schema;
-  }
-  return {
-    type: 'object',
-    properties: { result: schema },
-    required: ['result'],
-    additionalProperties: false,
-  };
-}
-
 function zodToJsonSchema(schema: z.ZodTypeAny): JsonSchema {
-  return ensureRootObject(normalizeForOpenAI(toJSONSchema(schema) as JsonSchema));
+  const jsonSchema = toJSONSchema(schema) as JsonSchema;
+  // Keep shared schemas provider-agnostic. Provider adapters can apply
+  // compatibility transforms for their own JSON Schema subsets.
+  const { $schema: _draft, ...withoutDraftMeta } = jsonSchema;
+  return withoutDraftMeta;
 }
 
 /**

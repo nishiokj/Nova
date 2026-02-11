@@ -37,7 +37,7 @@ export type TerminationReason =
   | 'refusal'
   | 'stagnation'
 
-  // Watcher intervention
+  // Observer intervention
   | 'watcher_stopped'
   | 'watcher_work_item_stopped'
   | 'cadence_audit';
@@ -51,7 +51,7 @@ export type TerminationCategory =
   | 'bounds'
   | 'transient'
   | 'agent_error'
-  | 'watcher';
+  | 'observer';
 
 /**
  * Get the category of a termination reason.
@@ -87,7 +87,7 @@ export function getTerminationCategory(reason: TerminationReason): TerminationCa
     case 'watcher_stopped':
     case 'watcher_work_item_stopped':
     case 'cadence_audit':
-      return 'watcher';
+      return 'observer';
 
     default:
       return assertNever(reason, `Unknown termination reason: ${reason}`);

@@ -21,7 +21,7 @@ export interface DeferredWorkItem {
   dependencies?: string[];
   targetPaths?: string[];
   bounds?: { maxToolCalls?: number; maxLlmCalls?: number; maxDurationMs?: number };
-  /** Semantic state for this work item (flows through from watcher split/create) */
+  /** Semantic state for this work item (flows through from observer split/create) */
   semantic?: unknown;
 }
 
@@ -63,7 +63,7 @@ export type StopHookResult =
       systemMessage?: string;
       /** Optional termination override for allow decisions. */
       terminationReason?: TerminationReason;
-      /** Optional escalation correlation for watcher-driven stops. */
+      /** Optional escalation correlation for observer-driven stops. */
       escalationId?: string;
       /** Deferred work items for async dispatch */
       deferredWork?: DeferredWorkItem[];
@@ -75,7 +75,7 @@ export type StopHookResult =
       reason: string;
       /** System message to prepend */
       systemMessage?: string;
-      /** Optional escalation correlation for watcher-driven stops. */
+      /** Optional escalation correlation for observer-driven stops. */
       escalationId?: string;
       /** Deferred work items for async dispatch */
       deferredWork?: DeferredWorkItem[];

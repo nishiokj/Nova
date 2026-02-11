@@ -348,7 +348,7 @@ harness.ts postToolUse()
 |--------|---------|----------|
 | EventBus → GraphD | Execution tracing (what happened) | Dashboard, analytics |
 | EventBus → LogSubscriber | Debug logging | Developers |
-| Watcher memory | Live decision context | Autonomous watcher |
+| Observer memory | Live decision context | Autonomous observer |
 | **TraceSubscriber** | **Code attribution (who wrote what)** | **Git blame, audits** |
 
 These are complementary, not redundant. TraceSubscriber listens to the same EventBus but transforms events for a different purpose (VCS-anchored attribution vs runtime tracing).

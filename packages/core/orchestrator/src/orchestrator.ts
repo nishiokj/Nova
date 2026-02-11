@@ -75,7 +75,7 @@ import { buildPlanContextFromHandoff, writePlanContext } from './plan-context.js
 
 /**
  * Structural async-mode DB contract.
- * Kept local so orchestrator can compile independently from decision-watcher.
+ * Kept local so orchestrator can compile independently from decision-engine.
  */
 export interface AsyncDecisionDatabase {
   search(query: string, options?: {
@@ -90,10 +90,10 @@ export interface AsyncDecisionDatabase {
 }
 
 /**
- * Structural async-mode watcher config contract.
- * Kept local so orchestrator can compile independently from decision-watcher.
+ * Structural async-mode observer config contract.
+ * Kept local so orchestrator can compile independently from decision-engine.
  */
-export interface AsyncDecisionWatcherConfig {
+export interface AsyncDecisionEngineConfig {
   enabled: boolean;
   minConfidenceThreshold: number;
   maxDecisionsToConsult: number;
@@ -127,13 +127,13 @@ export interface OrchestratorConfig {
   compactMaxFileCount: number;
   /** Max chars per tool output during compaction */
   compactTruncateTo: number;
-  /** Minimum iteration gap between watcher evaluations (default 5) */
+  /** Minimum iteration gap between observer evaluations (default 5) */
   minWatcherIterationGap: number;
   /** Maximum realign attempts before forcing termination (default 3) */
   maxRealigns: number;
   /**
-   * Async mode configuration for decision watcher.
-   * When enabled, the watcher will automatically answer PromptUser questions
+   * Async mode configuration for decision observer.
+   * When enabled, the observer will automatically answer PromptUser questions
    * using a curated decision and preference database.
    */
   asyncMode?: {
@@ -141,8 +141,8 @@ export interface OrchestratorConfig {
     enabled: boolean;
     /** Decision database for async mode */
     database?: AsyncDecisionDatabase;
-    /** Optional custom watcher configuration */
-    watcherConfig?: Partial<AsyncDecisionWatcherConfig>;
+    /** Optional custom observer configuration */
+    watcherConfig?: Partial<AsyncDecisionEngineConfig>;
   };
   /**
    * Optional memory injector for injecting relevant memory into agent context.
@@ -155,7 +155,7 @@ export interface OrchestratorConfig {
  * Per-execution runtime hooks and callbacks.
  */
 /**
- * State passed to the onIteration callback for watcher evaluation.
+ * State passed to the onIteration callback for observer evaluation.
  */
 export interface IterationState {
   iteration: number;
@@ -191,7 +191,7 @@ export interface OrchestratorRuntime {
   onStart?: (context: ContextWindow) => void | (() => void);
   /**
    * Called each iteration with execution state.
-   * Used by the watcher to evaluate rules and steer the decision engine.
+   * Used by the observer to evaluate rules and steer the decision engine.
    * May be sync or async — if async, the orchestrator does not await it
    * (fire-and-forget to avoid blocking the loop).
    */
@@ -799,13 +799,13 @@ export class Orchestrator {
         if (cadenceResult) {
           this.enqueueDeferredWork(cadenceResult);
 
-          // Inject watcher guidance even on 'allow' - makes cadence audits actually do something
+          // Inject observer guidance even on 'allow' - makes cadence audits actually do something
           if (cadenceResult.systemMessage && cadenceResult.decision === 'allow') {
             context.addMessage('system', cadenceResult.systemMessage);
           }
 
           if (cadenceResult.decision === 'block' && cadenceResult.reason) {
-            // Watcher wants to realign — inject new work item
+            // Observer wants to realign — inject new work item
             if (cadenceResult.systemMessage) {
               context.addMessage('system', cadenceResult.systemMessage);
             }
@@ -1364,9 +1364,9 @@ export class Orchestrator {
       };
     }
 
-    // Apply async mode modifications to worker agents (not the watcher itself)
+    // Apply async mode modifications to worker agents (not the observer itself)
     // CRITICAL: Must clear outputSchema - structured output is incompatible with async mode
-    if (this.config.asyncMode?.enabled && agentType !== 'watcher' && agentType !== 'planner') {
+    if (this.config.asyncMode?.enabled && agentType !== 'observer' && agentType !== 'planner') {
       config = {
         ...config,
         systemPrompt: getAsyncAgentPrompt(),
@@ -1379,7 +1379,7 @@ export class Orchestrator {
 
     // Wire cadence check: invokes control hooks at tool-call thresholds for real oversight.
     // Fires every 60 tool calls OR every 5 minutes, whichever comes first.
-    // This gives the watcher real intervention power during execution.
+    // This gives the observer real intervention power during execution.
     let lastCadenceToolCalls = 0;
     let lastCadenceTimeMs = Date.now();
     const CADENCE_TOOL_THRESHOLD = 60;  // Every 60 tool calls
@@ -1477,8 +1477,8 @@ export class Orchestrator {
               assertNever(hookResult);
           }
         } catch (err) {
-          // Don't crash on watcher failure - log and continue
-          this.log('warning', 'Cadence check watcher invocation failed', {
+          // Don't crash on observer failure - log and continue
+          this.log('warning', 'Cadence check observer invocation failed', {
             error: err instanceof Error ? err.message : String(err),
           });
         }
@@ -1495,7 +1495,7 @@ export class Orchestrator {
       return { action: 'continue' };
     };
 
-    // Merge hooks: shouldStop for user interruption, cadenceCheck for watcher oversight
+    // Merge hooks: shouldStop for user interruption, cadenceCheck for observer oversight
     const mergedHooks: AgentHooks = {
       ...this.hooks,
       ...(runtime?.checkStopRequest ? { shouldStop: runtime.checkStopRequest } : {}),
@@ -2185,14 +2185,14 @@ export class Orchestrator {
       promptPreview: reason.slice(0, 100),
     });
 
-    // For user_input_required: the watcher answered the question.
+    // For user_input_required: the observer answered the question.
     // Inject the answer as a USER message (simulating user response),
     // not as a new goal. This preserves the conversational flow.
     if (terminationReason === 'user_input_required') {
       if (stopResult.systemMessage) {
         context.addMessage('system', stopResult.systemMessage);
       }
-      // The watcher's answer goes as a user message (like a human would respond)
+      // The observer's answer goes as a user message (like a human would respond)
       context.addMessage('user', reason);
       // Continue with a generic goal - the answer is now in context
       const newItem = this.createWorkItem('Continue with the provided answer', agentType);
@@ -2202,7 +2202,7 @@ export class Orchestrator {
       return true;
     }
 
-    // For handoff_requested: the watcher rejected the plan.
+    // For handoff_requested: the observer rejected the plan.
     // Inject the rejection message into context so the planner can revise.
     // Re-enqueue the work item so it can execute again with fresh agent state.
     if (terminationReason === 'handoff_requested') {
@@ -2233,7 +2233,7 @@ export class Orchestrator {
   /**
    * Enqueue deferred work items from a hook result.
    * These are fire-and-forget work items that don't block the current decision.
-   * When bounds are specified by the watcher, they override agent registry defaults.
+   * When bounds are specified by the observer, they override agent registry defaults.
    */
   private enqueueDeferredWork(stopResult: StopHookResult): void {
     const deferredWork = stopResult.deferredWork;
@@ -2429,7 +2429,7 @@ export class Orchestrator {
       this.log('info', 'Handoff requested - checking approval', { workId, specLength });
       this.mergeAgentResultContext(context, workId, result);
 
-      // Call stop hook for approval (watcher in async mode, or no-op in sync mode)
+      // Call stop hook for approval (observer in async mode, or no-op in sync mode)
       const stopResult = await this.callStopHook(
         context,
         'handoff_requested',
@@ -2445,14 +2445,14 @@ export class Orchestrator {
         totalToolCalls
       );
 
-      // If stop hook blocks, the watcher rejected the plan - planner should revise
+      // If stop hook blocks, the observer rejected the plan - planner should revise
       if (this.handleStopHookBlock(stopResult, context, agentType, iteration, 'handoff_requested')) {
         // Re-enqueue the same work item so the planner can revise
         return { terminal: null, shouldContinue: true, itemToRequeue: item };
       }
 
-      // Stop hook allowed - check if watcher approved (has stop hook registered)
-      // If a stop hook is registered and returned 'allow', the watcher approved the plan
+      // Stop hook allowed - check if observer approved (has stop hook registered)
+      // If a stop hook is registered and returned 'allow', the observer approved the plan
       // Parse the spec and enqueue work items
       if (stopResult && stopResult.decision === 'allow') {
         const workItems = this.parseHandoffSpec(result.handoffSpec, goal);
@@ -2562,15 +2562,15 @@ export class Orchestrator {
     }
 
     // ============================================================
-    // TERMINAL: Watcher stopped (mid-agent cadence check intervention)
+    // TERMINAL: Observer stopped (mid-agent cadence check intervention)
     // ============================================================
     if (result.terminationReason === 'watcher_stopped') {
-      this.log('info', 'Watcher stopped execution via cadence check', { workId });
+      this.log('info', 'Observer stopped execution via cadence check', { workId });
       this.mergeAgentResultContext(context, workId, result);
       return {
         terminal: this.createResult({
           success: !!result.response,
-          response: result.response || 'Execution stopped by watcher.',
+          response: result.response || 'Execution stopped by observer.',
           terminationReason: 'watcher_stopped',
           metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
         }),
@@ -2579,11 +2579,11 @@ export class Orchestrator {
     }
 
     // ============================================================
-    // WORK-ITEM STOP: watcher stopped this agent/work item only
+    // WORK-ITEM STOP: observer stopped this agent/work item only
     // ============================================================
     if (result.terminationReason === 'watcher_work_item_stopped') {
-      const reason = result.watcherStop?.reason ?? result.response ?? 'Watcher stopped this work item.';
-      this.log('info', 'Watcher stopped work item', { workId, reason: reason.slice(0, 160) });
+      const reason = result.watcherStop?.reason ?? result.response ?? 'Observer stopped this work item.';
+      this.log('info', 'Observer stopped work item', { workId, reason: reason.slice(0, 160) });
       this.mergeAgentResultContext(context, workId, result);
 
       this.hookQueue.enqueue({

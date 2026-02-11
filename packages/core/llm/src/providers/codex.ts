@@ -19,6 +19,7 @@ import type {
 } from 'types';
 import type { ProviderContext, LLMProviderAdapter } from './types.js';
 import { PartialStreamError } from './types.js';
+import { compileSchemaForCodex } from './schema_compiler.js';
 
 // ============================================
 // CODEX PROVIDER
@@ -70,11 +71,18 @@ export class CodexProvider implements LLMProviderAdapter {
       const schemaValue = (params.responseSchema as { schema?: unknown }).schema;
       const hasValidSchema = !!schemaValue && typeof schemaValue === 'object' && !Array.isArray(schemaValue);
       if (hasValidSchema) {
+        const schemaId = typeof params.responseSchema.schemaId === 'string'
+          ? params.responseSchema.schemaId
+          : undefined;
+        const compiledSchema = compileSchemaForCodex(
+          schemaValue as Record<string, unknown>,
+          schemaId
+        );
         body.text = {
           format: {
             type: 'json_schema',
             name: params.responseSchema.name,
-            schema: schemaValue as Record<string, unknown>,
+            schema: compiledSchema,
             strict: params.responseSchema.strict ?? true,
           },
         };

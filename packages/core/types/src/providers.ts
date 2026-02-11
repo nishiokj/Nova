@@ -156,8 +156,8 @@ export const PROVIDER_MODEL_DEFAULTS: Partial<
     powerful: 'gemini-3.0-pro',
   },
   'z.ai-coder': {
-    fast: 'glm-4.7',
-    standard: 'glm-4.7',
+    fast: 'glm-5',
+    standard: 'glm-5',
   },
   claude: {
     fast: 'claude-haiku-4',
@@ -297,15 +297,15 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     responseFormat: 'json_object',
     models: [
       {
-        id: 'glm-4.7',
-        name: 'GLM-4.7',
+        id: 'glm-5',
+        name: 'GLM-5',
         context_window: 128_000,
         description: 'Z.AI coding model with interleaved thinking',
         reasoning: ['on', 'off'],
       },
       {  
-        id: 'glm-4.7-flashx',
-        name: 'GLM-4.7-FlashX',
+        id: 'glm-5-flashx',
+        name: 'GLM-5-FlashX',
         context_window: 128_000,
         description: 'Fast Z.AI coding model with interleaved thinking',
         reasoning: ['on', 'off'],
@@ -323,8 +323,8 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     responseFormat: 'none',
     models: [
       {
-        id: 'zai-org/glm-4.7-flash',
-        name: 'GLM-4.7 Flash',
+        id: 'zai-org/glm-5-flash',
+        name: 'GLM-5 Flash',
         context_window: 32000,
         reasoning: ['on', 'off'],
       },

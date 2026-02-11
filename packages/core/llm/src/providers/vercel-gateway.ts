@@ -14,6 +14,7 @@ import type {
 } from 'types';
 import type { ProviderContext, LLMProviderAdapter } from './types.js';
 import { PartialStreamError } from './types.js';
+import { compileSchemaForOpenAI } from './schema_compiler.js';
 import { createRateLimitError } from '../rate-limits.js';
 import { parseApiErrorResponse, formatApiError } from '../response_schemas.js';
 
@@ -564,11 +565,15 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
     }
 
     if (params.responseSchema) {
+      const compiledSchema = compileSchemaForOpenAI(
+        params.responseSchema.schema,
+        params.responseSchema.schemaId
+      );
       body.response_format = {
         type: 'json_schema',
         json_schema: {
           name: params.responseSchema.name,
-          schema: params.responseSchema.schema,
+          schema: compiledSchema,
           strict: params.responseSchema.strict ?? true,
         },
       };
@@ -721,11 +726,15 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
     }
 
     if (params.responseSchema) {
+      const compiledSchema = compileSchemaForOpenAI(
+        params.responseSchema.schema,
+        params.responseSchema.schemaId
+      );
       body.response_format = {
         type: 'json_schema',
         json_schema: {
           name: params.responseSchema.name,
-          schema: params.responseSchema.schema,
+          schema: compiledSchema,
           strict: params.responseSchema.strict ?? true,
         },
       };

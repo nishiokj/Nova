@@ -24,10 +24,6 @@ import {
   type ProviderKeyRequiredData,
   type ModelChangedData,
   type UserPromptData,
-  type UserPromptQuestion,
-  type AgentQuestion,
-  type QuestionOption,
-  type QuestionType,
   type UsageSessionSummary,
   type UsageDayStats,
   type UsageProviderStats,
@@ -49,7 +45,7 @@ import { getColors, setTheme, getThemeNames, getCurrentThemeName, themes } from 
 import { applyVisualSpacing, hasAnsiCodes, parseTextSegments, visibleLength } from "./formatting.js";
 import { spawnForkedSession } from "./utils/fork-spawn.js";
 import { formatDiffAsText } from "./diff.js";
-import { wrapText, truncateText } from "./utils/index.js";
+import { truncateText } from "./utils/index.js";
 import {
   DEFAULT_MAX_INPUT_LINES,
   STREAM_CURSOR_FRAMES,
@@ -84,28 +80,28 @@ import {
 
 const NOVA_ANIM_FRAMES = [
   [
-    "⠀⠀⠠⡀⠂⢀⡄⠀⠀",
-    "⠀⠀⠂⢸⣿⡇⠠⠀⠀",
+    "⠀⠀⠠⡀⠂⢀⠄⠀⠀",
+    "⠀⠀⠂⢸⣿⡇⠐⠀⠀",
     "⠀⠀⠘⠁⠔⠈⠃⠀⠀",
   ],
   [
-    "⠀⠀⠢⡀⣃⢀⠤⠀⠀",
-    "⠀⠐⠀⢾⣿⡷⠀⠄⠀",
-    "⠀⢀⠖⠁⡭⠈⠲⠀⠀",
+    "⠀⠀⠢⡀⣃⢀⠔⠀⠀",
+    "⠀⠐⠀⢾⣿⡷⠀⠂⠀",
+    "⠀⢀⠖⠁⡭⠈⠲⡀⠀",
   ],
   [
-    "⠀⠈⠢⡀⣽⢀⡴⠂⠀",
-    "⠀⠂⠰⣿⣿⣿⠄⠠⠀",
-    "⠀⢠⠖⠉⣻⠉⠲⡀⠀",
+    "⠀⠈⠢⡀⣽⢀⠔⠁⠀",
+    "⠀⠂⠰⣿⣿⣿⠆⠐⠀",
+    "⠀⢠⠖⠉⣻⠉⠲⡄⠀",
   ],
   [
-    "⠀⠀⠢⡀⣃⢀⠤⠀⠀",
-    "⠀⠐⠀⢾⣿⡷⠀⠄⠀",
-    "⠀⢀⠖⠁⡭⠈⠲⠀⠀",
+    "⠀⠀⠢⡀⣃⢀⠔⠀⠀",
+    "⠀⠐⠀⢾⣿⡷⠀⠂⠀",
+    "⠀⢀⠖⠁⡭⠈⠲⡀⠀",
   ],
   [
-    "⠀⠀⠠⡀⠂⢀⡄⠀⠀",
-    "⠀⠀⠂⢸⣿⡇⠠⠀⠀",
+    "⠀⠀⠠⡀⠂⢀⠄⠀⠀",
+    "⠀⠀⠂⢸⣿⡇⠐⠀⠀",
     "⠀⠀⠘⠁⠔⠈⠃⠀⠀",
   ],
 ];
@@ -632,7 +628,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     onPasteEnd: () => {
       store.clearPasteProgress();
     },
-    enabled: !snapshot.helpVisible && snapshot.uiMode !== "question" && snapshot.uiMode !== "providers",
+    enabled: !snapshot.helpVisible && snapshot.uiMode !== "providers",
   });
 
   const handleBridgeEvent = (event: BridgeEvent) => {
@@ -1286,189 +1282,73 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     store.ensureInputCursorVisible(widthRef.current - 2, prompt, DEFAULT_MAX_INPUT_LINES);
   };
 
-  /**
-   * Validates user prompt event data at the boundary.
-   * Returns { valid: boolean, error?: string } with detailed error message if invalid.
-   */
-  const validateUserPromptData = (data: unknown): { valid: boolean; error?: string } => {
-    if (!data || typeof data !== 'object') {
-      return { valid: false, error: 'Data is missing or not an object' };
-    }
+  const AUTO_PROMPT_RESPONSE = "Proceed with best judgment and continue without waiting for user input.";
 
-    const payload = data as Record<string, unknown>;
+  const getOptionLabel = (option: string | { label: string; description?: string }): string | null => {
+    if (typeof option === "string") return option;
+    if (option && typeof option.label === "string" && option.label.length > 0) return option.label;
+    return null;
+  };
 
-    // Validate required request_id field
-    if (!payload.request_id || typeof payload.request_id !== 'string') {
-      return { valid: false, error: 'Missing or invalid request_id (must be a string)' };
-    }
+  const getDefaultPromptAnswer = (question: {
+    options?: Array<string | { label: string; description?: string }>;
+    multi_select?: boolean;
+    question_type?: string;
+  }): unknown => {
+    const options = question.options ?? [];
+    if (options.length === 0) return AUTO_PROMPT_RESPONSE;
 
-    // Validate that either question (single) or questions (array) is present
-    const hasSingleQuestion = 'question' in payload && typeof payload.question === 'string';
-    const hasMultipleQuestions = 'questions' in payload && Array.isArray(payload.questions);
-
-    if (!hasSingleQuestion && !hasMultipleQuestions) {
-      return { valid: false, error: 'Missing question or questions array' };
-    }
-
-    // Validate questions array is not empty
-    if (hasMultipleQuestions && (payload.questions as unknown[]).length === 0) {
-      return { valid: false, error: 'questions array must not be empty' };
-    }
-
-    // Validate questions array elements have required fields
-    if (hasMultipleQuestions) {
-      for (let i = 0; i < (payload.questions as unknown[]).length; i++) {
-        const q = (payload.questions as unknown[])[i];
-        if (!q || typeof q !== 'object') {
-          return { valid: false, error: `questions[${i}] is not an object` };
-        }
-        const questionObj = q as Record<string, unknown>;
-        if (!questionObj.question || typeof questionObj.question !== 'string') {
-          return { valid: false, error: `questions[${i}] missing or invalid question field` };
-        }
-      }
-    }
-
-    return { valid: true };
+    // Keep planning flows conservative by preferring the "stay in current mode" option.
+    const defaultIndex = (question.question_type === "plan_mode_exit" || question.question_type === "spec_review")
+      ? Math.min(1, options.length - 1)
+      : 0;
+    const label = getOptionLabel(options[defaultIndex]!) ?? getOptionLabel(options[0]!);
+    if (!label) return AUTO_PROMPT_RESPONSE;
+    return question.multi_select ? [label] : label;
   };
 
   const handleUserPrompt = (data?: UserPromptData) => {
-    // Validate at the entry point
-    const validation = validateUserPromptData(data);
-    if (!validation.valid) {
-      store.addMessage('system', `Invalid user prompt event: ${validation.error}`);
+    if (!data?.request_id || typeof data.request_id !== "string") {
+      store.addMessage("system", "Invalid user prompt event: missing request_id");
       return;
     }
 
-    // After validation, we know data is an object with required fields
-    const validatedData = data as { request_id: string; question?: string; questions?: unknown[] };
+    const questions = Array.isArray(data.questions) && data.questions.length > 0
+      ? data.questions
+      : (typeof data.question === "string"
+        ? [{
+          question: data.question,
+          options: data.options,
+          context: data.context,
+          multi_select: data.multi_select,
+          question_type: data.question_type,
+        }]
+        : []);
 
-    // Helper to infer question type from options and flags
-    const inferQuestionType = (
-      opts?: Array<string | { label: string; description?: string }>,
-      multiSelect?: boolean,
-      questionType?: string
-    ): QuestionType => {
-      if (questionType === "plan_mode_exit") return "plan_mode_exit";
-      if (questionType === "spec_review") return "spec_review";
-      if (!opts || opts.length === 0) return "free_text";
-      if (multiSelect) return "multi_select";
-      const labels = opts.map((opt) =>
-        (typeof opt === "string" ? opt : opt.label).toLowerCase()
-      );
-      if (labels.length === 2 && labels.every((l) => ["yes", "no", "y", "n"].includes(l))) {
-        return "yes_no";
-      }
-      return "multiple_choice";
-    };
-
-    // Helper to convert raw question data to AgentQuestion with defensive field guards
-    // Supports both snake_case (wire format) and camelCase (legacy) for robustness
-    const toAgentQuestion = (
-      q: UserPromptQuestion,
-      requestId: string,
-      index: number
-    ): AgentQuestion => {
-      // Guard against missing or empty question field (though validation should have caught this)
-      const questionText = q.question || 'Question text missing';
-
-      // Guard against missing options - default to empty array
-      const rawOptions = q.options || [];
-
-      // Safely map options, filtering out malformed ones
-      const processedOptions = rawOptions
-        .map((opt): QuestionOption | null => {
-          // Guard against null/undefined options
-          if (!opt) return null;
-
-          let label: string;
-          let description: string | undefined;
-
-          if (typeof opt === 'string') {
-            label = opt;
-          } else if (typeof opt === 'object' && opt.label) {
-            label = opt.label;
-            description = opt.description;
-          } else {
-            // Option object missing label - skip it
-            return null;
-          }
-
-          return {
-            id: label,
-            label,
-            description,
-          };
-        })
-        .filter((opt): opt is QuestionOption => opt !== null);
-
-      // Support both snake_case (wire format) and camelCase (legacy/agent format)
-      const qAny = q as unknown as Record<string, unknown>;
-      const multiSelect = q.multi_select ?? (qAny.multiSelect as boolean | undefined);
-      const questionType = q.question_type ?? (qAny.questionType as string | undefined);
-
-      return {
-        requestId: `${requestId}_q${index}`,
-        type: inferQuestionType(rawOptions, multiSelect, questionType),
-        question: questionText,
-        context: q.context,
-        options: processedOptions,
-      };
-    };
-
-    // Handle multiple questions
-    if (validatedData.questions && validatedData.questions.length > 0) {
-      const questions = validatedData.questions.map((q, i) =>
-        toAgentQuestion(q as UserPromptQuestion, validatedData.request_id, i)
-      );
-      store.setQuestionQueue(questions, validatedData.request_id);
+    if (questions.length === 0) {
+      store.addMessage("system", `Invalid user prompt event: no question text for request ${data.request_id}`);
       return;
     }
 
-    // Handle single question (backwards compatible)
-    if (!validatedData.question) return;
+    const answer = questions.length === 1
+      ? getDefaultPromptAnswer(questions[0]!)
+      : Object.fromEntries(
+        questions.map((question, index) => [
+          `${data.request_id}_q${index}`,
+          getDefaultPromptAnswer(question),
+        ])
+      );
 
-    // Guard against malformed options in single question branch
-    const rawSingleOptions = (data as UserPromptData).options || [];
-    const processedSingleOptions = rawSingleOptions
-      .map((opt): QuestionOption | null => {
-        // Guard against null/undefined options
-        if (!opt) return null;
+    const firstQuestion = questions[0]?.question ?? "Prompt received";
+    store.addMessage(
+      "system",
+      `PromptUser intercepted (${questions.length} question${questions.length === 1 ? "" : "s"}). Auto-answered to continue: ${truncateText(firstQuestion, 140)}`
+    );
 
-        let label: string;
-        let description: string | undefined;
-
-        if (typeof opt === 'string') {
-          label = opt;
-        } else if (typeof opt === 'object' && opt.label) {
-          label = opt.label;
-          description = opt.description;
-        } else {
-          // Option object missing label - skip it
-          return null;
-        }
-
-        return {
-          id: label,
-          label,
-          description,
-        };
-      })
-      .filter((opt): opt is QuestionOption => opt !== null);
-
-    const question: AgentQuestion = {
-      requestId: validatedData.request_id,
-      type: inferQuestionType(
-        rawSingleOptions,
-        (data as UserPromptData).multi_select,
-        (data as UserPromptData).question_type
-      ),
-      question: validatedData.question,
-      context: (data as UserPromptData).context,
-      options: processedSingleOptions,
-    };
-
-    store.setActiveQuestion(question, validatedData.request_id);
+    sendCommand("user_prompt_response", {
+      request_id: data.request_id,
+      answer,
+    });
   };
 
   const handleProviderKeyRequired = (data?: ProviderKeyRequiredData) => {
@@ -1822,169 +1702,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       }
 
       // Consume all other input in sessions mode
-      return;
-    }
-
-    // Question mode input handling
-    if (snapshot.uiMode === "question" && snapshot.activeQuestion) {
-      const questionType = snapshot.activeQuestion.type;
-
-      // Escape cancels the question
-      if (key.escape) {
-        store.clearQuestion();
-        return;
-      }
-
-      // Navigation for option-based questions
-      if (snapshot.activeQuestion.options && snapshot.activeQuestion.options.length > 0) {
-        if (key.upArrow) {
-          store.selectQuestionOption(-1);
-          return;
-        }
-        if (key.downArrow) {
-          store.selectQuestionOption(1);
-          return;
-        }
-
-        // Space toggles selection for multi-select
-        if (input === " " && questionType === "multi_select") {
-          store.toggleQuestionSelection();
-          return;
-        }
-
-        // Enter selects for single-select or submits for multi-select
-        if (key.return) {
-          if (questionType === "multiple_choice" || questionType === "yes_no" || questionType === "plan_mode_exit" || questionType === "spec_review") {
-            store.toggleQuestionSelection();
-          }
-
-          // Handle plan_mode_exit: if user selected first option ("Yes, exit"), disable plan mode
-          // Use questionCursor since toggleQuestionSelection sets selection = [cursor]
-          if (questionType === "plan_mode_exit") {
-            if (snapshot.questionCursor === 0) {
-              store.batch(() => {
-                store.setPlanMode(false);
-                store.addMessage("system", "Plan mode disabled. Full tool access restored.");
-              });
-            }
-          }
-
-          // Handle spec_review: if user selected first option ("Yes, execute"), disable plan mode
-          if (questionType === "spec_review") {
-            if (snapshot.questionCursor === 0) {
-              store.batch(() => {
-                store.setPlanMode(false);
-                store.addMessage("system", "Plan mode disabled. Executing implementation.");
-              });
-            }
-          }
-
-          // Format the answer for display before advancing
-          const currentQuestion = snapshot.activeQuestion;
-          let displayAnswer = '';
-          if (currentQuestion?.options && snapshot.questionSelection.length > 0) {
-            const selectedLabels = snapshot.questionSelection
-              .map(i => currentQuestion.options?.[i]?.label)
-              .filter(Boolean);
-            displayAnswer = selectedLabels.join(', ');
-          }
-
-          // Check if there are more questions in the queue
-          const hasMoreQuestions = store.saveAnswerAndAdvance();
-          if (!hasMoreQuestions) {
-            // All questions answered - send response
-            const requestId = store.getQuestionRequestId();
-            const allAnswers = store.getAllAnswers();
-            // For single question, send the single answer; for multiple, send array
-            const answer = allAnswers.size === 1
-              ? allAnswers.values().next().value
-              : Object.fromEntries(allAnswers);
-
-            // Add user's answer to chat history for visibility
-            if (displayAnswer) {
-              store.addMessage("user", displayAnswer);
-            }
-
-            sendCommand("user_prompt_response", {
-              request_id: requestId,
-              answer,
-            });
-            store.clearQuestion();
-          }
-          return;
-        }
-      }
-
-      // Text input for fill_in_blank/free_text
-      if (questionType === "fill_in_blank" || questionType === "free_text") {
-        // Handle backspace
-        const firstCharCode = input.length > 0 ? input.charCodeAt(0) : -1;
-        const isBackspace =
-          key.backspace || key.delete || input === "\x7f" || input === "\b" ||
-          firstCharCode === 127 || firstCharCode === 8;
-        if (isBackspace) {
-          store.backspaceQuestionInput();
-          return;
-        }
-
-        // Enter submits
-        if (key.return && !key.shift) {
-          // Capture the answer text before advancing
-          const answerText = snapshot.questionInput;
-
-          // Check if there are more questions in the queue
-          const hasMoreQuestions = store.saveAnswerAndAdvance();
-          if (!hasMoreQuestions) {
-            // All questions answered - send response
-            const requestId = store.getQuestionRequestId();
-            const allAnswers = store.getAllAnswers();
-            const answer = allAnswers.size === 1
-              ? allAnswers.values().next().value
-              : Object.fromEntries(allAnswers);
-
-            // Add user's answer to chat history for visibility
-            if (answerText) {
-              store.addMessage("user", answerText);
-            }
-
-            sendCommand("user_prompt_response", {
-              request_id: requestId,
-              answer,
-            });
-            store.clearQuestion();
-          }
-          return;
-        }
-
-        // Shift+Enter adds newline for free_text
-        if (key.return && key.shift && questionType === "free_text") {
-          store.appendQuestionInput("\n");
-          return;
-        }
-
-        // Regular text input
-        if (input && !key.ctrl && !key.meta) {
-          // Filter control chars and escape sequence fragments that leak through
-          // Preserve whitespace: tab (\x09), newline (\x0a), carriage return (\x0d)
-          // Remove other control characters: NUL through \x08, \x0b-\x0c, \x0e-\x1f, DEL (\x7f)
-          const printable = input
-            .replace(/[\x00-\x08\x0b\x0e-\x1f\x7f]/g, "")  // Control chars except tab/newline/cr
-            .replace(/\[200~/g, "")                        // Bracketed paste start
-            .replace(/\[201~/g, "")                        // Bracketed paste end
-            .replace(/\[[ABCD]/g, "")                      // Arrow key fragments [A, [B, [C, [D
-            .replace(/O[ABCD]/g, "")                       // Alt arrow key fragments OA, OB, OC, OD
-            .replace(/\[\d+~/g, "")                        // Function/special keys [5~, [6~, etc.
-            .replace(/\[\d+;\d+[~ABCDHF]/g, "")            // Modified keys with parameters
-            .replace(/\[<\d+;\d+;\d+[Mm]/g, "")// Mouse sequences
-            .replace(/\[?\[/g, "");            // Leftover brackets from sequences
-          if (printable) {
-            store.appendQuestionInput(printable);
-          }
-          return;
-        }
-      }
-
-      // Consume all input in question mode to prevent interference
       return;
     }
 
@@ -2915,8 +2632,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   };
 
   const colors = getColors();
-  const activeQuestion = snapshot.activeQuestion ?? null;
-  const isQuestionMode = snapshot.uiMode === "question" && !!activeQuestion;
   const statusLine = snapshot.progressMessage || snapshot.statusMessage;
   const statusSpinner = isBusy
     ? STATUS_SPINNER_FRAMES[statusTick % STATUS_SPINNER_FRAMES.length]
@@ -2940,12 +2655,42 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   const novaAnim = NOVA_ANIM_FRAMES[novaFrame];
   const gap = "  ";
-  const bannerLines = novaAnim.map((line, i) => `${novaTextLines[i]}${gap}${line}`);
+  const sourceLines = novaAnim.map((line, i) => `${novaTextLines[i]}${gap}${line}`);
+
+  // Composite 3 output lines with tight horizontal drop shadow
+  // Light from bottom-right → shadow cast 1 char left (same line)
+  // Shadow uses border color + dimColor for maximum depth
+  const bannerSegments: Array<Array<{ text: string; color: string; bold?: boolean; dim?: boolean }>> = [];
+  for (let y = 0; y < 3; y++) {
+    const chars = [...sourceLines[y]];
+    const segments: Array<{ text: string; color: string; bold?: boolean; dim?: boolean }> = [];
+
+    for (let x = 0; x < chars.length; x++) {
+      const fg = chars[x];
+      const sh = (x + 1) < chars.length ? chars[x + 1] : undefined;
+      const fgEmpty = !fg || fg === "\u2800" || fg === " ";
+      const shEmpty = !sh || sh === "\u2800" || sh === " ";
+
+      const char = !fgEmpty ? fg : !shEmpty ? sh : " ";
+      const color = !fgEmpty ? colors.accent : !shEmpty ? colors.border : "";
+      const bold = !fgEmpty ? true : undefined;
+      const dim = fgEmpty && !shEmpty ? true : undefined;
+
+      const last = segments[segments.length - 1];
+      if (last && last.color === color && last.bold === bold && last.dim === dim) {
+        last.text += char;
+      } else {
+        segments.push({ text: char, color, bold, dim });
+      }
+    }
+    bannerSegments.push(segments);
+  }
 
   const headerRows: Array<{
     left: string;
     right?: string;
     center?: string;
+    centerSegments?: Array<{ text: string; color: string; bold?: boolean; dim?: boolean }>;
     leftColor?: string;
     rightColor?: string;
     centerColor?: string;
@@ -2953,11 +2698,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     boldRight?: boolean;
     boldCenter?: boolean;
   }> = [
-    ...bannerLines.map((line) => ({
+    ...bannerSegments.map((segs) => ({
       left: "",
-      center: line,
-      centerColor: colors.accent,
-      boldCenter: true,
+      centerSegments: segs,
     })),
     {
       left: "─".repeat(contentWidth),
@@ -2966,96 +2709,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   ];
   const headerHeight = headerRows.length;
 
-  const buildQuestionRender = () => {
-    if (!activeQuestion) return null;
-    const textWidth = Math.max(20, contentWidth - MESSAGE_GUTTER * 2);
-    const questionLines = wrapText(activeQuestion.question, textWidth);
-    const contextLines = activeQuestion.context ? wrapText(activeQuestion.context, textWidth) : [];
-    const hasOptions = !!activeQuestion.options && activeQuestion.options.length > 0;
-    const isTextInput = activeQuestion.type === "fill_in_blank" || activeQuestion.type === "free_text";
-    const isMulti = activeQuestion.type === "multi_select";
-    const optionsLines: Array<{ text: string; muted?: boolean; strong?: boolean }> = [];
-
-    if (hasOptions) {
-      activeQuestion.options!.forEach((opt, idx) => {
-        const isCursor = idx === snapshot.questionCursor;
-        const isSelected = snapshot.questionSelection.includes(idx);
-        const cursorMarker = isCursor ? ">" : " ";
-        const selectMark = isMulti ? (isSelected ? "[x]" : "[ ]") : (isSelected ? "(x)" : "( )");
-        const indexLabel = `${idx + 1}.`.padStart(3, " ");
-        const prefix = `${cursorMarker} ${indexLabel} ${selectMark} `;
-        const labelWidth = Math.max(8, textWidth - prefix.length);
-        const labelLines = wrapText(opt.label, labelWidth);
-        labelLines.forEach((line, lineIdx) => {
-          const linePrefix = lineIdx === 0 ? prefix : " ".repeat(prefix.length);
-          optionsLines.push({
-            text: `${linePrefix}${line}`,
-            strong: isCursor || isSelected,
-          });
-        });
-        if (opt.description) {
-          const descPrefix = " ".repeat(prefix.length);
-          const descLines = wrapText(opt.description, Math.max(8, textWidth - descPrefix.length));
-          descLines.forEach((line) => {
-            optionsLines.push({
-              text: `${descPrefix}${line}`,
-              muted: true,
-            });
-          });
-        }
-      });
-    }
-
-    const queueInfo = store.getQuestionQueueInfo();
-    const showProgress = queueInfo && queueInfo.total > 1;
-    const progressText = showProgress ? `[${queueInfo.current}/${queueInfo.total}]` : "";
-
-    const needsGap = (hasOptions || isTextInput) && (questionLines.length > 0 || contextLines.length > 0);
-    const inputPrefix = "Answer: ";
-    const inputAvailable = Math.max(4, textWidth - inputPrefix.length - 1);
-    const inputPlaceholder = activeQuestion.placeholder || "Type your answer...";
-    const inputValue = snapshot.questionInput;
-    const inputDisplay = truncateText(inputValue.length > 0 ? inputValue : inputPlaceholder, inputAvailable);
-
-    const actionParts = ["Enter submit", "Esc cancel"];
-    if (isMulti) actionParts.splice(1, 0, "Space toggle");
-    if (activeQuestion.type === "free_text") actionParts.push("Shift+Enter newline");
-    const actionsText = actionParts.join(" | ");
-
-    const totalLines =
-      1 + // header
-      questionLines.length +
-      contextLines.length +
-      (needsGap ? 1 : 0) +
-      optionsLines.length +
-      (isTextInput ? 1 : 0) +
-      1; // actions
-
-    return {
-      questionLines,
-      contextLines,
-      optionsLines,
-      progressText,
-      needsGap,
-      isTextInput,
-      inputPrefix,
-      inputDisplay,
-      inputIsPlaceholder: inputValue.length === 0,
-      actionsText,
-      totalLines,
-    };
-  };
-
-  const questionRender = isQuestionMode ? buildQuestionRender() : null;
-  const questionBlockHeight = questionRender ? questionRender.totalLines : 0;
-
   const inputLayout = computeInputLayout(snapshot.inputText.split(""), snapshot.cursor, contentWidth, prompt);
   const inputVisibleLines = Math.min(DEFAULT_MAX_INPUT_LINES, inputLayout.lines.length);
   // inputBoxHeight = top line (1) + input lines + bottom line (1) + model indicator row (1) + context info row (0 or 1)
-  const hasContextInfo = !isQuestionMode && (snapshot.contextInputTokens !== null || snapshot.contextMaxWindowSize !== null || snapshot.cachedInput !== null);
-  const inputBoxHeight = isQuestionMode
-    ? questionBlockHeight + 1
-    : 1 + inputVisibleLines + 1 + 1 + (hasContextInfo ? 1 : 0);
+  const hasContextInfo = snapshot.contextInputTokens !== null || snapshot.contextMaxWindowSize !== null || snapshot.cachedInput !== null;
+  const inputBoxHeight = 1 + inputVisibleLines + 1 + 1 + (hasContextInfo ? 1 : 0);
   const autocompleteHeight = snapshot.autocomplete.active
     ? snapshot.autocomplete.suggestions.length + 1
     : 0;
@@ -3237,7 +2895,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     );
   }
 
-  // Question mode: render inline question text instead of a modal
   const isPermissionMode = snapshot.uiMode === "permission" && snapshot.activePermissionRequest;
   const isThemeMode = snapshot.uiMode === "theme";
   const isModelsMode = snapshot.uiMode === "models";
@@ -3388,6 +3045,19 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         const right = row.right ?? "";
         const center = row.center ?? "";
 
+        if (row.centerSegments) {
+          const totalLen = row.centerSegments.reduce((n, s) => [...s.text].length + n, 0);
+          const pad = Math.floor((contentWidth - totalLen) / 2);
+          return (
+            <Text key={`header-${index}`}>
+              <Text>{" ".repeat(Math.max(0, pad))}</Text>
+              {row.centerSegments.map((seg, si) => (
+                <Text key={si} color={seg.color || undefined} bold={seg.bold} dimColor={seg.dim}>{seg.text}</Text>
+              ))}
+            </Text>
+          );
+        }
+
         if (center && !left && !right) {
           // Centered text only
           const maxCenterLength = contentWidth;
@@ -3501,49 +3171,11 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         </Box>
       ) : (
         <>
-          {isQuestionMode && questionRender && (
-            <Box flexDirection="column" paddingX={MESSAGE_GUTTER}>
-              <Text>
-                <Text color={colors.warning} bold>? </Text>
-                <Text color={colors.text} bold>Question</Text>
-                {questionRender.progressText && (
-                  <Text color={colors.muted}> {questionRender.progressText}</Text>
-                )}
-              </Text>
-              {questionRender.questionLines.map((line, i) => (
-                <Text key={`q-inline-${i}`} color={colors.text}>{line}</Text>
-              ))}
-              {questionRender.contextLines.map((line, i) => (
-                <Text key={`q-context-${i}`} color={colors.muted}>{line}</Text>
-              ))}
-              {questionRender.needsGap && <Text> </Text>}
-              {questionRender.optionsLines.map((line, i) => (
-                <Text
-                  key={`q-opt-${i}`}
-                  color={line.muted ? colors.muted : colors.text}
-                  bold={line.strong}
-                >
-                  {line.text}
-                </Text>
-              ))}
-              {questionRender.isTextInput && (
-                <Text>
-                  <Text color={questionRender.inputIsPlaceholder ? colors.muted : colors.text}>
-                    {questionRender.inputPrefix}{questionRender.inputDisplay}
-                  </Text>
-                  <Text color={colors.accent}>|</Text>
-                </Text>
-              )}
-              <Text color={colors.muted}>{questionRender.actionsText}</Text>
-            </Box>
-          )}
-
           {/* Top separator line - runs edge to edge */}
-          {!isQuestionMode && <Text color={colors.border}>{horizontalLine}</Text>}
+          <Text color={colors.border}>{horizontalLine}</Text>
 
           {/* Input lines - no side borders */}
-          {!isQuestionMode && inputLines.map((line, index) => {
-            // Color the spinner character on the first line when agent is busy
+          {inputLines.map((line, index) => {
             if (index === 0 && isBusy) {
               return (
                 <Text key={`input-${index}`}>
@@ -3556,7 +3188,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           })}
 
           {/* Bottom separator line - runs edge to edge */}
-          {!isQuestionMode && <Text color={colors.border}>{horizontalLine}</Text>}
+          <Text color={colors.border}>{horizontalLine}</Text>
 
           {/* Model indicator row: model (Esc+M) | reasoning (Esc+T) */}
           <Text>
@@ -3600,7 +3232,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           </Text>
 
           {/* Context window info row: tokens / total size, and cached input */}
-          {!isQuestionMode && (snapshot.contextInputTokens !== null || snapshot.contextMaxWindowSize !== null || snapshot.cachedInput !== null) && (
+          {(snapshot.contextInputTokens !== null || snapshot.contextMaxWindowSize !== null || snapshot.cachedInput !== null) && (
             <Text>
               {(() => {
                 const padding = 2;

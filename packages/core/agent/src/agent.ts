@@ -20,7 +20,7 @@ import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, Structu
 import { isLLMMessageItem, isLLMFunctionCallItem, isLLMFunctionCallOutputItem } from 'types';
 import type { HandoffSpec } from 'protocol';
 import { createEvent, errorResult, successResult } from 'types';
-import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS, unwrapStructuredOutput } from 'shared';
+import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS, unwrapStructuredOutput } from 'shared';
 import { ContextWindow, buildSystemMessage } from 'context';
 import type { WorkItem } from 'work';
 import { createWorkItem } from 'work';
@@ -45,11 +45,12 @@ import {
   getCircuitStatus,
 } from './circuit-breaker-registry.js';
 import { TOOL_LIMITS, truncateToolOutput, isRefusal } from './constants.js';
+import { createMicroQueue } from './microqueue.js';
 
 import { DEFAULT_AGENT_BUDGET } from './types.js';
 
 /**
- * Cadence check interval: every N LLM iterations, invoke the watcher hook.
+ * Cadence check interval: every N LLM iterations, invoke the observer hook.
  * For a 50-iteration budget this gives 5 check-ins; for 20 iterations, 2.
  */
 const CADENCE_CHECK_INTERVAL = 10;
@@ -1137,7 +1138,7 @@ export class Agent {
         break;
       }
 
-      // Cadence check: watcher intervention point (every N LLM calls)
+      // Cadence check: observer intervention point (every N LLM calls)
       if (this.hooks?.cadenceCheck && iteration > 0 && iteration % CADENCE_CHECK_INTERVAL === 0) {
         const cadenceResult = await this.hooks.cadenceCheck({
           llmCallsMade: metrics.llmCallsMade,
@@ -1150,7 +1151,7 @@ export class Agent {
           if (cadenceResult.systemMessage) {
             localContext.addMessage('system', cadenceResult.systemMessage, workItem.workId);
           }
-          const stopReason = cadenceResult.reason ?? cadenceResult.systemMessage ?? 'Watcher requested stop.';
+          const stopReason = cadenceResult.reason ?? cadenceResult.systemMessage ?? 'Observer requested stop.';
           result.watcherStop = {
             reason: stopReason,
             escalationId: cadenceResult.escalationId,
@@ -2948,9 +2949,8 @@ export class Agent {
     const raw = coerceStructuredOutput(content);
     if (!raw) return null;
 
-    // Unwrap "result" envelope added by zodToJsonSchema for union schemas.
-    // OpenAI Structured Outputs requires root type: "object", so unions
-    // get wrapped in { result: <actual output> }.
+    // Unwrap provider-added envelopes (e.g., adapters that wrap non-object
+    // roots as { result: <actual output> } for structured-output constraints).
     const parsed = unwrapStructuredOutput(raw);
 
     if (!this.config.outputSchema) {

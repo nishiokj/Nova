@@ -29,21 +29,6 @@ export {
   type PlannerOutput,
 } from './structured_output.js';
 export {
-  WATCHER_TRIGGER_VALUES,
-  WATCHER_ACTION_VALUES,
-  WATCHER_NO_INTERVENTION_ACTION_VALUES,
-  VALID_WATCHER_ACTIONS_BY_TRIGGER,
-  isWatcherActionType,
-  isWatcherTrigger,
-  getValidWatcherActions,
-  assertValidActionForTrigger,
-  type ValidActionsFor,
-  type WatcherTrigger,
-  type WatcherActionType,
-  type WatcherNoInterventionAction,
-} from './watcher_contract.js';
-export { createMicroQueue, type MicroQueue, type MicroQueueOptions } from './microqueue.js';
-export {
   buildLLMRequestConfig,
   type ModelSelectionInput,
   type LLMParamsInput,
