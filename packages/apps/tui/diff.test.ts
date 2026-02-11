@@ -106,7 +106,7 @@ describe("formatDiffAsText", () => {
       }
     });
 
-    it("truncates long lines to width", () => {
+    it("wraps long lines to width", () => {
       const oldStr = "x".repeat(100);
       const newStr = "y".repeat(100);
       const filePath = "/path/to/file.ts";
@@ -118,6 +118,9 @@ describe("formatDiffAsText", () => {
       for (const line of result) {
         expect(line.length).toBeLessThanOrEqual(width);
       }
+
+      // Long diff content should produce wrapped rows (more than header + 2 diff lines)
+      expect(result.length).toBeGreaterThan(3);
     });
 
     it("does not pad when width is not specified", () => {
@@ -146,6 +149,21 @@ describe("formatDiffAsText", () => {
       const addedLine = result.find(line => line.includes("new line"));
       expect(addedLine).toBeDefined();
       expect(addedLine).toMatch(/\+\s+new line/);
+    });
+
+    it("keeps diff prefix on wrapped continuation rows", () => {
+      const oldStr = "";
+      const newStr = "a".repeat(120);
+      const width = 40;
+
+      const result = formatDiffAsText(oldStr, newStr, "/path/to/file.ts", 3, width);
+
+      // Skip header, inspect only diff rows
+      const diffRows = result.slice(1);
+      expect(diffRows.length).toBeGreaterThan(1);
+      for (const row of diffRows) {
+        expect(row).toMatch(/^\s*\d+\s\+\s/);
+      }
     });
 
     it("uses - prefix for removed lines", () => {

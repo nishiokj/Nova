@@ -79,6 +79,14 @@ export interface AgentConfig {
   llmParams: LLMParams;
   /** Structured output schema for responses */
   outputSchema?: StructuredOutputSchema;
+  /**
+   * Optional structured output parser override for plugin-owned schemas.
+   */
+  parseOutput?: (parsed: Record<string, unknown>, rawContent: string) => Record<string, unknown> | null;
+  /**
+   * Optional schema reminder override injected when action is missing.
+   */
+  schemaReminder?: string;
 }
 
 /**

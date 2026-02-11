@@ -1,0 +1,23 @@
+FROM oven/bun:1 AS build
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ node-gyp ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHON=/usr/bin/python3
+
+WORKDIR /opt/rex
+
+COPY package.json bun.lock tsconfig.base.json ./
+COPY harness_manifest.json ./
+COPY config ./config
+COPY scripts ./scripts
+COPY packages ./packages
+
+RUN bun install --frozen-lockfile
+RUN bun run build:packages
+
+FROM oven/bun:1 AS runtime
+
+WORKDIR /opt/rex
+COPY --from=build /opt/rex /opt/rex

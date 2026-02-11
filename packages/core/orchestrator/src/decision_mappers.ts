@@ -54,9 +54,9 @@ export function mapQualityDecisionToStopResult(decision: QualityGateDecision): S
     case 'passed':
       return { decision: 'allow' };
     case 'failed':
-      return { decision: 'block', reason: decision.issues.join('\n') };
+      return { decision: 'block', reason: decision.issues.join('\n') || 'Quality gate failed' };
     case 'needs_human':
-      return { decision: 'block', reason: decision.concerns.join('\n') };
+      return { decision: 'block', reason: decision.concerns.join('\n') || 'Quality gate requires human review' };
     default:
       return assertNever(decision);
   }

@@ -631,4 +631,392 @@ describe('Agent', () => {
       expect(result.error).toContain('Repeated identical tool call');
     });
   });
+
+  describe('Edge Cases', () => {
+    it('rejects done action when goalStateReached is false', async () => {
+      const llm = createMockLLM({
+        content: JSON.stringify({
+          action: 'done',
+          response: 'Finished',
+          goalStateReached: false,
+          awaitingUserInput: false,
+          handoffSpec: null,
+        }),
+        stopReason: 'end_turn',
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        model: 'test-model',
+        durationMs: 1,
+      });
+
+      const agent = new Agent({
+        type: 'standard',
+        systemPrompt: 'Test prompt',
+        tools: [],
+        budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 1000 },
+        outputSchema: { name: 'goal_driven_output', schema: { type: 'object' }, strict: true, schemaId: 'goal_driven' },
+      }, {
+        llm,
+        toolRegistry: createMockToolRegistry(),
+        llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+      });
+
+      const result = await agent.run({
+        globalContext: new ContextWindow('test-session', 200_000),
+        workItem: createWorkItem({ goal: 'test', objective: 'test' }),
+        cwd: process.cwd(),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.terminationReason).toBe('invalid_action');
+      expect(result.error).toContain('goalStateReached');
+    });
+
+    it('does not infer user input when action is done and goalStateReached is true', async () => {
+      const llm = createMockLLM({
+        content: JSON.stringify({
+          action: 'done',
+          response: 'Should I proceed? No, already complete.',
+          goalStateReached: true,
+          awaitingUserInput: false,
+          handoffSpec: null,
+        }),
+        stopReason: 'end_turn',
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        model: 'test-model',
+        durationMs: 1,
+      });
+
+      const agent = new Agent({
+        type: 'standard',
+        systemPrompt: 'Test prompt',
+        tools: [],
+        budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 1000 },
+        outputSchema: { name: 'goal_driven_output', schema: { type: 'object' }, strict: true, schemaId: 'goal_driven' },
+      }, {
+        llm,
+        toolRegistry: createMockToolRegistry(),
+        llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+      });
+
+      const result = await agent.run({
+        globalContext: new ContextWindow('test-session', 200_000),
+        workItem: createWorkItem({ goal: 'test', objective: 'test' }),
+        cwd: process.cwd(),
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.needsUserInput).toBe(false);
+      expect(result.terminationReason).toBe('goal_state_reached');
+    });
+
+    it('flags planning-speak as invalid even after done action', async () => {
+      const llm = createMockLLM({
+        content: JSON.stringify({
+          action: 'done',
+          response: "I'll analyze the codebase next and report back.",
+          goalStateReached: true,
+          awaitingUserInput: false,
+          handoffSpec: null,
+        }),
+        stopReason: 'end_turn',
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        model: 'test-model',
+        durationMs: 1,
+      });
+
+      const agent = new Agent({
+        type: 'standard',
+        systemPrompt: 'Test prompt',
+        tools: [],
+        budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 1000 },
+        outputSchema: { name: 'goal_driven_output', schema: { type: 'object' }, strict: true, schemaId: 'goal_driven' },
+      }, {
+        llm,
+        toolRegistry: createMockToolRegistry(),
+        llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+      });
+
+      const result = await agent.run({
+        globalContext: new ContextWindow('test-session', 200_000),
+        workItem: createWorkItem({ goal: 'test', objective: 'test' }),
+        cwd: process.cwd(),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.terminationReason).toBe('no_action');
+      expect(result.error).toContain('planning text');
+    });
+
+    it('fails explorer agents that read files but produce zero artifacts', async () => {
+      let streamCalls = 0;
+      const agent = new Agent({
+        type: 'explorer',
+        systemPrompt: 'Explorer test prompt',
+        tools: ['Read'],
+        budget: { maxIterations: 3, maxToolCalls: 3, maxDurationMs: 1000 },
+        outputSchema: { name: 'goal_driven_output', schema: { type: 'object' }, strict: true, schemaId: 'goal_driven' },
+      }, {
+        llm: {
+          respond: async () => ({
+            content: '',
+            stopReason: 'end_turn',
+            usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+            model: 'test-model',
+            durationMs: 1,
+          }),
+          stream: async function* () {
+            streamCalls++;
+            yield '';
+            if (streamCalls === 1) {
+              return {
+                content: '',
+                toolCalls: [{ id: 'r1', name: 'Read', arguments: { path: 'README.md' } }],
+                stopReason: 'tool_use',
+                usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+                model: 'test-model',
+                durationMs: 1,
+              };
+            }
+            return {
+              content: JSON.stringify({
+                action: 'done',
+                response: 'done',
+                goalStateReached: true,
+                awaitingUserInput: false,
+                handoffSpec: null,
+              }),
+              stopReason: 'end_turn',
+              usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+              model: 'test-model',
+              durationMs: 1,
+            };
+          },
+        } as LLMAdapter,
+        toolRegistry: createReadToolRegistry('export const x = 1;'),
+        llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+      });
+
+      const result = await agent.run({
+        globalContext: new ContextWindow('test-session', 200_000),
+        workItem: createWorkItem({ goal: 'test', objective: 'find symbols' }),
+        cwd: process.cwd(),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.terminationReason).toBe('invalid_action');
+      expect(result.filesRead.length).toBeGreaterThan(0);
+      expect(result.error).toContain('extracted 0 artifacts');
+    });
+
+    it('allows tool names case-insensitively and executes canonical tool', async () => {
+      let streamCalls = 0;
+      const executedNames: string[] = [];
+
+      const config: AgentConfig = {
+        type: 'standard',
+        systemPrompt: 'Test prompt',
+        tools: ['Read'],
+        budget: { maxIterations: 3, maxToolCalls: 3, maxDurationMs: 10000 },
+        outputSchema: { name: 'goal_driven_output', schema: { type: 'object' }, strict: true, schemaId: 'goal_driven' },
+      };
+
+      const agent = new Agent(config, {
+        llm: {
+          respond: async () => ({
+            content: '',
+            stopReason: 'end_turn',
+            usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+            model: 'test-model',
+            durationMs: 1,
+          }),
+          stream: async function* () {
+            streamCalls++;
+            yield '';
+            if (streamCalls === 1) {
+              return {
+                content: '',
+                toolCalls: [{ id: 'c1', name: 'read', arguments: { path: 'README.md' } }],
+                stopReason: 'tool_use',
+                usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+                model: 'test-model',
+                durationMs: 1,
+              };
+            }
+            return {
+              content: JSON.stringify({
+                action: 'done',
+                response: 'done',
+                goalStateReached: true,
+                handoffSpec: null,
+                awaitingUserInput: false,
+              }),
+              stopReason: 'end_turn',
+              usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+              model: 'test-model',
+              durationMs: 1,
+            };
+          },
+        } as LLMAdapter,
+        toolRegistry: {
+          getDefinitions: () => [],
+          getWorkingDir: () => process.cwd(),
+          isParallelSafe: () => false,
+          execute: async (name: string) => {
+            executedNames.push(name);
+            return successResult('Read', 'file-content', 1);
+          },
+        } as unknown as ToolRegistry,
+        llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+      });
+
+      const context = new ContextWindow('test-session', 200_000);
+      const workItem = createWorkItem({ goal: 'test', objective: 'test' });
+      const result = await agent.run({ globalContext: context, workItem, cwd: process.cwd() });
+
+      expect(result.success).toBe(true);
+      expect(result.terminationReason).toBe('goal_state_reached');
+      expect(executedNames).toEqual(['Read']);
+    });
+
+    it('leniently infers action when structured output omits action', async () => {
+      const llm = createMockLLM({
+        content: JSON.stringify({
+          response: 'I forgot action',
+          goalStateReached: true,
+          awaitingUserInput: false,
+          handoffSpec: null,
+        }),
+        stopReason: 'end_turn',
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        model: 'test-model',
+        durationMs: 1,
+      });
+
+      const agent = new Agent({
+        type: 'standard',
+        systemPrompt: 'Test prompt',
+        tools: [],
+        budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 1000 },
+        outputSchema: { name: 'goal_driven_output', schema: { type: 'object' }, strict: true, schemaId: 'goal_driven' },
+      }, {
+        llm,
+        toolRegistry: createMockToolRegistry(),
+        llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+      });
+
+      const result = await agent.run({
+        globalContext: new ContextWindow('test-session', 200_000),
+        workItem: createWorkItem({ goal: 'test', objective: 'test' }),
+        cwd: process.cwd(),
+      });
+
+      // Lenient parser infers action=done when goalStateReached=true.
+      expect(result.success).toBe(true);
+      expect(result.terminationReason).toBe('goal_state_reached');
+      expect(result.response).toBe('I forgot action');
+    });
+
+    it('infers user_input_required from conversational question text', async () => {
+      const llm = createMockLLM({
+        content: 'I need one clarification before continuing. Which environment should I target?',
+        stopReason: 'end_turn',
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        model: 'test-model',
+        durationMs: 1,
+      });
+
+      const agent = new Agent({
+        type: 'standard',
+        systemPrompt: 'Test prompt',
+        tools: [],
+        budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 1000 },
+      }, {
+        llm,
+        toolRegistry: createMockToolRegistry(),
+        llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+      });
+
+      const result = await agent.run({
+        globalContext: new ContextWindow('test-session', 200_000),
+        workItem: createWorkItem({ goal: 'test', objective: 'test' }),
+        cwd: process.cwd(),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.terminationReason).toBe('user_input_required');
+      expect(result.needsUserInput).toBe(true);
+      expect(result.userPrompt?.question).toContain('?');
+    });
+
+    it('marks refusal when done response matches refusal patterns', async () => {
+      const llm = createMockLLM({
+        content: JSON.stringify({
+          action: 'done',
+          response: 'This cannot be completed within the current budget.',
+          goalStateReached: true,
+          handoffSpec: null,
+          awaitingUserInput: false,
+        }),
+        stopReason: 'end_turn',
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        model: 'test-model',
+        durationMs: 1,
+      });
+
+      const agent = new Agent({
+        type: 'standard',
+        systemPrompt: 'Test prompt',
+        tools: [],
+        budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 1000 },
+        outputSchema: { name: 'goal_driven_output', schema: { type: 'object' }, strict: true, schemaId: 'goal_driven' },
+      }, {
+        llm,
+        toolRegistry: createMockToolRegistry(),
+        llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+      });
+
+      const result = await agent.run({
+        globalContext: new ContextWindow('test-session', 200_000),
+        workItem: createWorkItem({ goal: 'test', objective: 'test' }),
+        cwd: process.cwd(),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.isRefusal).toBe(true);
+      expect(result.terminationReason).toBe('refusal');
+      expect(result.error).toContain('refused');
+    });
+
+    it('terminates immediately when maxToolCalls is zero', async () => {
+      const llm = createMockLLM({
+        content: 'should never be called',
+        stopReason: 'end_turn',
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        model: 'test-model',
+        durationMs: 1,
+      });
+
+      const agent = new Agent({
+        type: 'standard',
+        systemPrompt: 'Test prompt',
+        tools: [],
+        budget: { maxIterations: 2, maxToolCalls: 5, maxDurationMs: 1000 },
+      }, {
+        llm,
+        toolRegistry: createMockToolRegistry(),
+        llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+      });
+
+      const result = await agent.run({
+        globalContext: new ContextWindow('test-session', 200_000),
+        workItem: createWorkItem({ goal: 'test', objective: 'test', bounds: { maxLlmCalls: 5, maxToolCalls: 0, maxDurationMs: 1000 } }),
+        cwd: process.cwd(),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.terminationReason).toBe('max_tool_calls_exceeded');
+      expect(result.metrics.llmCallsMade).toBe(0);
+      expect(result.error).toContain('max_tool_calls_exceeded');
+    });
+  });
 });

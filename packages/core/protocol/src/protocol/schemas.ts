@@ -6,7 +6,7 @@
  */
 
 import { z } from 'zod';
-import { WATCHER_ACTION_VALUES } from '../control/watcher.js';
+import { WATCHER_ACTION_VALUES } from 'shared';
 
 // ============================================
 // TERMINATION SCHEMAS

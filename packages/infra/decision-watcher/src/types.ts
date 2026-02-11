@@ -9,14 +9,14 @@
 import type { UserPromptInfo } from 'agent';
 import type { LLMAdapter } from 'llm';
 import {
-  VALID_ACTIONS_BY_TRIGGER,
-  getValidActions,
+  VALID_WATCHER_ACTIONS_BY_TRIGGER as VALID_ACTIONS_BY_TRIGGER,
+  getValidWatcherActions as getValidActions,
   assertValidActionForTrigger,
   type ValidActionsFor,
   type WatcherActionType,
   type WatcherNoInterventionAction,
   type WatcherTrigger,
-} from 'protocol';
+} from 'shared';
 
 // ============================================
 // DECISION TYPES

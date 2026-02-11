@@ -3185,7 +3185,7 @@ export class Agent {
     if ('action' in spec) return false;
     if (typeof spec.goal !== 'string' || spec.goal.trim().length === 0) return false;
     if (typeof spec.context !== 'string') return false;
-    if (!Array.isArray(spec.workItems) || spec.workItems.length === 0) return false;
+    if (!Array.isArray(spec.workItems)) return false;
 
     for (const item of spec.workItems) {
       if (!item || typeof item !== 'object') return false;

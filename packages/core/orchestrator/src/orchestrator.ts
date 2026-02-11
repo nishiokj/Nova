@@ -689,10 +689,9 @@ export class Orchestrator {
           }
           this.emitGoalNotAchieved(goal, 'max_iterations_exceeded');
           const harvestedResponse = this.harvestCompletedWork(state.inProgress, 'max_iterations_exceeded');
-          const hasContent = this.completedWork.size > 0;
           return {
             terminal: this.createResult({
-              success: hasContent,
+              success: false,
               response: harvestedResponse,
               terminationReason: 'max_iterations_exceeded',
               metrics: {
@@ -1171,10 +1170,11 @@ export class Orchestrator {
               continue;
             }
 
-            if (stopResult.decision === 'block' && stopResult.reason) {
+            if (stopResult.decision === 'block') {
+              const reason = stopResult.reason || 'Quality gate failed';
               this.log('info', 'Control hook blocked termination, re-injecting prompt', {
                 iteration,
-                promptPreview: stopResult.reason.slice(0, 100),
+                promptPreview: reason.slice(0, 100),
               });
 
               this.emit(createEvent('agent_progress', {
@@ -1187,7 +1187,7 @@ export class Orchestrator {
                 context.addMessage('system', stopResult.systemMessage);
               }
 
-              const newItem = this.createWorkItem(stopResult.reason, agentType);
+              const newItem = this.createWorkItem(reason, agentType);
               workQueue.enqueue(newItem);
 
               state.initialWorkCompleted = false;
@@ -2133,35 +2133,56 @@ export class Orchestrator {
   ): boolean {
     if (!stopResult) return false;
 
-    // Enqueue deferred work regardless of decision (block or allow)
+    // === HARD SAFETY CAP (checked first, before any processing) ===
+    // Every bounds_exceeded hook call counts toward the cap, regardless of decision type.
+    // This prevents alternating realign/split from bypassing maxRealigns.
+    const boundsReasons = ['max_iterations_exceeded', 'max_tool_calls_exceeded', 'max_duration_exceeded'];
+    const isBoundsExceeded = boundsReasons.includes(terminationReason ?? '');
+
+    if (isBoundsExceeded) {
+      this.realignCount++;
+      this.log('info', 'Bounds hook call count incremented', {
+        realignCount: this.realignCount,
+        maxRealigns: this.config.maxRealigns,
+        terminationReason,
+      });
+
+      if (this.realignCount > this.config.maxRealigns) {
+        this.log('warning', 'Max realigns exceeded, forcing termination', {
+          realignCount: this.realignCount,
+          terminationReason,
+        });
+        return false;
+      }
+    }
+
+    // === DEFERRED WORK ===
     const queueSizeBefore = this.workQueue.length;
     this.enqueueDeferredWork(stopResult);
     const deferredWorkAdded = this.workQueue.length > queueSizeBefore;
 
-    // CRITICAL: If deferred work was enqueued, we must continue even if decision is 'allow'
-    // This ensures work items from watcher are actually executed
-    // Also reset realign counter since splitting work is progress
     if (deferredWorkAdded) {
-      this.realignCount = 0; // Reset - splitting work is progress
-      this.log('info', 'Deferred work added, resetting realign counter', {
+      this.log('info', 'Deferred work added', {
         iteration,
         terminationReason,
         newItems: this.workQueue.length - queueSizeBefore,
         decision: stopResult.decision,
       });
       if (stopResult.decision !== 'block') {
-        return true; // Signal to continue, even though it's not a 'block'
+        return true;
       }
     }
 
-    if (stopResult.decision !== 'block' || !stopResult.reason) {
+    if (stopResult.decision !== 'block') {
       return false;
     }
+
+    const reason = stopResult.reason || 'Hook blocked termination';
 
     this.log('info', 'Control hook blocked termination, re-injecting prompt', {
       iteration,
       terminationReason,
-      promptPreview: stopResult.reason.slice(0, 100),
+      promptPreview: reason.slice(0, 100),
     });
 
     // For user_input_required: the watcher answered the question.
@@ -2172,7 +2193,7 @@ export class Orchestrator {
         context.addMessage('system', stopResult.systemMessage);
       }
       // The watcher's answer goes as a user message (like a human would respond)
-      context.addMessage('user', stopResult.reason);
+      context.addMessage('user', reason);
       // Continue with a generic goal - the answer is now in context
       const newItem = this.createWorkItem('Continue with the provided answer', agentType);
       this.enqueue(newItem);
@@ -2189,33 +2210,10 @@ export class Orchestrator {
         context.addMessage('system', stopResult.systemMessage);
       }
       // The rejection goes as a user message
-      context.addMessage('user', stopResult.reason);
+      context.addMessage('user', reason);
       // Re-enqueue the work item (do NOT create a new one or reset initialWorkId)
       // The planner will revise the plan on the same work item
       return true;
-    }
-
-    // For bounds_exceeded: track realign count and enforce limit to prevent infinite loops
-    // Check both orchestrator-level and agent-level termination reasons
-    const boundsReasons = ['max_iterations_exceeded', 'max_tool_calls_exceeded', 'max_duration_exceeded'];
-    const isBoundsExceeded = boundsReasons.includes(terminationReason ?? '');
-
-    if (isBoundsExceeded) {
-      this.realignCount++;
-      this.log('info', 'Realign count incremented for bounds exceeded', {
-        realignCount: this.realignCount,
-        maxRealigns: this.config.maxRealigns,
-        terminationReason,
-      });
-
-      if (this.realignCount > this.config.maxRealigns) {
-        this.log('warning', 'Max realigns exceeded, forcing termination', {
-          realignCount: this.realignCount,
-          terminationReason,
-        });
-        // Don't continue - force termination
-        return false;
-      }
     }
 
     // Default handling for other termination reasons (hook-directed continuation, bounds exceeded, etc.)
@@ -2224,7 +2222,7 @@ export class Orchestrator {
       context.addMessage('system', stopResult.systemMessage);
     }
 
-    const newItem = this.createWorkItem(stopResult.reason, agentType);
+    const newItem = this.createWorkItem(reason, agentType);
     this.enqueue(newItem);
     this.completedWork.delete(this.initialWorkId);
     this.initialWorkId = newItem.workId;

@@ -12,7 +12,7 @@ import {
   isWatcherTrigger,
   type WatcherActionType,
   type WatcherTrigger,
-} from 'protocol'
+} from 'shared'
 
 // ============ Execution Metrics ============
 

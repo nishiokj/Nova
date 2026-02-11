@@ -232,12 +232,35 @@ export function formatDiffAsText(
 
   // Diff lines with line numbers
   const lineNumWidth = 4;
+  const wrapDiffLine = (lineNum: string, prefix: string, content: string): string[] => {
+    // No width: keep original single-line behavior
+    if (!width) {
+      return [`${lineNum} ${prefix} ${content}`];
+    }
+
+    const rowPrefix = `${lineNum} ${prefix} `;
+    const contentWidth = Math.max(1, width - rowPrefix.length);
+
+    // Preserve empty content as an empty diff row
+    if (content.length === 0) {
+      return [padLine(rowPrefix)];
+    }
+
+    const rows: string[] = [];
+    for (let i = 0; i < content.length; i += contentWidth) {
+      const chunk = content.slice(i, i + contentWidth);
+      // Repeat line number + prefix so wrapped rows keep diff semantics/coloring
+      rows.push(padLine(`${rowPrefix}${chunk}`));
+    }
+    return rows;
+  };
+
   for (const line of lines) {
     const prefix = line.type === "added" ? "+" : line.type === "removed" ? "-" : " ";
     const lineNum = line.type === "added"
       ? String(line.lineNumber?.new ?? "").padStart(lineNumWidth, " ")
       : String(line.lineNumber?.old ?? "").padStart(lineNumWidth, " ");
-    output.push(padLine(`${lineNum} ${prefix} ${line.content}`));
+    output.push(...wrapDiffLine(lineNum, prefix, line.content));
   }
 
   // No end marker - spacing handled by message layout
