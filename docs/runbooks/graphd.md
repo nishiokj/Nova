@@ -9,7 +9,7 @@ bun run start:graphd
 Optional custom args:
 
 ```bash
-bun run packages/graphd/src/graphd.ts --host 127.0.0.1 --port 9444 --db-path ~/.graphd/graphd.db
+bun run packages/infra/graphd/src/graphd.ts --host 127.0.0.1 --port 9444 --db-path ~/.graphd/graphd.db
 ```
 
 ## Health

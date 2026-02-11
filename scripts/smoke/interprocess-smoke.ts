@@ -158,7 +158,7 @@ async function main(): Promise<void> {
 
     graphd = spawnManaged('graphd', [
       'run',
-      'packages/graphd/src/graphd.ts',
+      'packages/infra/graphd/src/graphd.ts',
       '--host', '127.0.0.1',
       '--port', String(graphdPort),
       '--db-path', join(runDir, 'graphd-smoke.db'),
@@ -178,7 +178,7 @@ async function main(): Promise<void> {
       'harness-daemon',
       [
         'run',
-        'packages/harness-daemon/src/index.ts',
+        'packages/infra/harness-daemon/src/index.ts',
         '--host', busHost,
         '--port', String(busPort),
         '--ws-port', String(wsPort),
@@ -217,7 +217,7 @@ async function main(): Promise<void> {
       'control-plane',
       [
         'run',
-        'packages/control-plane/src/control-plane.ts',
+        'packages/infra/control-plane/src/control-plane.ts',
         '--host', '127.0.0.1',
         '--port', String(controlPlanePort),
         '--bus-host', busHost,

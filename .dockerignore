@@ -1,0 +1,11 @@
+**
+
+!package.json
+!bun.lock
+!tsconfig.base.json
+!harness_manifest.json
+!config/**
+!scripts/**
+!packages/**
+!Dockerfile.rex-harness
+!.dockerignore

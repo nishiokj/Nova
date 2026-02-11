@@ -1,0 +1,53 @@
+{
+  "name": "decision-watcher",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Decision watcher for async agent orchestration - auto-answers PromptUser questions using a curated decision and preference database",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    },
+    "./db": {
+      "types": "./dist/db/index.d.ts",
+      "import": "./dist/db/index.js"
+    },
+    "./engine": {
+      "types": "./dist/engine/index.d.ts",
+      "import": "./dist/engine/index.js"
+    },
+    "./integration": {
+      "types": "./dist/integration/index.d.ts",
+      "import": "./dist/integration/index.js"
+    }
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "test": "bun test",
+    "lint": "eslint src --ext .ts"
+  },
+  "dependencies": {
+    "agent": "workspace:*",
+    "context": "workspace:*",
+    "types": "workspace:*",
+    "shared": "workspace:*",
+    "agent-memory": "workspace:*",
+    "llm": "workspace:*",
+    "tools": "workspace:*",
+    "work": "workspace:*",
+    "zod": "^4.3.5",
+    "protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.2",
+    "typescript": "^5.8.2"
+  }
+}

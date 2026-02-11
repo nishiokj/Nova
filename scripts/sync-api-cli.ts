@@ -10,7 +10,7 @@
  *   2. auth login <connector>    - Authenticate
  *   3. tasks <connector> create   - Create a sync task (interactive)
  *
- * See: packages/agent-memory/src/connectors/README.md for adding connectors.
+ * See: packages/plugins/agent-memory/src/connectors/README.md for adding connectors.
  */
 
 import { existsSync, readdirSync } from 'node:fs'
@@ -32,9 +32,9 @@ import {
   type CodingDecision,
   type AgentGoal,
   type AgentAction,
-} from '../packages/agent-memory/src/client/index.js'
-import { createDatabaseFromEnv } from '../packages/agent-memory/src/db/connection.ts'
-import { sendTelegramMessage, notifyAllUsers } from '../packages/agent-memory/src/connectors/telegram/notify.js'
+} from '../packages/plugins/agent-memory/src/client/index.js'
+import { createDatabaseFromEnv } from '../packages/plugins/agent-memory/src/db/connection.ts'
+import { sendTelegramMessage, notifyAllUsers } from '../packages/plugins/agent-memory/src/connectors/telegram/notify.js'
 
 const SYNC_DAEMON_URL = process.env.SYNC_DAEMON_URL || 'http://localhost:3001'
 const CALLBACK_PORT = parseInt(process.env.OAUTH_CALLBACK_PORT || '9876', 10)
@@ -746,7 +746,7 @@ const CONNECTOR_CONFIG_FIELDS: Record<string, ConfigField[]> = {
 // ============ Derived Script Discovery ============
 // Known directory for derived task scripts, relative to project root
 
-const DERIVED_SCRIPTS_DIR = 'packages/agent-memory/scripts'
+const DERIVED_SCRIPTS_DIR = 'packages/plugins/agent-memory/scripts'
 
 /** Scan for derive*.ts scripts (excluding test files) */
 function discoverDerivedScripts(): { name: string; path: string }[] {
@@ -2083,7 +2083,7 @@ async function cmdDigestsSample(limit?: number): Promise<void> {
 
 // ============ Goals ============
 
-function printGoal(goal: import('../packages/agent-memory/src/client/types.js').AgentGoal, index?: number): void {
+function printGoal(goal: import('../packages/plugins/agent-memory/src/client/types.js').AgentGoal, index?: number): void {
   const statusColors: Record<string, string> = {
     active: '\x1b[32m',
     paused: '\x1b[33m',
@@ -2126,7 +2126,7 @@ function printGoal(goal: import('../packages/agent-memory/src/client/types.js').
 }
 
 // Short ID index for goals
-let lastGoalsList: import('../packages/agent-memory/src/client/types.js').AgentGoal[] = []
+let lastGoalsList: import('../packages/plugins/agent-memory/src/client/types.js').AgentGoal[] = []
 
 async function cmdGoalsList(options?: {
   status?: string
@@ -2251,7 +2251,7 @@ async function cmdGoalsDueSoon(): Promise<void> {
 
 // ============ Actions ============
 
-function printAction(action: import('../packages/agent-memory/src/client/types.js').AgentAction, index?: number): void {
+function printAction(action: import('../packages/plugins/agent-memory/src/client/types.js').AgentAction, index?: number): void {
   const signalColors: Record<string, string> = {
     positive: '\x1b[32m',
     negative: '\x1b[31m',
@@ -2283,7 +2283,7 @@ function printAction(action: import('../packages/agent-memory/src/client/types.j
 }
 
 // Short ID index for actions
-let lastActionsList: import('../packages/agent-memory/src/client/types.js').AgentAction[] = []
+let lastActionsList: import('../packages/plugins/agent-memory/src/client/types.js').AgentAction[] = []
 
 async function cmdActionsList(options?: {
   action_type?: string
@@ -2579,7 +2579,7 @@ function printHelp(): void {
 
 \x1b[4mAdding Connectors:\x1b[0m
 
-  See: packages/agent-memory/src/connectors/README.md
+  See: packages/plugins/agent-memory/src/connectors/README.md
 
   1. Implement Connector interface in src/connectors/<name>/
   2. Register factory in src/connectors/registry.ts
@@ -3006,7 +3006,7 @@ async function main(): Promise<void> {
       printError(`${error.message}`)
       printErrorDetails(error.data)
       if (error.code === 'CONNECTION_ERROR') {
-        console.log('\nIs the daemon running? Try: bun run packages/agent-memory/scripts/sync-daemon.ts')
+        console.log('\nIs the daemon running? Try: bun run packages/plugins/agent-memory/scripts/sync-daemon.ts')
       }
     } else if (error instanceof Error) {
       printError(error.message)

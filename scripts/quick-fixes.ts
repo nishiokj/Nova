@@ -48,7 +48,7 @@ async function cleanupOldTestTasks() {
   const result = await client.query(`
     DELETE FROM derived_tasks
     WHERE name = 'test'
-      AND script_path = 'packages/agent-memory/scripts/derive-x-bookmarks.ts'
+      AND script_path = 'packages/plugins/agent-memory/scripts/derive-x-bookmarks.ts'
     RETURNING id
   `)
 

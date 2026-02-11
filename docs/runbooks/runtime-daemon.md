@@ -4,7 +4,7 @@
 
 ```bash
 EVENT_BUS_HOST=127.0.0.1 EVENT_BUS_PORT=9555 \
-bun run packages/harness-daemon/src/index.ts --host 127.0.0.1 --port 9555 --ws-port 9556 --idle-timeout 0
+bun run packages/infra/harness-daemon/src/index.ts --host 127.0.0.1 --port 9555 --ws-port 9556 --idle-timeout 0
 ```
 
 Important: daemon is GraphD client-only. Start GraphD first.

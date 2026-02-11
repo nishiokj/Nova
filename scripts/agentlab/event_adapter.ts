@@ -13,7 +13,7 @@
 import { createHash } from 'crypto';
 import { appendFileSync, writeFileSync, readFileSync, mkdirSync } from 'fs';
 import { dirname, resolve } from 'path';
-import type { AgentEvent } from '../../packages/types/src/events.ts';
+import type { AgentEvent } from '../../packages/core/types/src/events.ts';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 

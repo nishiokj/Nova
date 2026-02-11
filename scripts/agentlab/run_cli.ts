@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { AgentHarness, loadConfig } from '../../packages/harness-daemon/src/harness/index.ts';
+import { AgentHarness, loadConfig } from '../../packages/infra/harness-daemon/src/harness/index.ts';
 import { AgentLabEventAdapter } from './event_adapter.ts';
 import { randomUUID } from 'crypto';
 import { resolve } from 'path';
@@ -48,6 +48,30 @@ function buildOutput({ ids, outcome, latencyMs, answer, error }: {
   };
 }
 
+function getBindings(input: any): Record<string, unknown> {
+  if (!input || typeof input !== 'object') return {};
+  const bindings = (input as { bindings?: unknown }).bindings;
+  if (!bindings || typeof bindings !== 'object' || Array.isArray(bindings)) {
+    return {};
+  }
+  return bindings as Record<string, unknown>;
+}
+
+function asBool(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function asTier(value: unknown): 'simple' | 'standard' | 'complex' | undefined {
+  if (value === 'simple' || value === 'standard' || value === 'complex') return value;
+  return undefined;
+}
+
 async function main(): Promise<void> {
   const stdoutWrite = process.stdout.write.bind(process.stdout);
   // Redirect stdout logging to stderr so we can emit clean JSON to stdout.
@@ -84,8 +108,10 @@ async function main(): Promise<void> {
 
   const prompt = extractPrompt(input);
   const ids = input?.ids ?? {};
+  const bindings = getBindings(input);
+  const sessionPrefix = asString(bindings.session_key_prefix) ?? 'agentlab';
   const requestId = ids?.trial_id ? `req_${ids.trial_id}` : `req_${randomUUID()}`;
-  const sessionKey = ids?.trial_id ? `agentlab_${ids.trial_id}` : `agentlab_${randomUUID()}`;
+  const sessionKey = ids?.trial_id ? `${sessionPrefix}_${ids.trial_id}` : `${sessionPrefix}_${randomUUID()}`;
   const workingDir = process.cwd();
 
   if (!prompt) {
@@ -104,12 +130,15 @@ async function main(): Promise<void> {
   let adapter: AgentLabEventAdapter | null = null;
 
   try {
-    const configPath = process.env.HARNESS_CONFIG_PATH;
+    const configPath = asString(bindings.harness_config_path) ?? process.env.HARNESS_CONFIG_PATH;
     const config = loadConfig(configPath, workingDir);
-    // Reduce overhead for one-shot CLI runs.
-    config.entityGraph.enabled = false;
-    config.memory.enabled = false;
-    config.hooks.enabled = false;
+    // Reduce overhead for one-shot CLI runs; bindings can override.
+    const disableEntityGraph = asBool(bindings.disable_entity_graph) ?? true;
+    const disableMemory = asBool(bindings.disable_memory) ?? true;
+    const disableHooks = asBool(bindings.disable_hooks) ?? true;
+    config.entityGraph.enabled = !disableEntityGraph;
+    config.memory.enabled = !disableMemory;
+    config.hooks.enabled = !disableHooks;
     harness = new AgentHarness(config);
     await harness.start();
 
@@ -135,11 +164,15 @@ async function main(): Promise<void> {
     // Subscribe to EventBus for this run. runId === requestId in the harness.
     const unsubscribe = harness.getEventBus().subscribeRun(requestId, adapter.handle);
 
+    const tier = asTier(bindings.tier);
+    const planMode = asBool(bindings.plan_mode);
     const handle = harness.run({
       requestId,
       inputText: prompt,
       sessionKey,
       workingDir,
+      ...(tier ? { tier } : {}),
+      ...(planMode !== undefined ? { planMode } : {}),
     });
 
     const result = await handle.result;

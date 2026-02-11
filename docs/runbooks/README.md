@@ -12,8 +12,8 @@ Phase 5 deployability runbooks for each independently deployable component.
 ## Recommended Startup Order
 
 1. `bun run start:graphd`
-2. `bun run packages/harness-daemon/src/index.ts`
-3. `bun run packages/control-plane/src/control-plane.ts`
+2. `bun run packages/infra/harness-daemon/src/index.ts`
+3. `bun run packages/infra/control-plane/src/control-plane.ts`
 4. UI clients (`tui` / `dashboard-control`)
 
 ## Compatibility Smoke Test

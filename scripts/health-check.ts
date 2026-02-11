@@ -144,7 +144,7 @@ async function checkDerivedTasks() {
         severity: 'critical',
         category: 'Derived Tasks',
         message: 'Daily digest is failing - you\'re losing signal from your conversations',
-        action: 'Check logs/packages/logs/derived for timeout errors'
+        action: 'Check logs/derived for timeout errors'
       })
     }
   }

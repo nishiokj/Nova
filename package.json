@@ -4,60 +4,73 @@
   "description": "Config-driven, multi-tier agent system with composable agent primitives",
   "type": "module",
   "workspaces": [
-    "packages/*"
+    "packages/core/*",
+    "packages/infra/*",
+    "packages/plugins/*",
+    "packages/external/*",
+    "packages/apps/*"
   ],
   "files": [
-    "packages/*/dist/**",
-    "packages/*/package.json",
+    "packages/core/*/dist/**",
+    "packages/infra/*/dist/**",
+    "packages/plugins/*/dist/**",
+    "packages/external/*/dist/**",
+    "packages/apps/*/dist/**",
+    "packages/core/*/package.json",
+    "packages/infra/*/package.json",
+    "packages/plugins/*/package.json",
+    "packages/external/*/package.json",
+    "packages/apps/*/package.json",
     "config/**",
     "package.json",
     "README.md"
   ],
   "exports": {
-    ".": "./packages/launcher/dist/index.js",
+    ".": "./packages/apps/launcher/dist/index.js",
     "./llm": {
-      "import": "./packages/llm/dist/index.js",
-      "types": "./packages/llm/dist/index.d.ts"
+      "import": "./packages/core/llm/dist/index.js",
+      "types": "./packages/core/llm/dist/index.d.ts"
     },
     "./agent": {
-      "import": "./packages/agent/dist/index.js",
-      "types": "./packages/agent/dist/index.d.ts"
+      "import": "./packages/core/agent/dist/index.js",
+      "types": "./packages/core/agent/dist/index.d.ts"
     },
     "./types": {
-      "import": "./packages/types/dist/index.js",
-      "types": "./packages/types/dist/index.d.ts"
+      "import": "./packages/core/types/dist/index.js",
+      "types": "./packages/core/types/dist/index.d.ts"
     },
     "./shared": {
-      "import": "./packages/shared/dist/index.js",
-      "types": "./packages/shared/dist/index.d.ts"
+      "import": "./packages/core/shared/dist/index.js",
+      "types": "./packages/core/shared/dist/index.d.ts"
     },
     "./protocol": {
-      "import": "./packages/protocol/dist/index.js",
-      "types": "./packages/protocol/dist/index.d.ts"
+      "import": "./packages/core/protocol/dist/index.js",
+      "types": "./packages/core/protocol/dist/index.d.ts"
     }
   },
   "bin": {
-    "rex": "./packages/launcher/dist/index.js",
-    "rex-daemon": "./packages/harness-daemon/dist/index.js"
+    "rex": "./packages/apps/launcher/dist/index.js",
+    "rex-daemon": "./packages/infra/harness-daemon/dist/index.js"
   },
   "scripts": {
+    "agentlab:build-experiment": "bun run scripts/agentlab/build_experiment.ts",
     "prepublishOnly": "bun run build",
     "build": "bun run build:packages && bun run build:apps",
-    "build:packages": "bun run --cwd packages/types build && bun run --cwd packages/shared build && bun run --cwd packages/prompt-protocol build && bun run --cwd packages/protocol build && bun run --cwd packages/work build && bun run --cwd packages/llm build && bun run --cwd packages/context build && bun run --cwd packages/tools build && bun run --cwd packages/agent build && bun run --cwd packages/comms-bus build && bun run --cwd packages/harness-client build && bun run --cwd packages/agent-memory build && bun run --cwd packages/memory-injector build && bun run --cwd packages/decision-watcher build && bun run --cwd packages/orchestrator build && bun run --cwd packages/graphd build && bun run --cwd packages/entity-graph build",
-    "build:apps": "bun run --cwd packages/harness-daemon build && bun run --cwd packages/control-plane build && bun run --cwd packages/tui build && bun run --cwd packages/launcher build && bun run --cwd packages/dashboard-control build",
-    "clean": "bun run --cwd packages/types clean && bun run --cwd packages/shared clean && bun run --cwd packages/prompt-protocol clean && bun run --cwd packages/protocol clean && bun run --cwd packages/work clean && bun run --cwd packages/llm clean && bun run --cwd packages/context clean && bun run --cwd packages/tools clean && bun run --cwd packages/agent clean && bun run --cwd packages/agent-memory clean && bun run --cwd packages/memory-injector clean && bun run --cwd packages/orchestrator clean && bun run --cwd packages/decision-watcher clean && bun run --cwd packages/graphd clean && bun run --cwd packages/comms-bus clean && bun run --cwd packages/entity-graph clean && bun run --cwd packages/harness-client clean && bun run --cwd packages/harness-daemon clean && bun run --cwd packages/control-plane clean && bun run --cwd packages/tui clean && bun run --cwd packages/launcher clean && rm -f packages/*/tsconfig.tsbuildinfo",
-    "lint": "bun run --cwd packages/types lint && bun run --cwd packages/shared lint && bun run --cwd packages/llm lint && bun run --cwd packages/context lint && bun run --cwd packages/tools lint && bun run --cwd packages/agent lint && bun run --cwd packages/orchestrator lint && bun run --cwd packages/graphd lint && bun run --cwd packages/comms-bus lint && bun run --cwd packages/control-plane lint",
+    "build:packages": "bun run --cwd packages/external/prompt-protocol build && bun run --cwd packages/core/protocol build && bun run --cwd packages/plugins/semantic-compiler build && bun run --cwd packages/core/types build && bun run --cwd packages/core/shared build && bun run --cwd packages/core/work build && bun run --cwd packages/core/llm build && bun run --cwd packages/core/context build && bun run --cwd packages/core/tools build && bun run --cwd packages/core/agent build && bun run --cwd packages/infra/comms-bus build && bun run --cwd packages/infra/harness-client build && bun run --cwd packages/plugins/agent-memory build && bun run --cwd packages/plugins/memory-injector build && bun run --cwd packages/infra/decision-watcher build && bun run --cwd packages/core/orchestrator build && bun run --cwd packages/infra/graphd build && bun run --cwd packages/plugins/entity-graph build",
+    "build:apps": "bun run --cwd packages/infra/harness-daemon build && bun run --cwd packages/infra/control-plane build && bun run --cwd packages/apps/tui build && bun run --cwd packages/apps/launcher build && bun run --cwd packages/apps/dashboard-control build",
+    "clean": "bun run --cwd packages/core/types clean && bun run --cwd packages/core/shared clean && bun run --cwd packages/external/prompt-protocol clean && bun run --cwd packages/core/protocol clean && bun run --cwd packages/core/work clean && bun run --cwd packages/core/llm clean && bun run --cwd packages/core/context clean && bun run --cwd packages/core/tools clean && bun run --cwd packages/core/agent clean && bun run --cwd packages/plugins/agent-memory clean && bun run --cwd packages/plugins/memory-injector clean && bun run --cwd packages/core/orchestrator clean && bun run --cwd packages/infra/decision-watcher clean && bun run --cwd packages/plugins/semantic-compiler clean && bun run --cwd packages/infra/graphd clean && bun run --cwd packages/infra/comms-bus clean && bun run --cwd packages/plugins/entity-graph clean && bun run --cwd packages/infra/harness-client clean && bun run --cwd packages/infra/harness-daemon clean && bun run --cwd packages/infra/control-plane clean && bun run --cwd packages/apps/tui clean && bun run --cwd packages/apps/launcher clean && rm -f packages/core/*/tsconfig.tsbuildinfo packages/infra/*/tsconfig.tsbuildinfo packages/plugins/*/tsconfig.tsbuildinfo packages/external/*/tsconfig.tsbuildinfo packages/apps/*/tsconfig.tsbuildinfo",
+    "lint": "bun run --cwd packages/core/types lint && bun run --cwd packages/core/shared lint && bun run --cwd packages/core/llm lint && bun run --cwd packages/core/context lint && bun run --cwd packages/core/tools lint && bun run --cwd packages/core/agent lint && bun run --cwd packages/core/orchestrator lint && bun run --cwd packages/plugins/semantic-compiler lint && bun run --cwd packages/infra/graphd lint && bun run --cwd packages/infra/comms-bus lint && bun run --cwd packages/infra/control-plane lint",
     "daemon": "bun run start:daemon",
-    "start:graphd": "bun run packages/graphd/src/graphd.ts",
-    "start:daemon": "bun run --cwd packages/harness-daemon start",
-    "start:split": "bun run packages/launcher/index.ts --daemon-only",
-    "start:split:restart": "bun run packages/launcher/index.ts --daemon-only --restart",
+    "start:graphd": "bun run packages/infra/graphd/src/graphd.ts",
+    "start:daemon": "bun run --cwd packages/infra/harness-daemon start",
+    "start:split": "bun run packages/apps/launcher/index.ts --daemon-only",
+    "start:split:restart": "bun run packages/apps/launcher/index.ts --daemon-only --restart",
     "split": "bun run start:split",
-    "start:tui": "bun run --cwd packages/tui start",
-    "start": "bun run --cwd packages/launcher start",
+    "start:tui": "bun run --cwd packages/apps/tui start",
+    "start": "bun run --cwd packages/apps/launcher start",
     "smoke:interprocess": "bun run scripts/smoke/interprocess-smoke.ts",
-    "typecheck:split-runtime": "bun run --cwd packages/types lint && bun run --cwd packages/shared lint && bun run --cwd packages/protocol lint && bun run --cwd packages/comms-bus lint && bun run --cwd packages/harness-client lint && bun run --cwd packages/graphd lint && bun run --cwd packages/agent-memory lint && bun run --cwd packages/harness-daemon lint && bun run --cwd packages/control-plane lint",
-    "test:split-runtime": "bun test packages/graphd/src/store.metadata_merge.test.ts packages/harness-daemon/src/harness/bridge_gateway.test.ts packages/control-plane/src/harness/control_plane_routes.test.ts",
+    "typecheck:split-runtime": "bun run --cwd packages/core/types lint && bun run --cwd packages/core/shared lint && bun run --cwd packages/core/protocol lint && bun run --cwd packages/infra/comms-bus lint && bun run --cwd packages/infra/harness-client lint && bun run --cwd packages/infra/graphd lint && bun run --cwd packages/plugins/agent-memory lint && bun run --cwd packages/infra/harness-daemon lint && bun run --cwd packages/infra/control-plane lint",
+    "test:split-runtime": "bun test packages/infra/graphd/src/store.metadata_merge.test.ts packages/infra/harness-daemon/src/harness/bridge_gateway.test.ts packages/infra/control-plane/src/harness/control_plane_routes.test.ts",
     "profile": "PROFILE=1 bun run start",
     "profile:daemon": "PROFILE=1 bun run start:daemon"
   },
@@ -74,6 +87,9 @@
     "pg": "^8.18.0",
     "pg-connection-string": "^2.11.0",
     "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "tree-sitter-javascript": "0.25.0"
   },
   "repository": {
     "type": "git",

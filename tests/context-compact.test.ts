@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'bun:test';
-import { ContextWindow } from '../packages/context/src/context-window.js';
+import { ContextWindow } from '../packages/core/context/src/context-window.js';
 import type { LLMAdapter, LLMResponse } from 'types';
 
 describe('ContextWindow.compact() State Machine', () => {

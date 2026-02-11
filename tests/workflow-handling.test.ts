@@ -23,7 +23,7 @@ import type {
   NormalizedSessionEvent,
   SessionRollup,
   SessionPanelStatus,
-} from '../packages/dashboard-control/src/lib/api/types';
+} from '../packages/apps/dashboard-control/src/lib/api/types';
 
 // Simulate backend session row
 interface SessionRow {
