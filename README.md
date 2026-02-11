@@ -28,35 +28,43 @@ cp .env.example .env
 # Edit .env with your API keys
 
 # 4. Run the CLI
-bun run packages/launcher/index.ts
+bun run packages/apps/launcher/index.ts
 ```
 
 ## Project Structure
 
 ```
 packages/
-  launcher/          # CLI entry point
-  harness-daemon/    # Harness runtime + TCP bus entrypoint
-  tui/               # Ink-based React terminal UI
-  dashboard/         # Web dashboard (React/Vite)
-  dashboard-compact/ # Compact web dashboard
-  agent/             # Agent primitives
-  agent-memory/      # Memory and knowledge graph
-  orchestrator/      # DAG-based task orchestration
-  llm/               # Multi-provider LLM adapters
-  tools/             # Built-in tool implementations
-  context/           # Context window management
-  comms-bus/         # JSONL/TCP bus + EventBus
-  graphd/            # SQLite persistence layer
-  types/             # Shared TypeScript types
-  shared/            # Shared utilities
-  work/              # WorkItem definitions
-  protocol/          # Communication protocol types
-  harness-client/    # Harness client library
-  entity-graph/      # Entity relationship graph
-  decision-watcher/  # Decision tracking
-  semantic-compiler/ # Semantic invariant compiler (VP + verification planning)
-  memory-injector/   # Memory injection utilities
+  core/              # Core primitives and contracts
+    agent/
+    context/
+    llm/
+    orchestrator/
+    protocol/        # Domain/control/effects/hooks/protocol schemas
+    shared/
+    tools/
+    types/
+    work/
+  infra/             # Runtime infrastructure + transport/services
+    comms-bus/
+    control-plane/
+    decision-watcher/
+    graphd/
+    harness-client/
+    harness-daemon/
+  plugins/           # Optional/bolt-on modules
+    agent-memory/
+    entity-graph/
+    memory-injector/
+    semantic-compiler/
+  external/          # Vendored external dependencies
+    prompt-protocol/
+  apps/              # User-facing clients and entrypoints
+    launcher/
+    tui/
+    dashboard/
+    dashboard-compact/
+    dashboard-control/
 
 scripts/             # Shell and utility scripts
 config/              # Configuration files
@@ -185,24 +193,24 @@ GOOGLE_CLIENT_SECRET=...
 bun install
 
 # Run the CLI
-bun run packages/launcher/index.ts
+bun run packages/apps/launcher/index.ts
 
 # Run TUI directly
-bun run packages/tui/index.tsx
+bun run packages/apps/tui/index.tsx
 
 # Run harness daemon (bus server)
-bun run packages/harness-daemon/src/index.ts
+bun run packages/infra/harness-daemon/src/index.ts
 
 # Run GraphD (standalone datastore process)
-bun run packages/graphd/src/graphd.ts
+bun run packages/infra/graphd/src/graphd.ts
 
 # Run control-plane server (HTTP API + dashboard)
-bun run packages/control-plane/src/control-plane.ts
+bun run packages/infra/control-plane/src/control-plane.ts
 
 # Recommended split startup order:
 # 1) bun run start:graphd
-# 2) bun run packages/harness-daemon/src/index.ts
-# 3) bun run packages/control-plane/src/control-plane.ts
+# 2) bun run packages/infra/harness-daemon/src/index.ts
+# 3) bun run packages/infra/control-plane/src/control-plane.ts
 
 # Type check all packages
 bun run --filter '*' tsc --noEmit

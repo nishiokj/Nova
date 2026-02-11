@@ -1,0 +1,232 @@
+{
+  "uow_id": "tui-model-selection-configured-only",
+  "status": "needs_user_approval",
+  "execution_ready": false,
+  "system_surface": {
+    "services": [
+      "TUI (packages/apps/tui/index.tsx, store.ts)",
+      "Harness Bridge Gateway (packages/infra/harness-daemon/src/harness/bridge_gateway.ts)",
+      "Provider Registry (packages/core/types/src/providers.ts)"
+    ],
+    "storage": [
+      "GraphD user preferences (user_prefs:hidden_models)",
+      "Provider key/access state via harness.hasApiKey(provider)"
+    ],
+    "ui_surfaces": [
+      "Esc+M model cycling in chat footer",
+      "/models selection screen list"
+    ],
+    "external_dependencies": [
+      "Configured provider credentials (API keys / OAuth)"
+    ],
+    "main_flows": [
+      "TUI sends get_models",
+      "Bridge gateway emits response metadata.kind=models with payload + available",
+      "TUI stores payload in modelsList and available in modelsAvailableList",
+      "Esc+M cycles through modelsAvailableList and sends set_model"
+    ]
+  },
+  "determinism_defaults": {
+    "seed": 1337,
+    "fixtures": "Static provider-access matrix via harness.hasApiKey stubs",
+    "timeouts_ms": {
+      "event_wait": 500,
+      "ui_assert": 500
+    },
+    "restart_semantics": "Not required for this change"
+  },
+  "invariants": [
+    {
+      "id": "INV-1",
+      "raw": "Esc+M must only cycle models from providers that are configured (or otherwise accessible), never unconfigured providers.",
+      "refined": {
+        "intent": "Esc+M cycles only through currently accessible models.",
+        "scope": [
+          "TUI cycleModel()",
+          "bridge get_models response metadata.available and metadata.payload"
+        ],
+        "operational_definition": [
+          "Given metadata.available contains only models where hasApiKey(provider) is true, Esc+M selects only entries from modelsAvailableList.",
+          "No set_model command is emitted for a model whose provider is inaccessible."
+        ]
+      },
+      "assumptions": [
+        "Accessibility is defined by harness.hasApiKey(provider) (or provider auth state).",
+        "TUI modelsAvailableList mirrors metadata.available from latest get_models response."
+      ],
+      "verification_strategy": "ui_scenario + api_scenario",
+      "verification_plan": {
+        "steps": [
+          {
+            "type": "harness_setup",
+            "id": "S1",
+            "action": "Stub provider access: openai=true, anthropic=false, groq=false",
+            "assert": "hasApiKey(provider) returns configured matrix"
+          },
+          {
+            "type": "action",
+            "id": "S2",
+            "action": "Issue get_models",
+            "assert": "Receive response kind=models"
+          },
+          {
+            "type": "assert",
+            "id": "S3",
+            "action": "Validate metadata.payload providers",
+            "assert": "Every payload[i].provider is accessible"
+          },
+          {
+            "type": "action",
+            "id": "S4",
+            "action": "Trigger Esc+M repeatedly N times in TUI",
+            "assert": "N equals payload length + 1 for wrap check"
+          },
+          {
+            "type": "trace_check",
+            "id": "S5",
+            "action": "Inspect emitted set_model commands",
+            "assert": "Each set_model.provider is in accessible provider set"
+          }
+        ],
+        "evidence": [
+          "Captured models response JSON",
+          "TUI event log for Esc+M actions",
+          "Serialized set_model command trace"
+        ]
+      },
+      "verdict_rule": "PASS iff payload and all Esc+M set_model emissions contain only accessible providers.",
+      "compile_status": "compiled"
+    },
+    {
+      "id": "INV-2",
+      "raw": "Non-existent Jimmy provider/models must not appear as options in model selection.",
+      "refined": {
+        "intent": "Remove Jimmy from supported provider registry and model defaults so it never appears in TUI model options.",
+        "scope": [
+          "packages/core/types/src/providers.ts",
+          "bridge get_models sourced from provider registry"
+        ],
+        "operational_definition": [
+          "SupportedProvider union does not include 'jimmy'.",
+          "PROVIDER_MODEL_DEFAULTS has no 'jimmy' key.",
+          "PROVIDER_REGISTRY has no 'jimmy' entry.",
+          "get_models payload contains no model with provider='jimmy' and no model id prefixed jimmy-."
+        ]
+      },
+      "assumptions": [
+        "All selectable models are derived from provider registry and runtime accessibility filtering."
+      ],
+      "verification_strategy": "api_scenario + trace_checker",
+      "verification_plan": {
+        "steps": [
+          {
+            "type": "assert",
+            "id": "S6",
+            "action": "Static check providers.ts",
+            "assert": "No 'jimmy' in SupportedProvider / PROVIDER_MODEL_DEFAULTS / PROVIDER_REGISTRY"
+          },
+          {
+            "type": "action",
+            "id": "S7",
+            "action": "Issue get_models",
+            "assert": "Receive response kind=models"
+          },
+          {
+            "type": "assert",
+            "id": "S8",
+            "action": "Scan models payload",
+            "assert": "No provider='jimmy' and no id matching /^jimmy-/"
+          }
+        ],
+        "evidence": [
+          "Git diff for providers.ts",
+          "models payload sample",
+          "Search output showing zero jimmy references in packages/**/*.ts(x)|.json"
+        ]
+      },
+      "verdict_rule": "PASS iff Jimmy is absent from registry/defaults/types and from get_models output.",
+      "compile_status": "compiled"
+    },
+    {
+      "id": "INV-3",
+      "raw": "If no providers are configured, Esc+M should show a clear no-accessible-models message and not attempt set_model.",
+      "refined": {
+        "intent": "Esc+M fails safely with explicit guidance when modelsAvailableList is empty.",
+        "scope": [
+          "TUI cycleModel() in index.tsx"
+        ],
+        "operational_definition": [
+          "When modelsAvailableList.length === 0, TUI appends system message: 'No accessible models. Configure a provider with /providers.'",
+          "No set_model command is emitted in this branch."
+        ]
+      },
+      "assumptions": [
+        "modelsAvailableList is authoritative for accessible models."
+      ],
+      "verification_strategy": "ui_scenario + trace_checker",
+      "verification_plan": {
+        "steps": [
+          {
+            "type": "harness_setup",
+            "id": "S9",
+            "action": "Stub all providers inaccessible",
+            "assert": "hasApiKey(provider) => false for all"
+          },
+          {
+            "type": "action",
+            "id": "S10",
+            "action": "Fetch models then trigger Esc+M once",
+            "assert": "modelsAvailableList is empty"
+          },
+          {
+            "type": "assert",
+            "id": "S11",
+            "action": "Inspect rendered system message",
+            "assert": "Exact no-accessible-models string present"
+          },
+          {
+            "type": "trace_check",
+            "id": "S12",
+            "action": "Inspect outgoing commands",
+            "assert": "No set_model command emitted after Esc+M"
+          }
+        ],
+        "evidence": [
+          "TUI history snapshot containing system message",
+          "Command trace proving no set_model call"
+        ]
+      },
+      "verdict_rule": "PASS iff message is shown and set_model is absent when no models are accessible.",
+      "compile_status": "compiled"
+    }
+  ],
+  "compile_findings": [
+    {
+      "level": "info",
+      "message": "Provider accessibility is currently computed at gateway via hasApiKey(provider), enabling deterministic filtering at source."
+    },
+    {
+      "level": "info",
+      "message": "TUI already cycles from modelsAvailableList; aligning payload with available enforces configured-only options in both Esc+M and /models UI."
+    }
+  ],
+  "unresolved_questions": [],
+  "definition_of_done": {
+    "items": [
+      "get_models returns only accessible models in metadata.payload",
+      "Esc+M cycles only accessible providers",
+      "Esc+M with zero accessible models shows explicit message and emits no set_model",
+      "Jimmy provider/models removed from provider type union, defaults, and registry",
+      "No 'jimmy' entries in runtime model list"
+    ],
+    "required_evidence": [
+      "git diff for bridge_gateway.ts, index.tsx, providers.ts",
+      "models response sample",
+      "command trace from Esc+M path"
+    ]
+  },
+  "approval_gate": {
+    "required": true,
+    "prompt": "Approve this Verification Program as the interpretation of your spec? (approve | edit | reject)"
+  }
+}

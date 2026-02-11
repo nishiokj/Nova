@@ -23,7 +23,7 @@ import {
   DEFAULT_RESILIENCE_CONFIG,
   type CircuitBreakerState,
   type ResilienceConfig,
-} from '../packages/llm/src/retry.js';
+} from '../packages/core/llm/src/retry.js';
 
 describe('Circuit Breaker State Machine', () => {
   let state: CircuitBreakerState;

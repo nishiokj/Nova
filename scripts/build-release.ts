@@ -64,7 +64,7 @@ const ALL_TARGETS: Target[] = [
   { name: 'windows-x64', bunTarget: 'bun-windows-x64', ext: '.exe' },
 ];
 
-const ENTRY = './packages/launcher/standalone.ts';
+const ENTRY = './packages/apps/launcher/standalone.ts';
 const OUT_DIR = './dist/binaries';
 
 async function main() {

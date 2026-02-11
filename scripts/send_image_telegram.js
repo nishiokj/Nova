@@ -7,7 +7,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 // Get chat_id from user
 async function getChatId() {
   // Read sessions if they exist
-  const sessionsPath = '/Users/jevinnishioka/Desktop/jesus/packages/agent-memory/data/telegram-sessions.json';
+  const sessionsPath = '/Users/jevinnishioka/Desktop/jesus/packages/plugins/agent-memory/data/telegram-sessions.json';
   if (fs.existsSync(sessionsPath)) {
     const sessions = JSON.parse(fs.readFileSync(sessionsPath, 'utf8'));
     const chatIds = Object.keys(sessions);

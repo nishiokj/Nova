@@ -1,5 +1,5 @@
-import { BridgeClient } from '../../packages/tui/bridge_client.ts';
-import { GraphStore } from '../../packages/graphd/src/store.ts';
+import { BridgeClient } from '../../packages/apps/tui/bridge_client.ts';
+import { GraphStore } from '../../packages/infra/graphd/src/store.ts';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';

@@ -12,13 +12,13 @@
  */
 
 import { describe, it, expect, beforeEach } from 'bun:test';
-import { createWorkItem, type WorkItem, DEFAULT_WORK_BOUNDS } from '../packages/agent-core/src/work/work-item.js';
-import { ContextWindow } from '../packages/agent-core/src/context/context-window.js';
+import { createWorkItem, type WorkItem, DEFAULT_WORK_BOUNDS } from '../packages/core/agent-core/src/work/work-item.js';
+import { ContextWindow } from '../packages/core/agent-core/src/context/context-window.js';
 import {
   DEFAULT_ORCHESTRATOR_CONFIG,
   type OrchestratorConfig,
   type TerminationReason,
-} from '../packages/agent-core/src/orchestrator/orchestrator.js';
+} from '../packages/core/agent-core/src/orchestrator/orchestrator.js';
 
 describe('Work Item Creation', () => {
   describe('createWorkItem factory', () => {

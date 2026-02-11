@@ -152,7 +152,7 @@ bun run scripts/sync-api-cli.ts derived-tasks delete <id>     # Delete task
 ```bash
 bun run scripts/sync-api-cli.ts derived-tasks create
 # Interactive wizard will prompt for:
-# - Script path (auto-discovers from packages/agent-memory/scripts/)
+# - Script path (auto-discovers from packages/plugins/agent-memory/scripts/)
 # - Task name
 # - Mode: once, recurring, or event
 # - Interval (for recurring)
@@ -399,7 +399,7 @@ When you modify code in the `/jesus` repo that affects your own runtime (TUI, da
 
 **When NOT to use:**
 - You only changed runtime data (database records, config files, `.env`)
-- You only changed standalone scripts (`scripts/`, `packages/agent-memory/scripts/`) that run independently
+- You only changed standalone scripts (`scripts/`, `packages/plugins/agent-memory/scripts/`) that run independently
 - You changed documentation or non-code files
 
 **Usage:**
@@ -416,7 +416,7 @@ Pass your current session key so you can be reconnected after the rebuild. The s
 
 After regeneration, reconnect with:
 ```bash
-bun run packages/launcher/index.ts --session '<session-key>'
+bun run packages/apps/launcher/index.ts --session '<session-key>'
 ```
 
 Or let Telegram handle reconnection automatically via the sync daemon.
@@ -513,7 +513,7 @@ You can create and manage scheduled jobs by writing scripts and registering them
 ### Step-by-Step: Creating a New Job
 
 1. **Write the Script**
-   - Create a TypeScript script in `packages/agent-memory/scripts/`
+   - Create a TypeScript script in `packages/plugins/agent-memory/scripts/`
    - Name it with `derive-` prefix (e.g., `derive-weather-alert.ts`)
    - Import necessary utilities from the sync client
    - Implement your processing logic
@@ -536,7 +536,7 @@ You can create and manage scheduled jobs by writing scripts and registering them
 ### Example: Weather Alert Job
 
 ```typescript
-// packages/agent-memory/scripts/derive-weather-alert.ts
+// packages/plugins/agent-memory/scripts/derive-weather-alert.ts
 import { DerivedTaskContext } from '../src/client/index.js'
 
 export async function run(ctx: DerivedTaskContext) {

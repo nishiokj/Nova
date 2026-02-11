@@ -23,95 +23,95 @@
         "tests/**/*.test.ts"
       ]
     },
-    "packages/types": {
+    "packages/core/types": {
       "entry": ["src/index.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/shared": {
+    "packages/core/shared": {
       "entry": ["src/index.ts", "src/**/*.test.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/protocol": {
+    "packages/core/protocol": {
       "entry": ["src/index.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/prompt-protocol": {
+    "packages/external/prompt-protocol": {
       "entry": ["src/index.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/work": {
+    "packages/core/work": {
       "entry": ["src/index.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/llm": {
+    "packages/core/llm": {
       "entry": ["src/index.ts", "src/**/*.test.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/context": {
+    "packages/core/context": {
       "entry": ["src/index.ts", "src/**/*.test.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/tools": {
+    "packages/core/tools": {
       "entry": ["src/index.ts", "src/**/*.test.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/agent": {
+    "packages/core/agent": {
       "entry": ["src/index.ts", "src/**/*.test.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/agent-memory": {
+    "packages/plugins/agent-memory": {
       "entry": ["src/index.ts", "src/connectors/telegram/index.ts", "src/connectors/telegram/types.ts", "scripts/**/*.ts", "src/**/*.test.ts"],
       "project": ["src/**/*.ts", "scripts/**/*.ts"]
     },
-    "packages/comms-bus": {
+    "packages/infra/comms-bus": {
       "entry": ["src/index.ts", "src/**/*.test.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/entity-graph": {
+    "packages/plugins/entity-graph": {
       "entry": ["src/index.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/graphd": {
+    "packages/infra/graphd": {
       "entry": ["src/index.ts", "src/**/*.test.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/harness-client": {
+    "packages/infra/harness-client": {
       "entry": ["src/index.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/harness-daemon": {
+    "packages/infra/harness-daemon": {
       "entry": ["src/index.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/memory-injector": {
+    "packages/plugins/memory-injector": {
       "entry": ["src/index.ts", "src/**/*.test.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/decision-watcher": {
+    "packages/infra/decision-watcher": {
       "entry": ["src/index.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/orchestrator": {
+    "packages/core/orchestrator": {
       "entry": ["src/index.ts", "src/**/*.test.ts"],
       "project": ["src/**/*.ts"]
     },
-    "packages/launcher": {
+    "packages/apps/launcher": {
       "entry": ["index.ts", "standalone.ts"],
       "project": ["**/*.ts"]
     },
-    "packages/tui": {
+    "packages/apps/tui": {
       "entry": ["main.ts", "index.tsx", "components/index.ts", "**/*.test.{ts,tsx}"],
       "project": ["**/*.{ts,tsx}"]
     },
-    "packages/dashboard": {
+    "packages/apps/dashboard": {
       "entry": ["src/main.tsx"],
       "project": ["src/**/*.{ts,tsx}"]
     },
-    "packages/dashboard-compact": {
+    "packages/apps/dashboard-compact": {
       "entry": ["src/main.tsx"],
       "project": ["src/**/*.{ts,tsx}"]
     },
-    "packages/dashboard-control": {
+    "packages/apps/dashboard-control": {
       "entry": ["src/main.tsx", "src/**/*.test.{ts,tsx}"],
       "project": ["src/**/*.{ts,tsx}"]
     }

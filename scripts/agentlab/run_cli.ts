@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { AgentHarness, loadConfig } from '../../packages/harness-daemon/src/harness/index.ts';
+import { AgentHarness, loadConfig } from '../../packages/infra/harness-daemon/src/harness/index.ts';
 import { AgentLabEventAdapter } from './event_adapter.ts';
 import { randomUUID } from 'crypto';
 import { resolve } from 'path';

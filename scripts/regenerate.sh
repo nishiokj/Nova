@@ -16,7 +16,7 @@ set -euo pipefail
 #   2. Kills the current TUI (graceful SIGTERM, session persists)
 #   3. Rebuilder: bun run clean && bun run build
 #   4. Rebuilder: starts daemon headless (--daemon-only --restart)
-#   5. Reconnect with: bun run packages/launcher/index.ts --session <key>
+#   5. Reconnect with: bun run packages/apps/launcher/index.ts --session <key>
 #
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -37,9 +37,9 @@ if [[ "${2:-}" == "--rebuild" ]]; then
     sleep 5
 
     # Ensure old processes are dead
-    pkill -f "packages/launcher/index" 2>/dev/null || true
-    pkill -f "packages/tui/index" 2>/dev/null || true
-    pkill -f "packages/harness-daemon" 2>/dev/null || true
+    pkill -f "packages/apps/launcher/index" 2>/dev/null || true
+    pkill -f "packages/apps/tui/index" 2>/dev/null || true
+    pkill -f "packages/infra/harness-daemon" 2>/dev/null || true
     sleep 2
 
     cd "$PROJECT_ROOT"
@@ -51,12 +51,12 @@ if [[ "${2:-}" == "--rebuild" ]]; then
     bun run build 2>&1
 
     echo "[$(date)] Starting daemon (headless)..."
-    bun run packages/launcher/index.ts --daemon-only &
+    bun run packages/apps/launcher/index.ts --daemon-only &
     DAEMON_PID=$!
 
     echo "[$(date)] Done. Daemon PID: $DAEMON_PID"
     echo "[$(date)] Reconnect with:"
-    echo "  bun run packages/launcher/index.ts --session '$SESSION_KEY'"
+    echo "  bun run packages/apps/launcher/index.ts --session '$SESSION_KEY'"
     exit 0
 fi
 
@@ -73,7 +73,7 @@ echo "  Session: $SESSION_KEY"
 echo "  Log:     $LOG_FILE"
 echo ""
 echo "Reconnect after rebuild:"
-echo "  bun run packages/launcher/index.ts --session '$SESSION_KEY'"
+echo "  bun run packages/apps/launcher/index.ts --session '$SESSION_KEY'"
 echo ""
 echo "Shutting down..."
 
@@ -81,5 +81,5 @@ sleep 1
 
 # Kill the TUI/launcher — our ancestor process.
 # The detached rebuilder is already running independently.
-pkill -TERM -f "packages/launcher/index" 2>/dev/null || \
-pkill -TERM -f "packages/tui/index" 2>/dev/null || true
+pkill -TERM -f "packages/apps/launcher/index" 2>/dev/null || \
+pkill -TERM -f "packages/apps/tui/index" 2>/dev/null || true

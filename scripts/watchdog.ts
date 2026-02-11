@@ -24,8 +24,8 @@ import { statSync, readFileSync, existsSync } from 'fs'
 import path from 'path'
 import { parseArgs } from 'node:util'
 import postgres from 'postgres'
-import { HarnessClient } from '../packages/harness-client/src/index.js'
-import { notifyAllUsers } from '../packages/agent-memory/src/connectors/telegram/notify.js'
+import { HarnessClient } from '../packages/infra/harness-client/src/index.js'
+import { notifyAllUsers } from '../packages/plugins/agent-memory/src/connectors/telegram/notify.js'
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 
@@ -280,7 +280,7 @@ function killDaemon(): void {
   }
   // Also kill launcher if running
   try {
-    execSync('pkill -TERM -f "packages/launcher/index"', { stdio: 'ignore' })
+    execSync('pkill -TERM -f "packages/apps/launcher/index"', { stdio: 'ignore' })
   } catch {
     // No process to kill
   }

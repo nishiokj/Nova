@@ -3,7 +3,7 @@
   "$comment": "Default configuration for the harness. User config at ~/.rex/config.json overrides these values. API keys are stored in GraphD - use 'rex providers set <provider> <key>' to configure.",
 
   "models": {
-    "$comment": "Available models are defined in packages/types/src/providers.ts.",
+    "$comment": "Available models are defined in packages/core/types/src/providers.ts.",
     "available": [],
     "default": ""
   },

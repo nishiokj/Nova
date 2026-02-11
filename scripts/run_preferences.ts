@@ -3,7 +3,7 @@
  * Run the preferences derived task
  */
 
-import { SyncClient } from '../packages/agent-memory/src/client/index.js'
+import { SyncClient } from '../packages/plugins/agent-memory/src/client/index.js'
 
 const SYNC_DAEMON_URL = process.env.SYNC_DAEMON_URL || 'http://localhost:3001'
 const client = new SyncClient(SYNC_DAEMON_URL)
@@ -14,7 +14,7 @@ async function main() {
   // Create the derived task
   const created = await client.derivedTasks.create({
     name: 'preferences',
-    scriptPath: 'packages/agent-memory/scripts/derive_preferences.ts',
+    scriptPath: 'packages/plugins/agent-memory/scripts/derive_preferences.ts',
     mode: 'once',
   })
   const task = created.task
