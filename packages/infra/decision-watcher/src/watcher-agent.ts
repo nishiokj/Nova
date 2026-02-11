@@ -10,6 +10,12 @@
 
 import fs from 'fs/promises';
 import { randomUUID } from 'crypto';
+import { Agent, type AgentConfig, type AgentRegistry, type EventEmitCallback, type MemoryInjector, type ModelSelection } from 'agent';
+import type { LLMAdapter } from 'llm';
+import type { ToolRegistry } from 'tools';
+import { ContextWindow } from 'context';
+import { createWorkItem } from 'work';
+import { buildLLMRequestConfig } from 'shared';
 import {
   assertNever,
   createHook,
@@ -40,12 +46,19 @@ import {
   isWorkItemCompleted,
   success,
 } from 'protocol';
-import type { EscalationType } from 'types';
+import type { EscalationType, LLMRequestConfig } from 'types';
 import type { WatcherAction, WatcherTrigger, DecisionLogEntry, WatcherWorkItem, WatcherActionType, WorkLogEntry, WatcherSemanticBatchEntry } from './types.js';
-import { getValidActions } from './types.js';
+import { assertValidActionForTrigger, getValidActions } from './types.js';
 import type { DecisionLog } from './decision-log.js';
 import type { WorkLog } from './work-log.js';
 import type { WorkItemLog } from './workitem-log.js';
+import {
+  buildWatcherParseOutput,
+  getWatcherSchemaJsonForActions,
+  parseWatcherOutput,
+  WATCHER_SCHEMA_REMINDER,
+  type WatcherActionOutput,
+} from './output-schemas.js';
 import { appendSalienceObservation } from './salience.js';
 import {
   extractPreProcessedContext,
@@ -492,8 +505,8 @@ export interface WatcherAgentConfig {
   /** Get workitem-level log (full conversation, tool calls, scoped decisions) */
   getWorkItemLog: (workId: string) => Promise<WorkItemLog | null>;
   workingDir: string;
-  /** Runs the watcher agent with a trigger-specific objective and returns structured output. */
-  runAgent: (objective: string, trigger: WatcherTrigger, signal?: AbortSignal) => Promise<WatcherAction>;
+  /** Runtime dependencies for watcher LLM execution. */
+  runtime: WatcherRuntime;
   /** Called when the watcher produces split/create_work_item actions. */
   onCreateWorkItems?: (items: WatcherWorkItem[]) => void;
   /** Called after every watcher decision for observability/debugging. */
@@ -505,6 +518,22 @@ export interface WatcherAgentConfig {
    * Consumers can persist to a DB, emit internal hook events, and update session status.
    */
   onEscalationRaised?: (escalation: RaisedEscalation, hook: HookContext, trigger: WatcherTrigger) => Promise<void> | void;
+}
+
+export interface WatcherRuntime {
+  llm: LLMAdapter;
+  toolRegistry: ToolRegistry;
+  agentConfig: AgentConfig;
+  /** Working directory for watcher agent execution (tool cwd). */
+  workingDir?: string;
+  llmConfig?: LLMRequestConfig;
+  agentRegistry?: AgentRegistry;
+  contextWindow: ContextWindow;
+  emit?: EventEmitCallback;
+  sessionKey: string;
+  requestId?: string;
+  getModelSelection?: (agentType: string) => ModelSelection | null;
+  memoryInjector?: MemoryInjector;
 }
 
 export interface RaisedEscalation {
@@ -2079,6 +2108,178 @@ function getFallbackAction(trigger: WatcherTrigger, error: Error, ctx: WatcherCo
 // HELPERS
 // ============================================
 
+function withSemanticFields(
+  structured: WatcherActionOutput
+): Pick<WatcherAction, 'semantic' | 'semantics'> {
+  return {
+    ...(structured.semantic ? { semantic: structured.semantic } : {}),
+    ...(structured.semantics ? { semantics: structured.semantics } : {}),
+  };
+}
+
+function mapStructuredWatcherAction(structured: WatcherActionOutput): WatcherAction {
+  const semanticFields = withSemanticFields(structured);
+  switch (structured.watcherAction) {
+    case 'answer':
+      return {
+        watcherAction: 'answer',
+        reason: structured.reason,
+        answer: {
+          text: structured.answer.text,
+          contextAddendum: structured.answer.contextAddendum ?? undefined,
+        },
+        ...semanticFields,
+      };
+    case 'realign':
+      return {
+        watcherAction: 'realign',
+        reason: structured.reason,
+        realign: {
+          systemMessage: structured.realign.systemMessage,
+          newGoal: structured.realign.newGoal ?? undefined,
+        },
+        ...semanticFields,
+      };
+    case 'split':
+      return {
+        watcherAction: 'split',
+        reason: structured.reason,
+        workItems: structured.workItems,
+        ...semanticFields,
+      };
+    case 'create_work_item':
+      return {
+        watcherAction: 'create_work_item',
+        reason: structured.reason,
+        workItems: structured.workItems,
+        ...semanticFields,
+      };
+    case 'stop_work_item':
+      return {
+        watcherAction: 'stop_work_item',
+        reason: structured.reason,
+        ...(structured.escalationId ? { escalationId: structured.escalationId } : {}),
+        ...semanticFields,
+      };
+    case 'quality_gate':
+      return {
+        watcherAction: 'quality_gate',
+        reason: structured.reason,
+        qualityGate: structured.qualityGate,
+        ...semanticFields,
+      };
+    case 'allow':
+      return {
+        watcherAction: 'allow',
+        reason: structured.reason,
+        ...semanticFields,
+      };
+    case 'continue':
+      return {
+        watcherAction: 'allow',
+        reason: structured.reason,
+        ...semanticFields,
+      };
+    default:
+      return assertNever(structured);
+  }
+}
+
+function resolveWatcherLlmConfig(
+  runtime: WatcherRuntime,
+  config: AgentConfig
+): LLMRequestConfig {
+  const selection = runtime.getModelSelection?.('watcher');
+  if (selection) {
+    return buildLLMRequestConfig(selection, config.llmParams);
+  }
+  if (runtime.llmConfig) {
+    return runtime.llmConfig;
+  }
+  throw new Error('Watcher runtime missing model selection/LLM config');
+}
+
+async function runWatcherLLM(
+  config: WatcherAgentConfig,
+  objective: string,
+  trigger: WatcherTrigger,
+  signal?: AbortSignal
+): Promise<WatcherAction> {
+  const runtime = config.runtime;
+  const validActions = getValidActions(trigger);
+  const triggerSpecificSchema = validActions.length > 0
+    ? getWatcherSchemaJsonForActions(validActions)
+    : runtime.agentConfig.outputSchema;
+
+  const watcherConfig: AgentConfig = {
+    ...runtime.agentConfig,
+    outputSchema: triggerSpecificSchema,
+    parseOutput: buildWatcherParseOutput(),
+    schemaReminder: WATCHER_SCHEMA_REMINDER,
+  };
+
+  const llmConfig = resolveWatcherLlmConfig(runtime, watcherConfig);
+  const requestId = runtime.requestId ?? `watcher-${trigger}-${Date.now()}`;
+
+  const agent = new Agent(watcherConfig, {
+    llm: runtime.llm,
+    toolRegistry: runtime.toolRegistry,
+    llmConfig,
+    agentRegistry: runtime.agentRegistry,
+    emit: runtime.emit,
+    requestId,
+    sessionKey: runtime.sessionKey,
+    getModelSelection: runtime.getModelSelection ?? undefined,
+    memoryInjector: runtime.memoryInjector,
+  });
+
+  const workItem = createWorkItem({
+    goal: 'watcher_evaluation',
+    objective,
+    agent: 'watcher',
+    bounds: {
+      maxToolCalls: watcherConfig.budget.maxToolCalls,
+      maxDurationMs: watcherConfig.budget.maxDurationMs,
+      maxLlmCalls: watcherConfig.budget.maxIterations,
+    },
+  });
+
+  if (signal?.aborted) {
+    throw new Error('Watcher aborted before execution');
+  }
+
+  const result = await agent.run({
+    globalContext: runtime.contextWindow,
+    workItem,
+    cwd: runtime.workingDir ?? config.workingDir,
+    signal,
+  });
+
+  let structured = result.structuredOutput as WatcherActionOutput | undefined;
+  if (!structured && result.response) {
+    structured = parseWatcherOutput(result.response) ?? undefined;
+  }
+
+  if (!structured) {
+    throw new Error(
+      `Watcher produced no valid structured output (trigger=${trigger}, ` +
+      `terminationReason=${result.terminationReason}, error=${result.error ?? 'none'})`
+    );
+  }
+
+  if (structured.action !== 'done' || structured.goalStateReached !== true) {
+    console.warn('[WATCHER] structured output did not terminate cleanly', {
+      trigger,
+      action: structured.action,
+      goalStateReached: structured.goalStateReached,
+      terminationReason: result.terminationReason,
+    });
+  }
+
+  assertValidActionForTrigger(trigger, structured.watcherAction);
+  return mapStructuredWatcherAction(structured);
+}
+
 /**
  * Run the watcher agent with retry logic and append the result to the decision log.
  * Wraps execution with per-trigger timeout and a single in-flight guard to
@@ -2112,7 +2313,7 @@ async function runAndLog(
 
   runPromise = (async () => {
     try {
-      return await config.runAgent(objective, trigger, controller.signal);
+      return await runWatcherLLM(config, objective, trigger, controller.signal);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       console.error(`[WATCHER] Agent run failed for ${trigger}: ${error.message}`);

@@ -16,7 +16,6 @@ export {
   getOutputSchema,
   getOutputSchemaJson,
   unwrapStructuredOutput,
-  getWatcherSchemaJsonForActions,
   OUTPUT_SCHEMAS,
   type OutputSchemaName,
   type RoutingOutput,
@@ -27,7 +26,6 @@ export {
   type ExplorerOutput,
   type WorkItemOutput,
   type RuntimeScriptOutput,
-  type WatcherActionOutput,
   type PlannerOutput,
 } from './structured_output.js';
 export {

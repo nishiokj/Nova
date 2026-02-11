@@ -6,7 +6,6 @@
  */
 
 import { z } from 'zod';
-import { WATCHER_ACTION_VALUES } from 'shared';
 
 // ============================================
 // TERMINATION SCHEMAS
@@ -213,38 +212,6 @@ export const HookOutcomeSchema = <T extends z.ZodTypeAny>(decisionSchema: T) =>
   ]);
 
 // ============================================
-// WATCHER OUTPUT SCHEMA
-// ============================================
-
-/**
- * Schema for watcher LLM output.
- * This is what the watcher agent produces.
- */
-export const WatcherOutputSchema = z.object({
-  action: z.enum(['done', 'continue']),
-  goalStateReached: z.boolean(),
-  response: z.string(),
-  watcherAction: z.object({
-    action: z.enum(WATCHER_ACTION_VALUES),
-    reason: z.string(),
-    escalationId: z.string().optional(),
-    answer: z.object({
-      text: z.string(),
-      contextAddendum: z.string().optional(),
-    }).optional(),
-    realign: z.object({
-      systemMessage: z.string(),
-      newGoal: z.string().optional(),
-    }).optional(),
-    workItems: z.array(WorkItemSpecSchema).optional(),
-    qualityGate: z.object({
-      passed: z.boolean(),
-      issues: z.array(z.string()).optional(),
-    }).optional(),
-  }),
-});
-
-// ============================================
 // TYPE EXPORTS
 // ============================================
 
@@ -257,4 +224,3 @@ export type AgentErrorDecisionSchemaType = z.infer<typeof AgentErrorDecisionSche
 export type HandoffDecisionSchemaType = z.infer<typeof HandoffDecisionSchema>;
 export type WorkItemCompletedDecisionSchemaType = z.infer<typeof WorkItemCompletedDecisionSchema>;
 export type StatePatchSchemaType = z.infer<typeof StatePatchSchema>;
-export type WatcherOutputSchemaType = z.infer<typeof WatcherOutputSchema>;

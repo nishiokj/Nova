@@ -88,6 +88,9 @@
     "pg-connection-string": "^2.11.0",
     "typescript": "^5.9.3"
   },
+  "overrides": {
+    "tree-sitter-javascript": "0.25.0"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/your-org/rex.git"

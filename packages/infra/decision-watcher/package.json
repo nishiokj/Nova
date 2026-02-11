@@ -36,10 +36,13 @@
   },
   "dependencies": {
     "agent": "workspace:*",
+    "context": "workspace:*",
     "types": "workspace:*",
     "shared": "workspace:*",
     "agent-memory": "workspace:*",
     "llm": "workspace:*",
+    "tools": "workspace:*",
+    "work": "workspace:*",
     "zod": "^4.3.5",
     "protocol": "workspace:*"
   },

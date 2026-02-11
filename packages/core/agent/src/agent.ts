@@ -20,7 +20,7 @@ import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, Structu
 import { isLLMMessageItem, isLLMFunctionCallItem, isLLMFunctionCallOutputItem } from 'types';
 import type { HandoffSpec } from 'protocol';
 import { createEvent, errorResult, successResult } from 'types';
-import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS, unwrapStructuredOutput, WATCHER_ACTION_VALUES } from 'shared';
+import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, createMicroQueue, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS, unwrapStructuredOutput } from 'shared';
 import { ContextWindow, buildSystemMessage } from 'context';
 import type { WorkItem } from 'work';
 import { createWorkItem } from 'work';
@@ -2769,15 +2769,11 @@ export class Agent {
   }
 
   private buildSchemaReminder(schemaId: string | null): string {
-    if (schemaId === 'watcher_action') {
-      const watcherActions = WATCHER_ACTION_VALUES.join('|');
-      return `[SCHEMA REMINDER] For watcher_action output, you MUST return JSON with: action ("done" only), goalStateReached (true), awaitingUserInput (always false), response (short summary), watcherAction (${watcherActions}), reason (always required). Include only the payload for your watcherAction. Do NOT include handoffSpec.`;
+    if (typeof this.config.schemaReminder === 'string' && this.config.schemaReminder.trim().length > 0) {
+      return this.config.schemaReminder;
     }
 
-    if (schemaId === 'planner_output') {
-      return `[SCHEMA REMINDER] You must set action, goalStateReached, awaitingUserInput, and handoffSpec every turn. Valid actions: "done", "continue", "handoff". If you need user input, call PromptUser then action="done", goalStateReached=false, awaitingUserInput=true, handoffSpec=null. For handoff, handoffSpec must be a structured object.`;
-    }
-
+    void schemaId;
     return `[SCHEMA REMINDER] You must set action, goalStateReached, awaitingUserInput, and handoffSpec every turn. Valid actions: "done", "continue". If you need user input, call PromptUser then action="done", goalStateReached=false, awaitingUserInput=true, handoffSpec=null. handoffSpec must always be null (handoff is planner-only).`;
   }
 
@@ -2794,157 +2790,6 @@ export class Agent {
       if (normalized === '0') return false;
     }
     return fallback;
-  }
-
-  private inferBooleanFromText(text?: string): boolean | null {
-    if (!text) return null;
-    const lower = text.toLowerCase();
-    const failurePattern = /(not\s+pass|did\s+not|not\s+achiev|not\s+complete|fail|failed|failure)/;
-    if (failurePattern.test(lower)) return false;
-    const successPattern = /(pass|passed|approve|approved|success|achiev|complete)/;
-    if (successPattern.test(lower)) return true;
-    return null;
-  }
-
-  private readNestedString(
-    value: Record<string, unknown>,
-    path: string[]
-  ): string | null {
-    let current: unknown = value;
-    for (const key of path) {
-      if (!current || typeof current !== 'object' || Array.isArray(current)) return null;
-      current = (current as Record<string, unknown>)[key];
-    }
-    return typeof current === 'string' ? current : null;
-  }
-
-  private inferQualityGate(
-    candidate: Record<string, unknown>,
-    response: string,
-    reason: string
-  ): { passed: boolean; issues?: string[] } {
-    const statusText = this.readNestedString(candidate, ['semantic', 'salienceUpdates', 'workItemStatus']);
-    const inferredStatus = this.inferBooleanFromText(statusText ?? undefined);
-    const inferredText = this.inferBooleanFromText(`${reason} ${response}`);
-    const passed = inferredStatus ?? inferredText ?? false;
-    return { passed };
-  }
-
-  private normalizeWatcherActionCandidate(
-    candidate: Record<string, unknown>
-  ): Record<string, unknown> | null {
-    const actionRaw = typeof candidate.action === 'string' ? candidate.action.trim().toLowerCase() : '';
-    if (actionRaw && actionRaw !== 'done' && actionRaw !== 'continue') return null;
-    const normalizedAction = actionRaw === 'continue' || actionRaw.length === 0 ? 'done' : actionRaw;
-
-    const watcherActionValue = typeof candidate.watcherAction === 'string'
-      ? candidate.watcherAction
-      : typeof (candidate as Record<string, unknown>).watcher_action === 'string'
-        ? (candidate as Record<string, unknown>).watcher_action
-        : '';
-    const watcherActionRaw = typeof watcherActionValue === 'string'
-      ? watcherActionValue.trim().toLowerCase()
-      : '';
-    const validWatcherActions = new Set<string>(WATCHER_ACTION_VALUES);
-    if (!validWatcherActions.has(watcherActionRaw)) return null;
-
-    const response = typeof candidate.response === 'string' ? candidate.response : '';
-    const reason = typeof candidate.reason === 'string'
-      ? candidate.reason
-      : response || 'Watcher decision';
-
-    const awaitingUserInputValue = (candidate as Record<string, unknown>).awaitingUserInput
-      ?? (candidate as Record<string, unknown>).awaiting_user_input;
-    const awaitingUserInput = this.parseBoolean(awaitingUserInputValue, false);
-    const goalStateReached = true;
-
-    const base: Record<string, unknown> = {
-      action: normalizedAction,
-      response,
-      goalStateReached,
-      awaitingUserInput,
-      watcherAction: watcherActionRaw,
-      reason,
-    };
-
-    if (candidate.semantic && typeof candidate.semantic === 'object' && !Array.isArray(candidate.semantic)) {
-      base.semantic = candidate.semantic;
-    }
-
-    switch (watcherActionRaw) {
-      case 'answer': {
-        const answer = candidate.answer;
-        if (!answer || typeof answer !== 'object' || Array.isArray(answer)) return null;
-        const answerText = (answer as Record<string, unknown>).text;
-        if (typeof answerText !== 'string' || answerText.length === 0) return null;
-        const contextAddendum = (answer as Record<string, unknown>).contextAddendum;
-        base.answer = {
-          text: answerText,
-          ...(typeof contextAddendum === 'string' ? { contextAddendum } : {}),
-        };
-        return base;
-      }
-      case 'realign': {
-        const realign = candidate.realign;
-        if (!realign || typeof realign !== 'object' || Array.isArray(realign)) return null;
-        const systemMessage = (realign as Record<string, unknown>).systemMessage;
-        if (typeof systemMessage !== 'string' || systemMessage.length === 0) return null;
-        const newGoal = (realign as Record<string, unknown>).newGoal;
-        base.realign = {
-          systemMessage,
-          ...(typeof newGoal === 'string' ? { newGoal } : {}),
-        };
-        return base;
-      }
-      case 'split':
-      case 'create_work_item': {
-        const workItems = candidate.workItems;
-        if (!Array.isArray(workItems) || workItems.length === 0) return null;
-        base.workItems = workItems;
-        return base;
-      }
-      case 'quality_gate': {
-        const qualityGate = (candidate.qualityGate ?? candidate.quality_gate) as Record<string, unknown> | undefined;
-        if (qualityGate && typeof qualityGate === 'object' && !Array.isArray(qualityGate)) {
-          const passed = qualityGate.passed;
-          const passedBool = this.parseBoolean(passed, false);
-          base.qualityGate = {
-            passed: passedBool,
-            ...(Array.isArray(qualityGate.issues)
-              ? { issues: qualityGate.issues }
-              : {}),
-          };
-          return base;
-        }
-        base.qualityGate = this.inferQualityGate(candidate, response, reason);
-        return base;
-      }
-      case 'stop_work_item': {
-        const escalationIdValue = candidate.escalationId ?? candidate.escalation_id;
-        if (typeof escalationIdValue === 'string' && escalationIdValue.length > 0) {
-          base.escalationId = escalationIdValue;
-        }
-        return base;
-      }
-      case 'allow':
-      case 'continue':
-        return base;
-      default:
-        return null;
-    }
-  }
-
-  private parseWatcherActionLenient(
-    parsed: Record<string, unknown>,
-    content: string
-  ): Record<string, unknown> | null {
-    const candidates = [parsed, ...this.extractJsonCandidates(content)];
-    for (const candidate of candidates) {
-      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
-      const normalized = this.normalizeWatcherActionCandidate(candidate as Record<string, unknown>);
-      if (normalized) return normalized;
-    }
-    return null;
   }
 
   private normalizeActionOutputCandidate(
@@ -3112,20 +2957,20 @@ export class Agent {
       return parsed;
     }
 
-    const schemaId = this.resolveOutputSchemaId();
-    if (!schemaId) {
-      result.terminationReason = 'invalid_action';
-      result.error = `Unknown output schema for ${this.config.type} (schemaId missing or unrecognized).`;
-      return null;
-    }
-
-    if (schemaId === 'watcher_action') {
-      const normalized = this.parseWatcherActionLenient(parsed, content);
+    if (this.config.parseOutput) {
+      const normalized = this.config.parseOutput(parsed, content);
       if (normalized) {
         return normalized;
       }
       result.terminationReason = 'invalid_action';
-      result.error = 'Watcher output missing required fields for watcherAction.';
+      result.error = `Structured output parsing failed for ${this.config.type}.`;
+      return null;
+    }
+
+    const schemaId = this.resolveOutputSchemaId();
+    if (!schemaId) {
+      result.terminationReason = 'invalid_action';
+      result.error = `Unknown output schema for ${this.config.type} (schemaId missing or unrecognized).`;
       return null;
     }
 

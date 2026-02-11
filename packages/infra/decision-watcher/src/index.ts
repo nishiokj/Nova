@@ -169,8 +169,18 @@ export type {
 export {
   createWatcherControlHooks,
 } from './watcher-agent.js';
-export type { WatcherAgentConfig, RaisedEscalation } from './watcher-agent.js';
+export type { WatcherAgentConfig, WatcherRuntime, RaisedEscalation } from './watcher-agent.js';
 export { getValidActions } from './types.js';
+export {
+  WatcherActionOutputSchema,
+  buildWatcherSchemaForActions,
+  getWatcherSchemaJsonForActions,
+  parseWatcherOutput,
+  buildWatcherParseOutput,
+  WATCHER_SCHEMA_REMINDER,
+  PLANNER_SCHEMA_REMINDER,
+} from './output-schemas.js';
+export type { WatcherActionOutput } from './output-schemas.js';
 
 // ============================================
 // SESSION INIT (Async session bootstrap)

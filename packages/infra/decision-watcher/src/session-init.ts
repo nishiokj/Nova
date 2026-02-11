@@ -6,13 +6,14 @@
  */
 
 import type { ControlEvent, Hook } from 'protocol';
-import type { WatcherAction, WatcherTrigger, WatcherWorkItem } from './types.js';
+import type { WatcherWorkItem } from './types.js';
 import type { DecisionLog } from './decision-log.js';
 import type { WorkLog } from './work-log.js';
-import { writeSalienceFile, salienceFilePath } from './salience.js';
+import { writeSalienceFile } from './salience.js';
 import { createDecisionLog } from './decision-log.js';
 import { createWorkLog } from './work-log.js';
 import { createWatcherControlHooks } from './watcher-agent.js';
+import type { WatcherRuntime } from './watcher-agent.js';
 import { getWorkItemLog } from './workitem-log.js';
 
 // ============================================
@@ -23,8 +24,8 @@ export interface AsyncSessionConfig {
   sessionId: string;
   goal: string;
   workingDir: string;
-  /** Runs the watcher agent with a trigger-specific objective string. */
-  runAgent: (objective: string, trigger: WatcherTrigger, signal?: AbortSignal) => Promise<WatcherAction>;
+  /** Runtime dependencies for watcher LLM execution. */
+  runtime: WatcherRuntime;
   /** Called when watcher produces work items via split/create. */
   onCreateWorkItems?: (items: WatcherWorkItem[]) => void;
   /** Operating principles to include in the salience file. */
@@ -90,7 +91,10 @@ export async function initAsyncSession(config: AsyncSessionConfig): Promise<Asyn
     workLog,
     getWorkItemLog: (workId: string) => getWorkItemLog(config.workingDir, config.sessionId, workId),
     workingDir: config.workingDir,
-    runAgent: config.runAgent,
+    runtime: {
+      ...config.runtime,
+      workingDir: config.runtime.workingDir ?? config.workingDir,
+    },
     onCreateWorkItems: config.onCreateWorkItems,
   }, config.sessionId);
 

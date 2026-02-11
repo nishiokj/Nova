@@ -11,7 +11,6 @@
  */
 
 import {
-  Agent,
   AgentRegistry,
   type AgentConfig,
   type AgentHooks,
@@ -33,7 +32,7 @@ import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
 import { ToolRegistry, builtinToolOptions } from 'tools';
 import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
 import { ContextWindow } from 'context';
-import { profiler, buildLLMRequestConfig, parseAndValidateOutput, getWatcherSchemaJsonForActions, type WatcherActionOutput } from 'shared';
+import { profiler } from 'shared';
 import { GraphDManager, createGraphDConfig, type GraphDSession } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
@@ -85,12 +84,11 @@ import {
   type DecisionDatabase,
   type WorkItemLog,
   type WorkLog,
-  type WatcherAction,
   type RaisedEscalation,
   type SemanticOutput,
-  assertValidActionForTrigger,
+  type WatcherRuntime,
 } from 'decision-watcher';
-import { EntityGraph, type EntityGraphConfig } from 'entity-graph';
+import type { EntityGraph, EntityGraphConfig } from 'entity-graph';
 import { createHookRegistry, DEFAULT_ORCHESTRATOR_CONFIG, type HookRegistry } from 'orchestrator';
 import { createWorkItem } from 'work';
 import { createMemoryInjector, type MemoryInjector as MemoryInjectorInstance } from 'memory-injector';
@@ -1071,6 +1069,7 @@ export class AgentHarness {
     // Initialize EntityGraph if enabled
     if (this.config.entityGraph.enabled && !this.entityGraph) {
       try {
+        const { EntityGraph } = await import('entity-graph');
         const dbUrl = this.config.entityGraph.databaseUrl
           ?? process.env.ENTITY_GRAPH_DATABASE_URL
           ?? process.env.DATABASE_URL;
@@ -1788,7 +1787,9 @@ export class AgentHarness {
       }
     };
 
-    check('watcher', 'watcher_action');
+    if (!this.agentRegistry.has('watcher')) {
+      issues.push('Missing required agent config: watcher');
+    }
     check('planner', 'planner_output');
 
     this.asyncModeIssues = issues;
@@ -2921,186 +2922,6 @@ export class AgentHarness {
     }
   }
 
-  // =========================================================================
-  // Watcher Agent: LLM-backed control-plane hooks
-  // =========================================================================
-
-  /**
-   * Run the watcher agent with a trigger-specific objective.
-   * Creates a mini Agent instance, executes it, and parses the structured WatcherAction output.
-   */
-  private async runWatcherAgent(
-    objective: string,
-    sessionKey: string,
-    trigger: WatcherTrigger,
-    signal?: AbortSignal,
-    workingDir?: string
-  ): Promise<WatcherAction> {
-    // Get the watcher agent config from registry
-    if (!this.agentRegistry.has('watcher')) {
-      throw new Error('Watcher agent type not registered');
-    }
-
-    const agentConfig = this.agentRegistry.getConfig('watcher');
-
-    // Get model selection for the watcher agent type
-    const store = this.sessions.get(sessionKey)?.store;
-    const modelSelection = store?.getModelSelection('watcher');
-
-    if (!modelSelection) {
-      throw new Error('No model selection available for watcher agent');
-    }
-
-    // Update TraceSubscriber with current model
-    this.traceSubscriber?.setCurrentModel(modelSelection.provider, modelSelection.model);
-
-
-    const llmConfig = buildLLMRequestConfig(modelSelection, agentConfig.llmParams);
-    const rawSchemaId = agentConfig.outputSchema?.schemaId ?? agentConfig.outputSchema?.name;
-    const normalizedSchemaId = typeof rawSchemaId === 'string'
-      ? rawSchemaId.trim().toLowerCase().replace(/_output$/, '')
-      : null;
-    if (normalizedSchemaId !== 'watcher_action') {
-      throw new Error(`Watcher output schema misconfigured (expected "watcher_action", got "${rawSchemaId ?? 'none'}").`);
-    }
-
-    // Import getValidActions to build trigger-specific schema
-    const { getValidActions } = await import('decision-watcher');
-
-    // Build trigger-specific schema that ONLY includes valid actions for this trigger
-    // This prevents the LLM from seeing/using actions that would be rejected
-    const validActions = getValidActions(trigger);
-    const triggerSpecificSchema = validActions.length > 0
-      ? getWatcherSchemaJsonForActions(validActions)
-      : agentConfig.outputSchema;
-
-    // Override config with trigger-specific schema
-    const watcherConfig = {
-      ...agentConfig,
-      outputSchema: triggerSpecificSchema,
-    };
-
-    // Create watcher-specific emit callback so watcher appears in dashboard
-    const watcherRequestId = `watcher-${trigger}-${Date.now()}`;
-    const watcherRunId = `watcher-run-${Date.now()}`;
-    const emit = createEventEmitCallback(this.eventBus, watcherRequestId, watcherRunId, sessionKey);
-
-    const agent = new Agent(watcherConfig, {
-      llm: this.llmAdapter,
-      toolRegistry: this.toolRegistry,
-      llmConfig,
-      agentRegistry: this.agentRegistry,
-      emit,
-      requestId: watcherRequestId,
-      sessionKey,
-      getModelSelection: store
-        ? (t: string) => store.getModelSelection(t)
-        : undefined,
-      memoryInjector: this.memoryInjector ?? undefined,
-    });
-
-    // Use session-scoped watcher context (persists across invocations)
-    // This prevents re-reading the same files every time
-    const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
-    const sessionState = this.sessions.get(sessionKey);
-    let context = sessionState?.watcherContext;
-    if (!context) {
-      const dateStr = new Date().toISOString().split('T')[0];
-      const watcherContextPath = path.join(
-        effectiveWorkingDir, '.haiku', 'sessions', dateStr, sessionKey, 'watcher-context.md'
-      );
-      context = new ContextWindow(`watcher:${sessionKey}`, 200_000, watcherContextPath);
-      if (sessionState) {
-        sessionState.watcherContext = context;
-      }
-      this.logger.debug('Created new watcher context', { sessionKey, path: watcherContextPath });
-    }
-
-    const workItem = createWorkItem({
-      goal: 'watcher_evaluation',
-      objective,
-      agent: 'watcher',
-      bounds: {
-        maxToolCalls: agentConfig.budget.maxToolCalls,
-        maxDurationMs: agentConfig.budget.maxDurationMs,
-        maxLlmCalls: agentConfig.budget.maxIterations,
-      },
-    });
-
-    if (signal?.aborted) {
-      throw new Error('Watcher aborted before execution');
-    }
-    const result = await agent.run({ globalContext: context, workItem, cwd: effectiveWorkingDir, signal });
-    let structured = result.structuredOutput as WatcherActionOutput | undefined;
-
-    if (!structured && result.response) {
-      const parsed = parseAndValidateOutput('watcher_action', result.response);
-      if (parsed) {
-        structured = parsed as WatcherActionOutput;
-      }
-    }
-
-    if (structured) {
-      if (structured.action !== 'done' || structured.goalStateReached !== true) {
-        this.logger.warning('Watcher structured output ended without done', {
-          sessionKey,
-          action: structured.action,
-          goalStateReached: structured.goalStateReached,
-          terminationReason: result.terminationReason,
-        });
-      }
-
-      // Validate the LLM's action is actually valid for this trigger BEFORE returning.
-      // The trigger-specific schema should constrain this, but if it leaks through,
-      // this assertion catches it at the boundary instead of returning an invalid action.
-      assertValidActionForTrigger(trigger, structured.watcherAction);
-
-      switch (structured.watcherAction) {
-        case 'answer':
-          return {
-            watcherAction: 'answer',
-            reason: structured.reason,
-            answer: {
-              text: structured.answer.text,
-              contextAddendum: structured.answer.contextAddendum ?? undefined,
-            },
-          };
-        case 'realign':
-          return {
-            watcherAction: 'realign',
-            reason: structured.reason,
-            realign: {
-              systemMessage: structured.realign.systemMessage,
-              newGoal: structured.realign.newGoal ?? undefined,
-            },
-          };
-        case 'split':
-          return { watcherAction: 'split', reason: structured.reason, workItems: structured.workItems };
-        case 'create_work_item':
-          return { watcherAction: 'create_work_item', reason: structured.reason, workItems: structured.workItems };
-        case 'stop_work_item':
-          return {
-            watcherAction: 'stop_work_item',
-            reason: structured.reason,
-            ...(structured.escalationId ? { escalationId: structured.escalationId } : {}),
-          };
-        case 'quality_gate':
-          return { watcherAction: 'quality_gate', reason: structured.reason, qualityGate: structured.qualityGate };
-        case 'allow':
-          return { watcherAction: 'allow', reason: structured.reason };
-        case 'continue':
-          return { watcherAction: 'allow', reason: structured.reason };
-      }
-    }
-
-    // No valid structured output — throw so the caller (runAndLog) routes to
-    // getFallbackAction which returns a trigger-valid action.
-    throw new Error(
-      `Watcher produced no valid structured output (trigger=${trigger}, ` +
-      `terminationReason=${result.terminationReason}, error=${result.error ?? 'none'})`
-    );
-  }
-
   private emitInternalHookAsync(event: InternalHookEvent, context: InternalHookContext): void {
     queueMicrotask(() => {
       void executeHooks(event.type, event, context).catch((err) => {
@@ -3525,8 +3346,26 @@ export class AgentHarness {
     workingDir: string,
     watcherDir?: string
   ): Promise<{ hookRegistry: HookRegistry; planningObjective: string }> {
+    const store = this.ensureSessionHydrated(sessionKey, { workingDir, includeUserPreferences: true });
     const sessionState = this.getOrCreateSessionState(sessionKey, false, workingDir);
     const effectiveWatcherDir = watcherDir ?? workingDir;
+    if (!this.agentRegistry.has('watcher')) {
+      throw new Error('Watcher agent config missing from registry');
+    }
+    const watcherAgentConfig = this.agentRegistry.getConfig('watcher');
+    const watcherContext = store.getContext();
+    sessionState.watcherContext = watcherContext;
+    const watcherRuntime: WatcherRuntime = {
+      llm: this.llmAdapter,
+      toolRegistry: this.toolRegistry,
+      agentConfig: watcherAgentConfig,
+      workingDir,
+      agentRegistry: this.agentRegistry,
+      contextWindow: watcherContext,
+      sessionKey,
+      getModelSelection: (agentType: string) => store.getModelSelection(agentType),
+      memoryInjector: this.memoryInjector ?? undefined,
+    };
 
     // Register logging hooks first (idempotent — skips if already registered)
     const { workLog } = await this.registerSessionLoggingHooks(sessionKey, goal, workingDir, watcherDir, 'async');
@@ -3619,8 +3458,7 @@ export class AgentHarness {
         return getWorkItemLog(effectiveWatcherDir, sessionKey, workId);
       },
       workingDir: effectiveWatcherDir,
-      runAgent: (objective: string, trigger: WatcherTrigger, signal?: AbortSignal) =>
-        this.runWatcherAgent(objective, sessionKey, trigger, signal, workingDir),
+      runtime: watcherRuntime,
       onDecision: (entry) => {
         // Increment decision counter for memory-efficient tracking
         const engine = this.getOrCreateWatcherEngine(sessionKey);
