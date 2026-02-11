@@ -56,11 +56,11 @@ function getDateString(date: Date = new Date()): string {
 }
 
 /**
- * Get the session directory for watcher artifacts.
- * Structure: .watcher/{YYYY-MM-DD}/{sessionId}/
+ * Get the session directory for observer artifacts.
+ * Structure: .observer/{YYYY-MM-DD}/{sessionId}/
  */
 function sessionDir(workingDir: string, sessionId: string, date: Date = new Date()): string {
-  return path.join(workingDir, '.watcher', getDateString(date), sessionId);
+  return path.join(workingDir, '.observer', getDateString(date), sessionId);
 }
 
 /**

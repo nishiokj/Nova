@@ -26,6 +26,7 @@ tui-ts/dist/
 
 # Environment / Secrets
 .env
+.env.example
 .env.local
 .env.*.local
 .envrc

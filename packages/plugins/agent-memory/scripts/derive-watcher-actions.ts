@@ -35,7 +35,7 @@ import {
   isWatcherTrigger,
   type WatcherActionType,
   type WatcherTrigger,
-} from 'shared'
+} from '../src/watcher/contract.js'
 
 // ─── Metadata Schema ─────────────────────────────────────────────────────────
 

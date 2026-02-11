@@ -655,7 +655,7 @@ describe('State Machine: Hook-Driven Transitions', () => {
             toolCalls: [],
           };
         }
-        // After watcher answers, complete
+        // After observer answers, complete
         return {
           content: JSON.stringify({
             action: 'done',
@@ -708,7 +708,7 @@ describe('State Machine: Hook-Driven Transitions', () => {
 
     const result = await orch.execute(createContext(), 'Greet user', 'standard', CWD, { hookRegistry: registry });
 
-    // Watcher answered, didn't pause
+    // Observer answered, didn't pause
     expect(result.paused).toBe(false);
     expect(result.terminationReason).toBe('goal_state_reached');
     expect(llmCalls).toBe(2);

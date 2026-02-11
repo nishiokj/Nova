@@ -411,7 +411,7 @@ export class HarnessClient extends EventEmitter {
   }
 
   // =========================================================================
-  // Watcher Commands
+  // Observer Commands
   // =========================================================================
 
   async watcherStatus(): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string }> {

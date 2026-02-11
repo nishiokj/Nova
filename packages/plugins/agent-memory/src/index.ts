@@ -304,6 +304,22 @@ export {
   type DerivedMetadataSchema,
 } from './derived/runner.js'
 
+// Watcher Contract
+export {
+  WATCHER_TRIGGER_VALUES,
+  WATCHER_ACTION_VALUES,
+  WATCHER_NO_INTERVENTION_ACTION_VALUES,
+  VALID_WATCHER_ACTIONS_BY_TRIGGER,
+  isWatcherActionType,
+  isWatcherTrigger,
+  getValidWatcherActions,
+  assertValidActionForTrigger,
+  type ValidActionsFor,
+  type WatcherTrigger,
+  type WatcherActionType,
+  type WatcherNoInterventionAction,
+} from './watcher/contract.js'
+
 // Connector SDK
 export {
   // HTTP Client Configuration

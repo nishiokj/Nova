@@ -26,11 +26,6 @@ This audit reveals a **critical data gap**: only the base `entity_graph.entities
 
 **Sample Records**:
 ```
-file:agentlab/harness.js:agentlab/harness.js | file     | agentlab/harness.js | agentlab/harness.js | 1  | 131 | false | false | 
-function:agentlab/harness.js:readJson        | function | readJson            | agentlab/harness.js | 7  | 7   | false | false | function readJson(p) { return JSON.parse(fs.readFileSync(p, 'utf8')); }
-function:agentlab/harness.js:writeJson       | function | writeJson           | agentlab/harness.js | 8  | 8   | false | false | function writeJson(p, obj) { fs.writeFileSync(p, JSON.stringify(obj, null, 2)); }
-function:agentlab/harness.js:sha256Bytes     | function | sha256Bytes         | agentlab/harness.js | 9  | 9   | false | false | function sha256Bytes(buf) { return 'sha256:' + crypto.createHash('sha256').update(buf).digest('hex'); }
-function:agentlab/harness.js:nowIso          | function | nowIso              | agentlab/harness.js | 10 | 10  | false | false | function nowIso() { return new Date().toISOString(); }
 ```
 
 **Data Quality Assessment**:

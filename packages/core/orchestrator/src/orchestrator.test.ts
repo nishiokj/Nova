@@ -143,7 +143,7 @@ function createMockAgentRegistry(
   const registry = new Map<string, AgentConfig>();
   registry.set('standard', { ...defaultConfig, type: 'standard', ...configs.standard });
   registry.set('planner', { ...plannerConfig, ...configs.planner });
-  registry.set('watcher', { ...defaultConfig, type: 'watcher', ...configs.watcher });
+  registry.set('observer', { ...defaultConfig, type: 'observer', ...configs.observer });
   registry.set('explorer', { ...defaultConfig, type: 'explorer', ...configs.explorer });
 
   return {
@@ -244,7 +244,7 @@ function createLLMResponseBuilder(): LLMResponseBuilder {
     watcherAnswer(text: string): LLMResponse {
       return base(JSON.stringify({
         action: 'done',
-        response: `Watcher answered: ${text}`,
+        response: `Observer answered: ${text}`,
         goalStateReached: true,
         awaitingUserInput: false,
         watcherAction: 'answer',
@@ -256,7 +256,7 @@ function createLLMResponseBuilder(): LLMResponseBuilder {
     watcherRealign(systemMessage: string, newGoal?: string): LLMResponse {
       return base(JSON.stringify({
         action: 'done',
-        response: `Watcher realigning: ${systemMessage}`,
+        response: `Observer realigning: ${systemMessage}`,
         goalStateReached: true,
         awaitingUserInput: false,
         watcherAction: 'realign',
@@ -268,7 +268,7 @@ function createLLMResponseBuilder(): LLMResponseBuilder {
     watcherSplit(workItems: WorkItemSpec[]): LLMResponse {
       return base(JSON.stringify({
         action: 'done',
-        response: `Watcher splitting into ${workItems.length} work items.`,
+        response: `Observer splitting into ${workItems.length} work items.`,
         goalStateReached: true,
         awaitingUserInput: false,
         watcherAction: 'split',
@@ -573,7 +573,7 @@ describe('Orchestrator', () => {
     });
 
     // TODO: Test design conflicts with agent/orchestrator iteration model
-    it.skip('should allow watcher to realign on bounds exceeded', async () => {
+    it.skip('should allow observer to realign on bounds exceeded', async () => {
       const hookRegistry = createHookRegistry();
       const boundsCalls: number[] = [];
 
@@ -637,7 +637,7 @@ describe('Orchestrator', () => {
     });
 
     // TODO: Test design conflicts with agent/orchestrator iteration model
-    it.skip('should allow watcher to split work on bounds exceeded', async () => {
+    it.skip('should allow observer to split work on bounds exceeded', async () => {
       const hookRegistry = createHookRegistry();
 
       hookRegistry.register(
@@ -699,7 +699,7 @@ describe('Orchestrator', () => {
     });
 
     // TODO: This test requires Agent to set needsUserInput via PromptUser tool call
-    it.skip('should allow watcher to answer questions in async mode', async () => {
+    it.skip('should allow observer to answer questions in async mode', async () => {
       const hookRegistry = createHookRegistry();
 
       hookRegistry.register(
@@ -727,12 +727,12 @@ describe('Orchestrator', () => {
 
       const result = await orchestrator.execute(context, 'Choose database', 'standard', TEST_CWD, runtime);
 
-      // Watcher should have answered and execution continued
+      // Observer should have answered and execution continued
       expect(result.success).toBe(true);
       expect(result.terminationReason).toBe('goal_state_reached');
     });
 
-    it('should defer to user when watcher is unsure', async () => {
+    it('should defer to user when observer is unsure', async () => {
       const hookRegistry = createHookRegistry();
 
       hookRegistry.register(
@@ -782,7 +782,7 @@ describe('Orchestrator', () => {
     });
 
     // TODO: Test needs investigation - handoff rejection flow
-    it.skip('should allow watcher to reject handoff', async () => {
+    it.skip('should allow observer to reject handoff', async () => {
       const hookRegistry = createHookRegistry();
 
       hookRegistry.register(
@@ -817,13 +817,13 @@ describe('Orchestrator', () => {
 
       const result = await orchestrator.execute(context, 'Create plan', 'planner', TEST_CWD, runtime);
 
-      // Watcher rejected first plan, should continue to revised plan
+      // Observer rejected first plan, should continue to revised plan
       // Note: The exact behavior depends on implementation details
       expect(result.handoffSpec).toBeDefined();
     });
 
     // TODO: Test needs investigation - handoff modification flow
-    it.skip('should allow watcher to modify handoff', async () => {
+    it.skip('should allow observer to modify handoff', async () => {
       const hookRegistry = createHookRegistry();
 
       hookRegistry.register(
@@ -1068,7 +1068,7 @@ describe('Orchestrator', () => {
       expect(result).toBeDefined();
     });
 
-    it('should allow watcher to retry on error', async () => {
+    it('should allow observer to retry on error', async () => {
       const hookRegistry = createHookRegistry();
       let errorCount = 0;
 
@@ -1360,14 +1360,14 @@ describe('Orchestrator', () => {
     });
   });
 
-  describe('Complex Watcher Scenarios', () => {
-    it('should handle watcher continuing to work', async () => {
+  describe('Complex Observer Scenarios', () => {
+    it('should handle observer continuing to work', async () => {
       const hookRegistry = createHookRegistry();
       let continueCount = 0;
 
       hookRegistry.register(
         createTestHook<ControlEvent & { type: 'goal_state_reached' }, QualityGateDecision>(
-          'test-watcher-continue',
+          'test-observer-continue',
           'goal_state_reached',
           () => {
             continueCount++;
@@ -1383,7 +1383,7 @@ describe('Orchestrator', () => {
         hookRegistry,
       });
 
-      const result = await orchestrator.execute(context, 'Watcher continue', 'standard', TEST_CWD, runtime);
+      const result = await orchestrator.execute(context, 'Observer continue', 'standard', TEST_CWD, runtime);
 
       expect(result.success).toBe(true);
       expect(continueCount).toBeGreaterThan(0);
@@ -1523,14 +1523,14 @@ describe('Orchestrator', () => {
     });
   });
 
-  describe('Watcher Output Schemas', () => {
+  describe('Observer Output Schemas', () => {
     // TODO: This test requires Agent to set needsUserInput via PromptUser tool call
-    it.skip('should validate watcher answer output', async () => {
+    it.skip('should validate observer answer output', async () => {
       const hookRegistry = createHookRegistry();
 
       hookRegistry.register(
         createTestHook<ControlEvent & { type: 'user_input_required' }, PromptAnswerDecision>(
-          'test-watcher-answer',
+          'test-observer-answer',
           'user_input_required',
           () => ({
             action: 'answer',
@@ -1550,17 +1550,17 @@ describe('Orchestrator', () => {
         hookRegistry,
       });
 
-      const result = await orchestrator.execute(context, 'Watcher answer test', 'standard', TEST_CWD, runtime);
+      const result = await orchestrator.execute(context, 'Observer answer test', 'standard', TEST_CWD, runtime);
 
       expect(result.success).toBe(true);
     });
 
-    it('should validate watcher realign output', async () => {
+    it('should validate observer realign output', async () => {
       const hookRegistry = createHookRegistry();
 
       hookRegistry.register(
         createTestHook<ControlEvent & { type: 'bounds_exceeded' }, BoundsDecision>(
-          'test-watcher-realign-output',
+          'test-observer-realign-output',
           'bounds_exceeded',
           () => ({
             action: 'realign',
@@ -1583,12 +1583,12 @@ describe('Orchestrator', () => {
       expect(result.terminationReason).toBe('max_iterations_exceeded');
     });
 
-    it('should validate watcher split output with bounds', async () => {
+    it('should validate observer split output with bounds', async () => {
       const hookRegistry = createHookRegistry();
 
       hookRegistry.register(
         createTestHook<ControlEvent & { type: 'cadence_audit' }, CadenceDecision>(
-          'test-watcher-split-bounds',
+          'test-observer-split-bounds',
           'cadence_audit',
           () => ({
             action: 'split',
@@ -1631,13 +1631,13 @@ describe('Orchestrator', () => {
       // Deferred work should be enqueued
     });
 
-    it('should validate watcher quality gate output', async () => {
+    it('should validate observer quality gate output', async () => {
       const hookRegistry = createHookRegistry();
       const qualityChecks: { passed: boolean; issues?: string[] }[] = [];
 
       hookRegistry.register(
         createTestHook<ControlEvent & { type: 'goal_state_reached' }, QualityGateDecision>(
-          'test-watcher-quality',
+          'test-observer-quality',
           'goal_state_reached',
           () => {
             if (qualityChecks.length === 0) {

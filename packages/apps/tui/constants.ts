@@ -59,8 +59,8 @@ export const STREAM_CURSOR_FRAMES = ["|", " "] as const;
 /** Frames for status spinner animation (braille sweep) */
 export const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 
-/** Frames for input prompt spinner when agent is busy (braille rotation) */
-export const INPUT_SPINNER_FRAMES = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"] as const;
+/** Frames for input prompt spinner when agent is busy (star rotation) */
+export const INPUT_SPINNER_FRAMES = ["✦", "✶", "✳", "✴", "✳", "✶"] as const;
 
 /** Interval (ms) between status animation ticks */
 export const STATUS_TICK_INTERVAL = 80;

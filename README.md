@@ -1,247 +1,189 @@
 # rex
 
-A config-driven, multi-tier agent system with composable agent primitives, DAG-based task orchestration, and multi-provider LLM support.
-
-## Features
-
-- **Pure Agent Primitives**: Agents are composable functions with clear contracts
-- **Multi-Tier Routing**: Automatic task complexity classification (simple/standard/complex)
-- **DAG-Based Orchestration**: WorkItem dependency graphs with parallel execution
-- **Multi-Provider LLM**: OpenAI, Anthropic, and Gemini adapters with circuit breaker resilience
-- **Built-in Tools**: Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch
-- **Structured Output**: JSON schema validation for agent responses
-- **Config-Driven**: Agent models, budgets, and tool access defined in JSON
-- **Ink TUI**: React-based terminal interface
+A config-driven, multi-tier agent system with composable agent primitives, DAG-based orchestration, async oversight, and multi-provider LLM support.
 
 ## Quick Start
 
 ```bash
-# 1. Clone and setup
-git clone <repository-url>
-cd rex
-
-# 2. Install dependencies (uses bun workspaces)
+# Install dependencies (bun workspaces)
 bun install
 
-# 3. Configure environment
-cp .env.example .env
-# Edit .env with your API keys
+# Store API keys in GraphD
+rex providers set openai sk-...
+rex providers set anthropic sk-ant-...
 
-# 4. Run the CLI
-bun run packages/apps/launcher/index.ts
+# Run (launches daemon + control-plane + TUI)
+bun run start
 ```
 
-## Project Structure
+Alternatively, run the daemon in one terminal and attach the TUI separately:
 
-```
-packages/
-  core/              # Core primitives and contracts
-    agent/
-    context/
-    llm/
-    orchestrator/
-    protocol/        # Domain/control/effects/hooks/protocol schemas
-    shared/
-    tools/
-    types/
-    work/
-  infra/             # Runtime infrastructure + transport/services
-    comms-bus/
-    control-plane/
-    decision-watcher/
-    graphd/
-    harness-client/
-    harness-daemon/
-  plugins/           # Optional/bolt-on modules
-    agent-memory/
-    entity-graph/
-    memory-injector/
-    semantic-compiler/
-  external/          # Vendored external dependencies
-    prompt-protocol/
-  apps/              # User-facing clients and entrypoints
-    launcher/
-    tui/
-    dashboard/
-    dashboard-compact/
-    dashboard-control/
-
-scripts/             # Shell and utility scripts
-config/              # Configuration files
-  harness_config.json    # Agent LLM models, budgets, tools
-  behavioral_rules.md    # Agent behavioral constraints
-  skills/                # Custom skill definitions
-  hooks/                 # Hook definitions
-docs/                # Documentation & specs
-  architecture/      # Architecture diagrams and design docs
-  specs/             # Implementation specifications
-  analysis/          # Analysis and state documents
-  setup/             # Setup and authentication guides
-  archive/           # Archived research and completed specs
-tests/               # Integration tests
+```bash
+bun run start:split          # daemon + control-plane (foreground)
+bun run start:tui            # TUI in another terminal
 ```
 
 ## Architecture
 
 ```
-Harness
-  |
-  +-- RoutingAgent(goal) --> tier classification
-  |
-  +-- [simple] --> Agent.run(context, workItem) --> response
-  |                No orchestration, single LLM call
-  |
-  +-- [standard|complex] --> Orchestrator.execute(context, goal)
-                              |
-                              +-- ExplorerAgent --> system context
-                              +-- RuntimeScriptAgent --> WorkItem DAG
-                              +-- Execute DAG --> parallel agent dispatch
+┌──────────┐
+│   User   │
+└────┬─────┘
+     │
+     ▼
+┌──────────┐     ┌────────────────┐     ┌─────────────┐
+│ Launcher │────▶│ Daemon (9555)  │────▶│ GraphD(9444)│
+└──────────┘     └───────┬────────┘     └─────────────┘
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+    ┌──────────┐  ┌──────────────┐  ┌──────────────┐
+    │ TUI(Ink) │  │Control-Plane │  │  Watcher /   │
+    │          │  │   (9445)     │  │  Planner     │
+    └──────────┘  └──────┬───────┘  └──────────────┘
+                         ▼
+                  ┌──────────────┐
+                  │  Cockpit UI  │
+                  └──────────────┘
 ```
 
-**Key Principles:**
-- Agents receive `ContextWindow` by value and mutate locally
-- Event callback pattern (no direct EventBus coupling)
-- Single entry point: `agent.run({ context, workItem })`
-- Tool access controlled via config per agent type
+**Daemon** is the central process — it owns agent execution, session state, the orchestrator, hook system, permissions, and the WebSocket bus. **GraphD** is a standalone SQLite datastore for sessions, API keys, config, and escalations. **Control-Plane** exposes an HTTP API for the Cockpit dashboard and session management.
+
+### Agent Execution Flow
+
+```
+Harness.run(goal)
+  │
+  ├─ RoutingAgent → tier classification
+  │
+  ├─ [simple] → Agent.run() → single LLM call
+  │
+  └─ [standard|complex] → Orchestrator.execute()
+       ├─ ExplorerAgent → system context
+       ├─ PlannerAgent → WorkItem DAG
+       └─ Execute DAG → parallel agent dispatch
+```
+
+### Async Mode
+
+In async mode, the **Watcher** agent provides oversight: it auto-answers PromptUser questions from a curated decision database, performs quality gates on agent output, and raises **Escalations** to the Cockpit when it cannot resolve a decision autonomously. The **Planner** agent produces structured work breakdowns.
+
+Escalation lifecycle: `pending → acknowledged → resolved | dismissed`
+
+## Project Structure
+
+```
+packages/
+  core/                  # Runtime primitives and contracts
+    types/               #   Type definitions (zod schemas)
+    shared/              #   Common utilities
+    protocol/            #   Orchestrator state, hooks, decisions (discriminated unions)
+    work/                #   WorkItem DAG and knowledge management
+    llm/                 #   Multi-provider LLM adapters + circuit breaker
+    context/             #   ContextWindow (RAM or write-through disk)
+    tools/               #   Tool registry and builtins
+    agent/               #   Core agent execution primitive
+    orchestrator/        #   DAG-based orchestration, hook system, state machine
+
+  infra/                 # Runtime infrastructure
+    comms-bus/           #   WebSocket event bus (daemon ↔ TUI)
+    harness-client/      #   Client library for daemon connection
+    harness-daemon/      #   Main daemon: sessions, agents, permissions, hooks
+    graphd/              #   Standalone SQLite datastore
+    control-plane/       #   HTTP API + Cockpit dashboard proxy
+    decision-watcher/    #   Async oversight (watcher agent, decision DB, escalations)
+
+  plugins/               # Optional subsystems
+    agent-memory/        #   PostgreSQL + pgvector memory with connector SDK
+    entity-graph/        #   Tree-sitter code entity extraction
+    memory-injector/     #   Stateless retrieval layer for context injection
+    semantic-compiler/   #   Semantic invariant compiler → verification programs
+
+  external/              # Vendored dependencies
+    prompt-protocol/     #   Schema-agnostic prompt protocol
+
+  apps/                  # User-facing clients
+    launcher/            #   Unified CLI entry point (starts daemon + TUI)
+    tui/                 #   Ink (React) terminal interface
+    dashboard/           #   Vite + React GraphD explorer
+    dashboard-compact/   #   Minimal dashboard variant
+    dashboard-control/   #   Cockpit UI (escalations, session oversight)
+
+config/
+  defaults.json          # Default harness config (agents, budgets, tools, ports)
+  behavioral_rules.md    # Agent behavioral constraints
+  skills/                # Custom skill definitions
+  hooks/                 # Hook definitions
+scripts/                 # Shell and utility scripts
+docs/                    # Architecture, specs, runbooks, setup guides
+tests/                   # Integration tests
+```
 
 ## Agent Types
 
-| Agent | Purpose | Tools | Budget |
-|-------|---------|-------|--------|
-| **routing** | Tier classification | None | 1 iteration |
-| **simple** | Direct response | None | 1 iteration |
-| **explorer** | Codebase discovery | Read, Glob, Grep, Bash | 2 iterations, 20 tool calls |
-| **runtime_script** | WorkItem DAG generation | explorer (sub-agent) | 2 iterations, 15 tool calls |
-| **standard** | Bounded execution | Read, Write, Edit, Glob, Grep, Bash | 10 iterations, 15 tool calls |
-| **complex** | Full orchestration | All + standard (sub-agent) | 15 iterations, 50 tool calls |
-| **context_compactor** | Context summarization | None | 2 iterations |
-| **debugger** | Debug execution | Read, Write, Edit, Glob, Grep, Bash | 10 iterations, 15 tool calls |
-| **web_crawler** | Web research | WebFetch, WebSearch | 10 iterations, 15 tool calls |
+| Agent | Role | Tools | Budget |
+|-------|------|-------|--------|
+| **routing** | Tier classification | None | 1 iter |
+| **simple** | Direct response | None | 1 iter |
+| **explorer** | Codebase discovery | Read, Glob, Grep, Bash | 8 iter, 60 calls |
+| **standard** | Default execution | Read, Write, Edit, Glob, Grep, Bash, Skill, PromptUser, coding, explorer, WebSearch | 50 iter, 225 calls |
+| **coding** | Deep coding (reasoning) | Read, Write, Edit, Glob, Grep, Bash, Skill, PromptUser, explorer | 50 iter, 250 calls |
+| **context_compactor** | Context summarization | None | 3 iter |
+| **debugger** | Debug analysis | Read, Write, Edit, Glob, Grep, Bash, Skill, PromptUser | 15 iter, 45 calls |
+| **web_crawler** | Web research | WebFetch, WebSearch | 15 iter, 23 calls |
+| **watcher** | Async oversight | Read, Glob, Grep, Bash | 20 iter, 40 calls |
+| **planner** | Async work planning | Read, Glob, Grep, PromptUser | 15 iter, 60 calls |
+
+Model roles are mapped per agent: `fast` (routing, simple, compactor, web_crawler), `standard` (explorer, standard, watcher, planner, debugger), `reasoning` (coding).
 
 ## Configuration
 
-### harness_config.json
+### config/defaults.json
 
-Central configuration for all agent types:
+Central configuration for all agent types, tools, services, and runtime behavior. User overrides go in `~/.rex/config.json`.
 
-```json
-{
-  "agents": {
-    "standard": {
-      "llm": {
-        "provider": "openai",
-        "model": "gpt-5-mini",
-        "max_tokens": 16000,
-        "temperature": 0.7
-      },
-      "budget": {
-        "max_iterations": 10,
-        "max_tool_calls": 15,
-        "max_duration_ms": 120000
-      },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
-      "output_schema": { ... }
-    }
-  },
-  "tools": {
-    "bash_timeout_ms": 30000,
-    "max_output_length": 10000
-  },
-  "graphd": {
-    "enabled": true,
-    "db_path": ".graphd/graphd.db"
-  },
-  "context": {
-    "max_tokens": 200000
-  }
-}
-```
+API keys are stored in GraphD (not env vars): `rex providers set <provider> <key>`
 
 ### Environment Variables
 
-See `.env.example` for all available environment variables:
-
 ```bash
-# Required - at least one LLM provider
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-GEMINI_API_KEY=...
+# Required for agent-memory plugin
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/agent_memory
 
-# Optional - for agent memory features
-DATABASE_URL=postgresql://...
-GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
+# OAuth (optional — for connector SDK)
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+# Optional integrations
+TELEGRAM_BOT_TOKEN=
+BROWSER_USE_API_KEY=
 ```
 
-## Built-in Tools
-
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| **Bash** | Shell command execution | `command`, `cwd`, `timeout_ms` |
-| **Read** | File content reading | `path`, `cwd` |
-| **Write** | File creation/overwrite | `path`, `content`, `cwd` |
-| **Edit** | Targeted file editing | `path`, `edits[]`, `cwd` |
-| **Glob** | File pattern matching | `pattern`, `cwd` |
-| **Grep** | Content search with regex | `pattern`, `path`, `cwd` |
-| **WebFetch** | URL content fetching | `url` |
-| **WebSearch** | Web search queries | `query` |
+LLM provider keys are **not** stored in `.env` — they live in GraphD.
 
 ## Development
 
 ```bash
-# Install all dependencies
-bun install
+bun install                    # Install all workspace deps
+bun run start                  # Full stack (daemon + control-plane + TUI)
+bun run start:split            # Daemon + control-plane only
+bun run start:tui              # TUI only (connects to running daemon)
+bun run start:graphd           # GraphD standalone
 
-# Run the CLI
-bun run packages/apps/launcher/index.ts
-
-# Run TUI directly
-bun run packages/apps/tui/index.tsx
-
-# Run harness daemon (bus server)
-bun run packages/infra/harness-daemon/src/index.ts
-
-# Run GraphD (standalone datastore process)
-bun run packages/infra/graphd/src/graphd.ts
-
-# Run control-plane server (HTTP API + dashboard)
-bun run packages/infra/control-plane/src/control-plane.ts
-
-# Recommended split startup order:
-# 1) bun run start:graphd
-# 2) bun run packages/infra/harness-daemon/src/index.ts
-# 3) bun run packages/infra/control-plane/src/control-plane.ts
-
-# Type check all packages
-bun run --filter '*' tsc --noEmit
+bun run build                  # Build all packages + apps
+bun run clean                  # Clean all build artifacts
+bun run lint                   # Typecheck all packages
 ```
 
-## Stealth Browser Authentication
+## Key Design Principles
 
-For browser automation with persistent authentication:
-
-```bash
-# Login to multiple sites once with stealth settings
-./scripts/multi-site-auth-stealth.sh
-
-# Use saved authentication states
-./scripts/multi-site-auth-usage.sh [site] [action] [args...]
-
-# Examples:
-./scripts/multi-site-auth-usage.sh x open https://x.com
-./scripts/multi-site-auth-usage.sh github snapshot -i
-```
-
-See [docs/setup/STEALTH-BROWSER-GUIDE.md](docs/setup/STEALTH-BROWSER-GUIDE.md) for full details.
-
-**Important:** Never commit `auth-states/` directory - it contains sensitive authentication cookies!
-
-## Documentation
-
-- [Architecture Diagram](docs/architecture/ARCHITECTURE_DIAGRAM.md)
-- [Control Plane Design](docs/architecture/CONTROL_PLANE_DESIGN.md)
-- [Setup Guides](docs/setup/)
-- [Behavioral Rules](config/behavioral_rules.md)
+- **Agents are pure functions**: receive `ContextWindow` by value, mutate locally
+- **Event callback pattern**: no direct EventBus coupling
+- **Single entry point**: `agent.run({ context, workItem })`
+- **Discriminated unions**: exhaustive handling enforced by TypeScript
+- **Write-through disk**: RAM is authoritative, mutations trigger atomic disk writes (tmp + rename)
+- **Session IS the Workflow**: no separate Workflow entity
+- **Escalation is the only new stateful entity**: the single coordination primitive between async agents and human oversight
 
 ## License
 

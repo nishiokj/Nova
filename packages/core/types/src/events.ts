@@ -404,7 +404,7 @@ export interface MemoryInjectedData {
 
 /**
  * Data for watcher_decision event.
- * Emitted when the decision watcher makes an autonomous decision.
+ * Emitted when the decision observer makes an autonomous decision.
  */
 export interface WatcherDecisionData {
   trigger: string;

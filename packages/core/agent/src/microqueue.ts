@@ -1,10 +1,5 @@
 /**
  * Microqueue / cooperative yielding helper.
- *
- * Bun runs single-threaded by default; long synchronous loops (tool-call bursts,
- * message building) can monopolize the event loop.
- *
- * This helper provides periodic yielding without changing semantics.
  */
 
 export interface MicroQueueOptions {
@@ -29,15 +24,12 @@ export function createMicroQueue(options: MicroQueueOptions = {}): MicroQueue {
     async yieldIfNeeded(): Promise<void> {
       ops++;
 
-      // Cheap op-count check first.
       if (yieldEvery > 0 && ops % yieldEvery === 0) {
-        // Also guard against calling Date.now() too often.
         const now = Date.now();
         if (timeSliceMs > 0 && now - sliceStart < timeSliceMs) {
           return;
         }
         sliceStart = now;
-        // Microtask yield: allows IO/event handlers to run without timers.
         await Promise.resolve();
       }
     },

@@ -129,7 +129,7 @@ interface HarnessLike {
   getSessionAsyncRun?(sessionKey: string): { requestId: string; goal: string; cancelled: boolean; startedAt: number } | null;
   cancelSessionAsyncRun?(sessionKey: string): void;
   clearSessionAsyncRun?(sessionKey: string): void;
-  // Watcher CLI methods
+  // Observer CLI methods
   watcherStatus?(sessionKey: string): Record<string, unknown>;
   watcherContext?(sessionKey: string): Record<string, unknown>;
   watcherSearch?(sessionKey: string, query: string): Promise<Record<string, unknown>>;
@@ -140,7 +140,7 @@ interface HarnessLike {
   watcherDefocus?(sessionKey: string): Record<string, unknown>;
   watcherReanchor?(sessionKey: string, goal: string): Record<string, unknown>;
   watcherSummarize?(sessionKey: string): Record<string, unknown>;
-  /** Create an LLM-backed watcher hook registry + planning objective for a session. */
+  /** Create an LLM-backed observer hook registry + planning objective for a session. */
   createWatcherHookRegistryForSession?(sessionKey: string, goal: string, workingDir: string, watcherDir?: string): Promise<{ hookRegistry: HookRegistry; planningObjective: string }>;
 }
 
@@ -438,52 +438,34 @@ export class BridgeGateway {
     const readyEvent = this.harness.createReadyEvent(sessionKey);
     this.sendEvent(connectionId, readyEvent, sessionChannel(sessionKey));
 
-    // Load and emit per-agent-type model selections if available
-    if (graphd) {
-      // Send persisted selections directly to this connection to avoid session-channel races
-      const selections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
-      const selectionsObject: Record<string, { provider?: string; model?: string; reasoning?: string }> = {};
-      for (const [type, selection] of selections) {
-        selectionsObject[type] = selection;
-      }
-      this.sendAuthResponse(connectionId, 'get_model', {
-        success: true,
-        model_selections: selectionsObject,
-      });
+    // Load and emit per-agent-type model selections from session state.
+    // This should work regardless of GraphD availability so TUI does not reset
+    // to null selections on reconnect when the daemon is running without GraphD.
+    const selections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+    const selectionsObject: Record<string, { provider?: string; model?: string; reasoning?: string }> = {};
+    for (const [type, selection] of selections) {
+      selectionsObject[type] = selection;
+    }
+    this.sendAuthResponse(connectionId, 'get_model', {
+      success: true,
+      model_selections: selectionsObject,
+    });
 
-      // Emit model_changed for all agent types with persisted selections
-      const allSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
-      const agentTypes = ['standard', 'explorer', 'coding'];
-      for (const agentType of agentTypes) {
-        const selection = allSelections.get(agentType) ?? null;
-        this.sendEvent(connectionId, {
-          type: 'model_changed',
-          data: {
-            agentType,
-            selectedModel: selection?.model ?? null,
-            selectedProvider: selection?.provider ?? null,
-            provider: selection?.provider ?? null,
-            model: selection?.model ?? null,
-            reasoning: selection?.reasoning ?? null,
-          },
-        }, sessionChannel(sessionKey));
-      }
-    } else {
-      // No GraphD - emit null selections for all agent types
-      const agentTypes = ['standard', 'explorer', 'coding'];
-      for (const agentType of agentTypes) {
-        this.sendEvent(connectionId, {
-          type: 'model_changed',
-          data: {
-            agentType,
-            selectedModel: null,
-            selectedProvider: null,
-            provider: null,
-            model: null,
-            reasoning: null,
-          },
-        }, sessionChannel(sessionKey));
-      }
+    // Emit model_changed for standard tabs + any additional persisted agent types.
+    const agentTypes = new Set<string>(['standard', 'explorer', 'coding', ...selections.keys()]);
+    for (const agentType of agentTypes) {
+      const selection = selections.get(agentType) ?? null;
+      this.sendEvent(connectionId, {
+        type: 'model_changed',
+        data: {
+          agentType,
+          selectedModel: selection?.model ?? null,
+          selectedProvider: selection?.provider ?? null,
+          provider: selection?.provider ?? null,
+          model: selection?.model ?? null,
+          reasoning: selection?.reasoning ?? null,
+        },
+      }, sessionChannel(sessionKey));
     }
   }
 
@@ -1531,7 +1513,7 @@ export class BridgeGateway {
     sessionKey: string,
     fallbackSelection: PersistedModelSelection
   ): void {
-    for (const companionAgentType of ['planner', 'watcher'] as const) {
+    for (const companionAgentType of ['planner', 'observer'] as const) {
       const existingSelection = this.harness.getSessionSelectedModel?.(sessionKey, companionAgentType);
       if (!existingSelection?.model || !existingSelection?.provider) {
         this.harness.setSessionSelectedModel?.(sessionKey, companionAgentType, fallbackSelection);
@@ -2208,7 +2190,7 @@ export class BridgeGateway {
       graphd.sessionUpdateWorkflow(sessionKey, { goal });
     }
 
-    // Create watcher hook registry for this session
+    // Create observer hook registry for this session
     if (!this.harness.createWatcherHookRegistryForSession) {
       sendFailure('Async sessions are not supported by this harness.');
       return;
@@ -2216,7 +2198,7 @@ export class BridgeGateway {
 
     try {
       this.harness.setSessionAsyncModeEnabled?.(sessionKey, true);
-      // Pass daemon's root as watcherDir for .watcher artifacts, session's workingDir for agent operations
+      // Pass daemon's root as watcherDir for .observer artifacts, session's workingDir for agent operations
       const { hookRegistry, planningObjective } = await this.harness.createWatcherHookRegistryForSession(sessionKey, goal, workingDir, this.workingDir);
 
       const requestId = generateRequestId();
@@ -2234,7 +2216,7 @@ export class BridgeGateway {
         state.asyncRun = asyncRunInfo;
       }
 
-      // Start the harness run with the watcher hook registry and planning objective as input
+      // Start the harness run with the observer hook registry and planning objective as input
       const handle = this.harness.run({
         requestId,
         inputText: planningObjective,
@@ -2307,7 +2289,7 @@ export class BridgeGateway {
 
     const { requestId, goal } = sessionAsyncRun;
 
-    // Mark as cancelled at session level so the watcher hook can detect it
+    // Mark as cancelled at session level so the observer hook can detect it
     this.harness.cancelSessionAsyncRun?.(sessionKey);
     this.harness.clearSessionAsyncRun?.(sessionKey);
 
@@ -2379,7 +2361,7 @@ export class BridgeGateway {
   }
 
   // =========================================================================
-  // Watcher Command Handlers
+  // Observer Command Handlers
   // =========================================================================
 
   private handleWatcherStatus(connectionId: string, state: ConnectionState): void {

@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "comms-bus": "workspace:*",
-    "decision-watcher": "workspace:*",
+    "decision-engine": "workspace:*",
     "entity-graph": "workspace:*",
     "graphd": "workspace:*",
     "harness-client": "workspace:*",

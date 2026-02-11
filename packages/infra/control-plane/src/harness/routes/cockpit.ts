@@ -2704,7 +2704,7 @@ export async function handlePostCockpitPacket(
   const explicitEvidenceIndex = parseEvidenceIndex(body.evidenceIndex);
   const evidenceIndex = explicitEvidenceIndex ?? inferEvidenceIndexFromMarkdown(markdown);
   const validationWarnings = collectPacketValidationWarnings(packetType, evidenceIndex);
-  const source = asString(body.source) ?? 'watcher';
+  const source = asString(body.source) ?? 'observer';
 
   const packetRecord: Record<string, unknown> = {
     packetId,

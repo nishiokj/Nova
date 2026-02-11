@@ -290,4 +290,70 @@ describe('CodexProvider', () => {
       },
     ]);
   });
+
+  it('compiles response schema for codex without anyOf', async () => {
+    const provider = new CodexProvider();
+    const context = createContext();
+    let capturedBody: Record<string, unknown> | null = null;
+
+    const rawSse = [
+      sseFrame({
+        type: 'response.completed',
+        response: {
+          id: 'resp_codex_schema',
+          output_text: 'ok',
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+      'data: [DONE]\n\n',
+    ].join('');
+
+    globalThis.fetch = (async (_url, options) => {
+      capturedBody = JSON.parse(String(options?.body ?? '{}')) as Record<string, unknown>;
+      return new Response(rawSse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    }) as typeof fetch;
+
+    const originalSchema = {
+      anyOf: [
+        {
+          type: 'object',
+          properties: { action: { type: 'string', const: 'done' } },
+          required: ['action'],
+          additionalProperties: false,
+        },
+        {
+          type: 'object',
+          properties: { action: { type: 'string', const: 'continue' } },
+          required: ['action'],
+          additionalProperties: false,
+        },
+      ],
+    };
+
+    await consumeStream(provider, context, {
+      messages: [{ role: 'user', content: 'return structured output' }],
+      llm: { provider: 'codex', model: 'gpt-5.3-codex' },
+      responseSchema: {
+        name: 'test_schema',
+        schemaId: 'agent_action',
+        schema: originalSchema,
+        strict: true,
+      },
+    });
+
+    const outboundSchema = (
+      (capturedBody?.text as { format?: { schema?: unknown } })?.format?.schema ?? null
+    ) as Record<string, unknown> | null;
+
+    expect(outboundSchema).not.toBeNull();
+    const outboundSerialized = JSON.stringify(outboundSchema);
+    expect(outboundSerialized).not.toContain('"anyOf"');
+    expect(outboundSerialized).not.toContain('"oneOf"');
+    expect(outboundSchema?.type).toBe('object');
+    expect((outboundSchema?.properties as Record<string, unknown>)?.result).toBeUndefined();
+    expect((((outboundSchema?.properties as Record<string, unknown>)?.action as Record<string, unknown> | undefined)?.enum)).toEqual(['done', 'continue']);
+
+    // Compiler must not mutate caller-owned schema objects.
+    expect(JSON.stringify(originalSchema)).toContain('"anyOf"');
+  });
 });

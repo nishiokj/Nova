@@ -14,11 +14,34 @@ import { describe, it, expect } from "bun:test";
 import type {
   UserPromptData,
   UserPromptQuestion,
-  AgentQuestion,
-  QuestionOption,
-  QuestionType,
   PermissionRequestData,
 } from "./types.js";
+
+type QuestionType =
+  | "multiple_choice"
+  | "multi_select"
+  | "fill_in_blank"
+  | "yes_no"
+  | "free_text"
+  | "plan_mode_exit"
+  | "spec_review";
+
+interface QuestionOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+interface AgentQuestion {
+  requestId: string;
+  type: QuestionType;
+  question: string;
+  context?: string;
+  options?: QuestionOption[];
+  placeholder?: string;
+  defaultValue?: string;
+  required?: boolean;
+}
 
 // ============================================
 // VALIDATION LOGIC (extracted from index.tsx)

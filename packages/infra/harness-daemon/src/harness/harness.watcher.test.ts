@@ -1,5 +1,5 @@
 /**
- * AgentHarness watcher memory injector wiring tests
+ * AgentHarness observer memory injector wiring tests
  */
 
 import { describe, it, expect, mock } from 'bun:test';
@@ -72,10 +72,10 @@ import { AgentHarness } from './harness.js';
 import type { FullHarnessConfig } from './config.js';
 
 function createTestConfig(): FullHarnessConfig {
-  const cwd = mkdtempSync(join(tmpdir(), 'harness-watcher-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'harness-observer-'));
   return {
     agents: {
-      watcher: {
+      observer: {
         llm: {
           provider: 'lmstudio',
           displayProvider: 'lmstudio',
@@ -97,7 +97,7 @@ function createTestConfig(): FullHarnessConfig {
         },
       },
     },
-    defaultAgent: 'watcher',
+    defaultAgent: 'observer',
     tools: {
       workingDir: cwd,
       repoRoot: cwd,
@@ -149,19 +149,19 @@ function createTestConfig(): FullHarnessConfig {
   };
 }
 
-describe('AgentHarness watcher memory injector wiring', () => {
-  it('passes memoryInjector to watcher Agent runtime', async () => {
+describe('AgentHarness observer memory injector wiring', () => {
+  it('passes memoryInjector to observer Agent runtime', async () => {
     capturedRuntime = null;
     const config = createTestConfig();
     const harness = new AgentHarness(config);
     const sessionKey = 'session-test';
 
     const state = (harness as unknown as { getOrCreateSessionState: (key: string) => { store: { setModelSelection: (agentType: string, selection: { provider: string; model: string }) => void } } }).getOrCreateSessionState(sessionKey);
-    state.store.setModelSelection('watcher', { provider: 'lmstudio', model: 'test-model' });
+    state.store.setModelSelection('observer', { provider: 'lmstudio', model: 'test-model' });
 
     const { hookRegistry } = await harness.createWatcherHookRegistryForSession(
       sessionKey,
-      'Watcher objective',
+      'Observer objective',
       config.tools.workingDir
     );
     const hooks = hookRegistry.getHooks('goal_state_reached');
@@ -187,12 +187,12 @@ describe('AgentHarness watcher memory injector wiring', () => {
     }, {
       sessionKey,
       workId: 'work-1',
-      agentType: 'watcher',
+      agentType: 'observer',
       iteration: 1,
       metrics,
       recentMessages: [],
       filesModified: [],
-      objective: 'Watcher objective',
+      objective: 'Observer objective',
       realignCount: 0,
     });
 

@@ -147,7 +147,7 @@ export interface AgentResultBase {
   artifacts?: ArtifactItem[];
   /** Agent's execution context - contains tool calls, outputs, reasoning from this run */
   localContext: ContextWindow;
-  /** Optional watcher stop metadata when cadence intervention terminates a work item/session. */
+  /** Optional observer stop metadata when cadence intervention terminates a work item/session. */
   watcherStop?: {
     reason: string;
     escalationId?: string;
@@ -295,7 +295,7 @@ export interface AgentCadenceMetrics {
 }
 
 /**
- * Result from cadence check hook - watcher's steering directive.
+ * Result from cadence check hook - observer's steering directive.
  */
 export interface AgentCadenceResult {
   action: 'continue' | 'inject' | 'stop';
@@ -332,8 +332,8 @@ export interface AgentHooks {
   shouldStop?: () => boolean;
 
   /**
-   * Called every N iterations inside the agent loop for watcher intervention.
-   * Gives the watcher a synchronization point to steer or stop the agent mid-run.
+   * Called every N iterations inside the agent loop for observer intervention.
+   * Gives the observer a synchronization point to steer or stop the agent mid-run.
    */
   cadenceCheck?: (metrics: AgentCadenceMetrics) => Promise<AgentCadenceResult>;
 }
@@ -355,7 +355,7 @@ export type InternalHookEvent =
       domain?: string;
       dependencies?: string[];
       targetPaths?: string[];
-      /** Semantic state attached during watcher split/create (to be written to semantic.json) */
+      /** Semantic state attached during observer split/create (to be written to semantic.json) */
       semantic?: unknown;
     }
   | {
@@ -507,7 +507,7 @@ export type InternalHookEvent =
       };
     }
   | {
-      /** Fired when watcher stops a specific work item during cadence checks. */
+      /** Fired when observer stops a specific work item during cadence checks. */
       type: 'watcher_agent_stopped';
       sessionKey: string;
       workId: string;

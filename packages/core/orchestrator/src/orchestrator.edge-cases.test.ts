@@ -124,7 +124,7 @@ function createAgentRegistry(overrides?: Partial<AgentConfig>): AgentRegistry {
   const configs = new Map<string, AgentConfig>([
     ['standard', { ...base, ...overrides }],
     ['planner', { ...plannerConfig, ...overrides }],
-    ['watcher', { ...base, type: 'watcher', ...overrides }],
+    ['observer', { ...base, type: 'observer', ...overrides }],
     ['explorer', { ...base, type: 'explorer', ...overrides }],
   ]);
 
@@ -1007,10 +1007,10 @@ describe('Edge Case: Interruption Preempts Handoff', () => {
   });
 });
 
-describe('Edge Case: Watcher Defer on User Input', () => {
+describe('Edge Case: Observer Defer on User Input', () => {
   beforeEach(() => { resetProviderCircuit('test'); resetProviderCircuit('openai-compat'); });
 
-  it('defers to user when watcher returns defer decision', async () => {
+  it('defers to user when observer returns defer decision', async () => {
     // defer/escalate maps to { decision: 'allow' } (line 95-96 in decision_mappers).
     // Allow = don't block termination → user_input_required pause proceeds.
 
@@ -1136,10 +1136,10 @@ describe('Edge Case: Max Duration Exceeded', () => {
   });
 });
 
-describe('Edge Case: User Input with Watcher Answer', () => {
+describe('Edge Case: User Input with Observer Answer', () => {
   beforeEach(() => { resetProviderCircuit('test'); resetProviderCircuit('openai-compat'); });
 
-  it('watcher answer hook does not crash when registered', async () => {
+  it('observer answer hook does not crash when registered', async () => {
     // At line 2170-2181, when terminationReason is 'user_input_required'
     // and hook blocks, the answer goes as a USER message.
     // The PromptUser tool integration happens inside Agent — with mock LLM,

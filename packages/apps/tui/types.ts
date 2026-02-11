@@ -93,7 +93,7 @@ export type EventKind = "work" | "tool" | "planning" | "system";
 
 export type Role = "user" | "agent" | "system" | "status" | "reasoning";
 
-export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "question" | "providers" | "theme" | "response" | "models" | "sessions" | "usage" | "permission";
+export type UIMode = "chat" | "skills" | "hooks" | "wizard" | "providers" | "theme" | "response" | "models" | "sessions" | "usage" | "permission";
 export type WizardType = "skill" | "hook";
 
 export interface MessageEntry {
@@ -199,33 +199,6 @@ export interface ErrorData {
   fatal?: boolean;
   /** Error code for programmatic handling */
   code?: string;
-}
-
-// Question flow types
-export type QuestionType =
-  | "multiple_choice"
-  | "multi_select"
-  | "fill_in_blank"
-  | "yes_no"
-  | "free_text"
-  | "plan_mode_exit"
-  | "spec_review";
-
-export interface QuestionOption {
-  id: string;
-  label: string;
-  description?: string;
-}
-
-export interface AgentQuestion {
-  requestId: string;
-  type: QuestionType;
-  question: string;
-  context?: string;
-  options?: QuestionOption[];
-  placeholder?: string;
-  defaultValue?: string;
-  required?: boolean;
 }
 
 /** Single question item in a user prompt */

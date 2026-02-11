@@ -19,7 +19,7 @@ import type {
   DecisionEngine,
   WorkLog,
   WorkItemLog,
-} from 'decision-watcher';
+} from 'decision-engine';
 import type { HookRegistry } from 'orchestrator';
 
 /**
@@ -31,9 +31,9 @@ export interface SessionState {
   store: SessionStore;
   /** Last access timestamp (ms) for TTL eviction */
   lastAccessMs: number;
-  /** Decision database for watcher persistence (optional) */
+  /** Decision database for observer persistence (optional) */
   decisionDatabase?: DecisionDatabase;
-  /** Watcher decision engine (optional) */
+  /** Observer decision engine (optional) */
   watcherEngine?: DecisionEngine;
   /** Work log for session (optional) */
   workLog?: WorkLog;
@@ -41,9 +41,9 @@ export interface SessionState {
   workItemLogs: Map<string, WorkItemLog>;
   /** Set of created work item IDs for this session */
   workItemsCreated: Set<string>;
-  /** Watcher context window (optional) */
+  /** Observer context window (optional) */
   watcherContext?: ContextWindow;
-  /** Watcher hook registry (optional) */
+  /** Observer hook registry (optional) */
   hookRegistry?: HookRegistry;
   /** Internal-hook unregister callbacks for session-scoped global hooks */
   internalHookUnregisters: Array<() => void>;

@@ -1,6 +1,6 @@
 /**
- * Canonical watcher trigger/action contract shared across packages.
- * Keep all watcher enums and trigger-action constraints here to prevent drift.
+ * Canonical watcher trigger/action contract.
+ * Owned by plugins (agent-memory), not core/infra.
  */
 
 export const WATCHER_TRIGGER_VALUES = [
@@ -49,11 +49,6 @@ export const VALID_WATCHER_ACTIONS_BY_TRIGGER = {
   handoff_approval: ['allow', 'realign'],
 } as const satisfies Record<WatcherTrigger, readonly WatcherActionType[]>;
 
-/**
- * Compile-time extraction of valid action types for a given trigger.
- * Use with Extract<WatcherAction, { watcherAction: ValidActionsFor<T> }>
- * to narrow WatcherAction to only the variants valid for trigger T.
- */
 export type ValidActionsFor<T extends WatcherTrigger> =
   (typeof VALID_WATCHER_ACTIONS_BY_TRIGGER)[T][number];
 
@@ -72,10 +67,6 @@ export function getValidWatcherActions(trigger: WatcherTrigger): readonly Watche
   return VALID_WATCHER_ACTIONS_BY_TRIGGER[trigger];
 }
 
-/**
- * Runtime assertion: throws if action is not valid for the given trigger.
- * Skips validation for triggers with no constraints (e.g. session_init).
- */
 export function assertValidActionForTrigger(trigger: WatcherTrigger, action: string): void {
   const valid = VALID_WATCHER_ACTIONS_BY_TRIGGER[trigger];
   if (valid.length > 0 && !(valid as readonly string[]).includes(action)) {

@@ -1,4 +1,4 @@
-import type { RaisedEscalation, WatcherTrigger } from 'decision-watcher';
+import type { RaisedEscalation, WatcherTrigger } from 'decision-engine';
 
 export type SessionEscalationStatus = 'pending' | 'acknowledged' | 'resolved' | 'dismissed';
 

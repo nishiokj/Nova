@@ -24,7 +24,7 @@ export interface WorkItemSpec {
     maxLlmCalls?: number;
     maxDurationMs?: number;
   };
-  /** Semantic state for this work item (attached during watcher split/create) */
+  /** Semantic state for this work item (attached during observer split/create) */
   semantic?: unknown;
 }
 

@@ -15,7 +15,7 @@
  * Classification of what kind of decision is needed.
  */
 export type EscalationType =
-  | 'architectural' // Watcher-driven design decision
+  | 'architectural' // Observer-driven design decision
   | 'uncertainty' // Agent not confident
   | 'permission' // Needs approval for action
   | 'conflict' // Invariant or preference conflict
@@ -42,7 +42,7 @@ export type EscalationStatus = 'pending' | 'acknowledged' | 'resolved' | 'dismis
 
 /**
  * A pre-defined option for resolving an escalation.
- * Watcher can suggest options with implications.
+ * Observer can suggest options with implications.
  */
 export interface EscalationOption {
   /** Unique ID for this option (e.g., 'jwt', 'opaque', 'option-1') */

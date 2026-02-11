@@ -87,7 +87,7 @@ import {
   type RaisedEscalation,
   type SemanticOutput,
   type WatcherRuntime,
-} from 'decision-watcher';
+} from 'decision-engine';
 import type { EntityGraph, EntityGraphConfig } from 'entity-graph';
 import { createHookRegistry, DEFAULT_ORCHESTRATOR_CONFIG, type HookRegistry } from 'orchestrator';
 import { createWorkItem } from 'work';
@@ -294,7 +294,7 @@ function defaultEscalationOptions(trigger: WatcherTrigger): EscalationOption[] {
         {
           id: 'pause_and_debug',
           label: 'Pause and debug',
-          description: 'Stop execution and investigate watcher/runtime reliability.',
+          description: 'Stop execution and investigate observer/runtime reliability.',
           implications: ['Highest confidence in diagnosis, highest interruption cost.'],
           recommended: false,
         },
@@ -394,7 +394,7 @@ function buildEscalationPacketMarkdown(
   lines.push('', '## Action');
   lines.push('Select one option, then click **Resolve Escalation** in Cockpit.');
   lines.push('', '## Situation');
-  const context = escalation.context.trim() || `Watcher escalation triggered by ${trigger}.`;
+  const context = escalation.context.trim() || `Observer escalation triggered by ${trigger}.`;
   lines.push(context.slice(0, 420));
 
   lines.push('', '## Options');
@@ -422,7 +422,7 @@ function buildEscalationPacketMarkdown(
 
   lines.push('', '## Evidence');
   if (evidenceRefs.length === 0) {
-    lines.push('- No explicit refs were provided by watcher.');
+    lines.push('- No explicit refs were provided by observer.');
   } else {
     for (const ref of evidenceRefs.slice(0, 8)) {
       lines.push(`- ${ref.label}: ${inlineRef(ref.type, ref.value)}`);
@@ -1559,7 +1559,7 @@ export class AgentHarness {
 
     const internalContext: InternalHookContext = {
       workId: resolvedState.resolved.workItemId ?? escalationId,
-      agentType: 'watcher',
+      agentType: 'observer',
       sessionKey,
       requestId: '',
       objective: resolvedState.resolved.title,
@@ -1580,7 +1580,7 @@ export class AgentHarness {
         timestamp: new Date().toISOString(),
         workId: resolvedState.resolved.workItemId ?? escalationId,
         note: `[escalation_resolved] ${resolvedState.resolved.id} (${resolution.resolvedBy})`,
-        source: 'watcher',
+        source: 'observer',
       }).catch((err) => {
         this.logger.warning('Work log write failed (escalation_resolved)', {
           sessionKey,
@@ -1627,11 +1627,11 @@ export class AgentHarness {
       const paused = store.getPausedState();
       const replayContext = resolvedPausedWorkItem
         ? [
-            '[Watcher Replay Context]',
+            '[Observer Replay Context]',
             `Work item: ${resolvedPausedWorkItem.workId}`,
             `Agent: ${resolvedPausedWorkItem.agentType}`,
             ...(resolvedPausedWorkItem.objective ? [`Original objective: ${resolvedPausedWorkItem.objective}`] : []),
-            `Watcher stop reason: ${resolvedPausedWorkItem.reason}`,
+            `Observer stop reason: ${resolvedPausedWorkItem.reason}`,
             `Escalation: ${escalationId}`,
             ...(sessionState?.workLog ? [`Work log: ${sessionState.workLog.filePath()}`] : []),
             '',
@@ -1787,8 +1787,8 @@ export class AgentHarness {
       }
     };
 
-    if (!this.agentRegistry.has('watcher')) {
-      issues.push('Missing required agent config: watcher');
+    if (!this.agentRegistry.has('observer')) {
+      issues.push('Missing required agent config: observer');
     }
     check('planner', 'planner_output');
 
@@ -2677,23 +2677,23 @@ export class AgentHarness {
       );
     }
 
-    // Only create/use watcher hooks when async mode is enabled for this session/run
+    // Only create/use observer hooks when async mode is enabled for this session/run
     let effectiveHookRegistry = hookRegistry;
     if (asyncEnabledForRun && !hookRegistry) {
       // Check if we already have a cached hook registry for this session
       const cachedRegistry = sessionState?.hookRegistry;
       if (cachedRegistry) {
         effectiveHookRegistry = cachedRegistry;
-        this.logger.debug('Using cached watcher hook registry', { sessionKey });
+        this.logger.debug('Using cached observer hook registry', { sessionKey });
       } else {
-        // Create the watcher hook registry - registers logging hooks and sets up watcher
-        // Pass daemon's config working dir as watcherDir for .watcher artifacts (project root)
-        this.logger.info('Creating watcher hook registry for async mode', { sessionKey, goal });
+        // Create the observer hook registry - registers logging hooks and sets up observer
+        // Pass daemon's config working dir as watcherDir for .observer artifacts (project root)
+        this.logger.info('Creating observer hook registry for async mode', { sessionKey, goal });
         const { hookRegistry: watcherRegistry } = await this.createWatcherHookRegistryForSession(
           sessionKey,
           goal,
           effectiveWorkingDir,
-          this.config.tools.workingDir  // Watcher artifacts at project root
+          this.config.tools.workingDir  // Observer artifacts at project root
         );
         effectiveHookRegistry = watcherRegistry;
         if (sessionState) {
@@ -2717,7 +2717,7 @@ export class AgentHarness {
       } : undefined,
       // Pass stop request check so agent can exit loop early on explicit "stop" from user
       checkStopRequest: store ? () => store.hasPendingStopRequest() : undefined,
-      // Watcher evaluation — rule-based, fires every minWatcherIterationGap iterations
+      // Observer evaluation — rule-based, fires every minWatcherIterationGap iterations
       onIteration: asyncEnabledForRun ? (state: { iteration: number; context: ContextWindow; totalToolCalls: number; totalLlmCalls: number; elapsedMs: number }) => {
         if (state.iteration - lastWatcherIteration < minWatcherGap) return;
         lastWatcherIteration = state.iteration;
@@ -2728,7 +2728,7 @@ export class AgentHarness {
 
         // Summarize (compact + epistemic ledger) when context is high and decisions exist
         if (pct >= watcherCompactTrigger && hasDecisions) {
-          this.logger.info('Watcher: summarizing (context high + decisions in play)', {
+          this.logger.info('Observer: summarizing (context high + decisions in play)', {
             pct,
             sessionKey,
             watcherCompactTrigger,
@@ -2739,7 +2739,7 @@ export class AgentHarness {
 
         // Plain compact when context is high but no decisions to ledger
         if (pct >= watcherCompactTrigger) {
-          this.logger.info('Watcher: triggering compact', {
+          this.logger.info('Observer: triggering compact', {
             pct,
             sessionKey,
             watcherCompactTrigger,
@@ -2942,7 +2942,7 @@ export class AgentHarness {
    * @param sessionKey - Session identifier
    * @param goal - The goal for the session
    * @param workingDir - Agent's working directory for file operations (used for cwd in logs)
-   * @param watcherDir - Directory for watcher artifacts (.watcher/), defaults to workingDir
+   * @param watcherDir - Directory for observer artifacts (.observer/), defaults to workingDir
    * @param mode - Session mode for the work log entry
    */
   async registerSessionLoggingHooks(
@@ -3094,7 +3094,7 @@ export class AgentHarness {
           dependencies: event.dependencies,
         }));
 
-        // Write semantic if attached (from watcher split/create)
+        // Write semantic if attached (from observer split/create)
         if (event.semantic) {
           writeSemanticFileAsync(
             {
@@ -3331,14 +3331,14 @@ export class AgentHarness {
   }
 
   /**
-   * Create a watcher-backed hook registry for a session.
-   * This is the bridge between the orchestrator control-plane hooks and the LLM-backed watcher.
-   * Calls registerSessionLoggingHooks first (idempotent), then adds watcher-specific setup.
+   * Create a observer-backed hook registry for a session.
+   * This is the bridge between the orchestrator control-plane hooks and the LLM-backed observer.
+   * Calls registerSessionLoggingHooks first (idempotent), then adds observer-specific setup.
    *
    * @param sessionKey - Session identifier
    * @param goal - The goal for the async session
    * @param workingDir - Agent's working directory for file operations (used for cwd in logs)
-   * @param watcherDir - Directory for watcher artifacts (.watcher/), defaults to workingDir
+   * @param watcherDir - Directory for observer artifacts (.observer/), defaults to workingDir
    */
   async createWatcherHookRegistryForSession(
     sessionKey: string,
@@ -3349,10 +3349,10 @@ export class AgentHarness {
     const store = this.ensureSessionHydrated(sessionKey, { workingDir, includeUserPreferences: true });
     const sessionState = this.getOrCreateSessionState(sessionKey, false, workingDir);
     const effectiveWatcherDir = watcherDir ?? workingDir;
-    if (!this.agentRegistry.has('watcher')) {
-      throw new Error('Watcher agent config missing from registry');
+    if (!this.agentRegistry.has('observer')) {
+      throw new Error('Observer agent config missing from registry');
     }
-    const watcherAgentConfig = this.agentRegistry.getConfig('watcher');
+    const watcherAgentConfig = this.agentRegistry.getConfig('observer');
     const watcherContext = store.getContext();
     sessionState.watcherContext = watcherContext;
     const watcherRuntime: WatcherRuntime = {
@@ -3415,7 +3415,7 @@ export class AgentHarness {
         timestamp: new Date(now).toISOString(),
         workId: event.workId,
         note: `[watcher_stop] ${event.reason}`,
-        source: 'watcher',
+        source: 'observer',
       }));
 
       if (event.escalationId && this.graphd) {
@@ -3464,7 +3464,7 @@ export class AgentHarness {
         const engine = this.getOrCreateWatcherEngine(sessionKey);
         engine.incrementDecisionCount(sessionKey);
 
-        this.logger.info('Watcher decision', {
+        this.logger.info('Observer decision', {
           sessionKey,
           trigger: entry.trigger,
           watcherAction: entry.watcherAction,
@@ -3522,7 +3522,7 @@ export class AgentHarness {
           type: 'escalation',
           createdAt: createdAtIso,
           contentMarkdown: packetDraft.markdown,
-          source: 'watcher',
+          source: 'observer',
           escalationId: escalation.id,
           ...(escalation.workItemId ? { workItemId: escalation.workItemId } : {}),
           ...(packetDraft.evidenceIndex.length > 0 ? { evidenceIndex: packetDraft.evidenceIndex } : {}),
@@ -3536,7 +3536,7 @@ export class AgentHarness {
           data: {
             packetId,
             packetType: 'escalation',
-            source: 'watcher',
+            source: 'observer',
             escalationId: escalation.id,
             requestedDecision: packetDraft.requestedDecision,
             ...(packetSourcePath ? { sourcePath: packetSourcePath } : {}),
@@ -3593,7 +3593,7 @@ export class AgentHarness {
           timestamp: new Date(now).toISOString(),
           workId: escalation.workItemId ?? hookContext.workId,
           note: `[escalation] ${escalation.id} (${escalation.escalationType}) ${escalation.title}`,
-          source: 'watcher',
+          source: 'observer',
         }));
       },
     }, sessionKey);
@@ -3604,7 +3604,7 @@ export class AgentHarness {
 
     const hookRegistry = createHookRegistry();
     hookRegistry.registerHooks({
-      source: `watcher:${sessionKey}`,
+      source: `observer:${sessionKey}`,
       protocolId: getProtocolId(),
       hooks: watcherHooks,
     });
@@ -3613,7 +3613,7 @@ export class AgentHarness {
   }
 
   // =========================================================================
-  // Decision Watcher: Per-session database & engine
+  // Decision Observer: Per-session database & engine
   // =========================================================================
 
   /**
@@ -3640,7 +3640,7 @@ export class AgentHarness {
   }
 
   // =========================================================================
-  // Watcher CLI Commands
+  // Observer CLI Commands
   // =========================================================================
 
   watcherStatus(sessionKey: string): Record<string, unknown> {

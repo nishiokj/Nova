@@ -7,7 +7,7 @@ Each has a failing test that asserts the correct behavior.
 
 ## Bug 1: Failed Quality Gate with Empty Issues Silently Passes
 
-**Severity:** High — a watcher can return `verdict: 'failed'` and the orchestrator ignores it.
+**Severity:** High — a observer can return `verdict: 'failed'` and the orchestrator ignores it.
 
 **Root Cause:** Two functions conspire to drop the failure signal.
 
@@ -37,7 +37,7 @@ QualityGateDecision { verdict: 'failed', issues: [] }
   → orchestrator treats goal as reached → success: true
 ```
 
-**Impact:** Any quality gate hook that returns `failed` without populating the `issues` array will be silently ignored. The orchestrator reports success despite the watcher explicitly rejecting the work.
+**Impact:** Any quality gate hook that returns `failed` without populating the `issues` array will be silently ignored. The orchestrator reports success despite the observer explicitly rejecting the work.
 
 **Failing test:** `"BUG: Failed Quality Gate with Empty Issues Silently Passes"` — asserts `result.success === false`, gets `true`.
 
@@ -131,9 +131,9 @@ Hook call 6: split  → realignCount reset to 0
 
 `realignCount` never exceeds 1. The `> maxRealigns` check at line 2211 never fires. The loop continues indefinitely.
 
-**Why the reset exists:** Line 2143 comments say "splitting work is progress." The assumption is that a split means the watcher made a constructive change (broke work into pieces), so the realign counter should reset. But this assumption fails when a hook alternates strategies — the "progress" is illusory.
+**Why the reset exists:** Line 2143 comments say "splitting work is progress." The assumption is that a split means the observer made a constructive change (broke work into pieces), so the realign counter should reset. But this assumption fails when a hook alternates strategies — the "progress" is illusory.
 
-**Impact:** A misbehaving or adversarial watcher hook can prevent the orchestrator from ever terminating. The only escape is an external kill signal. This defeats the purpose of `maxRealigns` as a safety bound.
+**Impact:** A misbehaving or adversarial observer hook can prevent the orchestrator from ever terminating. The only escape is an external kill signal. This defeats the purpose of `maxRealigns` as a safety bound.
 
 **Failing test:** `"BUG: Alternating Realign/Split Bypasses maxRealigns"` — asserts `hookCalls <= 3` (2 realigns + 1 forced termination), gets `7` (3 realigns + 3 splits + 1 safety abort).
 
