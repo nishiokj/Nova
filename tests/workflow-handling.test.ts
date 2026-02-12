@@ -12,7 +12,6 @@
  * These tests verify data structures, serialization, and flow patterns.
  */
 
-import { describe, it, expect, beforeEach } from 'bun:test';
 import type {
   CockpitSessionControlInput,
   CockpitSessionReviewDecisionInput,
@@ -23,7 +22,7 @@ import type {
   NormalizedSessionEvent,
   SessionRollup,
   SessionPanelStatus,
-} from '../packages/apps/dashboard-control/src/lib/api/types';
+} from '@/lib/api/types';
 
 // Simulate backend session row
 interface SessionRow {

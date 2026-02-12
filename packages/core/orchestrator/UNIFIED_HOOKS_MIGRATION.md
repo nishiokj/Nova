@@ -75,7 +75,7 @@ Implemented in `packages/core/orchestrator/src/unifiedHooks`:
 ## Deletion Gates (must all be true)
 1. No imports of `legacy_hooks.ts` remain.
 2. No imports of `hook_executor.ts` remain.
-3. No runtime usage of orchestrator `executeLegacyHook` path remains.
+3. No runtime usage of orchestrator legacy effect-hook callback paths remains.
 4. No writes to old hook config schema keys that cannot be represented in unified events.
 5. Tests cover:
 - decision ordering, retries, critical failures, and patch collection

@@ -11,14 +11,13 @@
  * These tests verify the core state machine logic.
  */
 
-import { describe, it, expect, beforeEach } from 'bun:test';
-import { createWorkItem, type WorkItem, DEFAULT_WORK_BOUNDS } from '../packages/core/work/src/work-item.js';
-import { ContextWindow } from '../packages/core/context/src/context-window.js';
+import { createWorkItem, type WorkItem, DEFAULT_WORK_BOUNDS } from 'work/work-item.js';
+import { ContextWindow } from 'context/context-window.js';
 import {
   DEFAULT_ORCHESTRATOR_CONFIG,
   type OrchestratorConfig,
   type TerminationReason,
-} from '../packages/core/agent-core/src/orchestrator/orchestrator.js';
+} from 'orchestrator/orchestrator.js';
 
 describe('Work Item Creation', () => {
   describe('createWorkItem factory', () => {

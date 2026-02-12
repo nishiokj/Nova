@@ -410,50 +410,6 @@ export class HarnessClient extends EventEmitter {
     return this.sendAuthCommand('async_status', {});
   }
 
-  // =========================================================================
-  // Observer Commands
-  // =========================================================================
-
-  async observerStatus(): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string }> {
-    return this.sendAuthCommand('observer_status', {});
-  }
-
-  async observerContext(): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string }> {
-    return this.sendAuthCommand('observer_context', {});
-  }
-
-  async observerSearch(query: string): Promise<{ success: boolean; results?: unknown[]; error?: string }> {
-    return this.sendAuthCommand('observer_search', { query });
-  }
-
-  async observerDecisions(): Promise<{ success: boolean; decisions?: unknown[]; error?: string }> {
-    return this.sendAuthCommand('observer_decisions', {});
-  }
-
-  async observerInspect(id: string): Promise<{ success: boolean; decision?: Record<string, unknown>; error?: string }> {
-    return this.sendAuthCommand('observer_inspect', { id });
-  }
-
-  async observerMemory(): Promise<{ success: boolean; memory?: Record<string, unknown>; error?: string }> {
-    return this.sendAuthCommand('observer_memory', {});
-  }
-
-  async observerFocus(topic: string): Promise<{ success: boolean; topic?: string; error?: string }> {
-    return this.sendAuthCommand('observer_focus', { topic });
-  }
-
-  async observerDefocus(): Promise<{ success: boolean; error?: string }> {
-    return this.sendAuthCommand('observer_defocus', {});
-  }
-
-  async observerReanchor(goal: string): Promise<{ success: boolean; goal?: string; error?: string }> {
-    return this.sendAuthCommand('observer_reanchor', { goal });
-  }
-
-  async observerSummarize(): Promise<{ success: boolean; ledger?: Record<string, unknown>; error?: string }> {
-    return this.sendAuthCommand('observer_summarize', {});
-  }
-
   async request<T extends Record<string, unknown>>(
     type: BridgeCommandType,
     data: Record<string, unknown> = {}

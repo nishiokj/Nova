@@ -11,9 +11,8 @@
  * These tests verify the core state machine patterns.
  */
 
-import { describe, it, expect, beforeEach } from 'bun:test';
-import { ContextWindow } from '../packages/core/context/src/context-window.js';
-import type { UserPromptInfo } from '../packages/core/agent/src/types.js';
+import { ContextWindow } from 'context/context-window.js';
+import type { UserPromptInfo } from 'agent/types.js';
 
 // Simulate paused state as stored by harness
 interface PausedState {

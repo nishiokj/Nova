@@ -195,6 +195,10 @@ export class SessionStore {
     return this.asyncModeEnabled;
   }
 
+  getWorkingDirectory(): string {
+    return this.workingDir;
+  }
+
   // --- Session-level exclusive operation management ---
 
   /**

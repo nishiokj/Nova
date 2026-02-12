@@ -58,16 +58,6 @@ export type BridgeCommandType =
   | 'set_model'
   | 'get_model'
   | 'set_dangerous_mode'
-  | 'observer_status'
-  | 'observer_context'
-  | 'observer_search'
-  | 'observer_decisions'
-  | 'observer_inspect'
-  | 'observer_memory'
-  | 'observer_focus'
-  | 'observer_defocus'
-  | 'observer_reanchor'
-  | 'observer_summarize'
   | 'async_start'
   | 'async_cancel'
   | 'async_status'
@@ -76,7 +66,6 @@ export type BridgeCommandType =
   | 'control_plane_fork'
   | 'control_plane_permissions_get'
   | 'control_plane_permissions_update'
-  | 'control_plane_resolve_escalation'
   | 'control_plane_memory_info'
   | 'control_plane_model_get'
   | 'control_plane_model_set'
@@ -212,22 +201,6 @@ export interface AsyncSessionKeyCommandData extends CommandDataBase {
   session_key?: string;
 }
 
-export interface ObserverSearchCommandData extends CommandDataBase {
-  query: string;
-}
-
-export interface ObserverInspectCommandData extends CommandDataBase {
-  id: string;
-}
-
-export interface ObserverFocusCommandData extends CommandDataBase {
-  topic: string;
-}
-
-export interface ObserverReanchorCommandData extends CommandDataBase {
-  goal: string;
-}
-
 export interface ControlPlaneDispatchCommandData extends CommandDataBase {
   session_key: string;
   message: string;
@@ -263,16 +236,6 @@ export interface ControlPlanePermissionsUpdateCommandData extends CommandDataBas
     writesNoDeletes?: boolean;
     restrictWriteToPaths?: string[] | null;
     reloadPersistentConfig?: boolean;
-  };
-}
-
-export interface ControlPlaneResolveEscalationCommandData extends CommandDataBase {
-  session_key: string;
-  escalation_id: string;
-  resolution: {
-    optionId?: string;
-    freeformResponse?: string;
-    resolvedBy?: 'user' | 'system' | 'timeout';
   };
 }
 
@@ -332,16 +295,6 @@ export interface BridgeCommandDataMap {
   set_model: SetModelCommandData;
   get_model: GetModelCommandData;
   set_dangerous_mode: PermissionSetDangerousModeData;
-  observer_status: NoData;
-  observer_context: NoData;
-  observer_search: ObserverSearchCommandData;
-  observer_decisions: NoData;
-  observer_inspect: ObserverInspectCommandData;
-  observer_memory: NoData;
-  observer_focus: ObserverFocusCommandData;
-  observer_defocus: NoData;
-  observer_reanchor: ObserverReanchorCommandData;
-  observer_summarize: NoData;
   async_start: AsyncStartCommandData;
   async_cancel: AsyncSessionKeyCommandData;
   async_status: AsyncSessionKeyCommandData;
@@ -350,7 +303,6 @@ export interface BridgeCommandDataMap {
   control_plane_fork: ControlPlaneForkCommandData;
   control_plane_permissions_get: ControlPlanePermissionsGetCommandData;
   control_plane_permissions_update: ControlPlanePermissionsUpdateCommandData;
-  control_plane_resolve_escalation: ControlPlaneResolveEscalationCommandData;
   control_plane_memory_info: NoData;
   control_plane_model_get: ControlPlaneModelGetCommandData;
   control_plane_model_set: ControlPlaneModelSetCommandData;

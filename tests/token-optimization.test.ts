@@ -7,14 +7,13 @@
  * 3. Bidirectional context inheritance
  */
 
-import { describe, it, expect, beforeEach } from 'bun:test';
-import { ContextWindow } from '../packages/core/context/src/context-window.js';
-import { Agent } from '../packages/core/agent/src/agent.js';
-import type { AgentConfig } from '../packages/core/agent/src/types.js';
-import type { LLMAdapter, LLMResponse } from '../packages/core/llm/src/index.js';
-import type { ToolRegistry } from '../packages/core/tools/src/registry.js';
-import { createWorkItem } from '../packages/core/work/src/work-item.js';
-import type { ArtifactKind } from '../packages/core/types/src/context.js';
+import { ContextWindow } from 'context/context-window.js';
+import { Agent } from 'agent/agent.js';
+import type { AgentConfig } from 'agent/types.js';
+import type { LLMAdapter, LLMResponse } from 'llm/index.js';
+import type { ToolRegistry } from 'tools/registry.js';
+import { createWorkItem } from 'work/work-item.js';
+import type { ArtifactKind } from 'types/context.js';
 
 // ============================================================================
 // Test Helpers

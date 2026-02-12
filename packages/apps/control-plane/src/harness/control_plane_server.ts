@@ -37,7 +37,6 @@ type ControlPlaneBridgeRequestType =
   | 'control_plane_fork'
   | 'control_plane_permissions_get'
   | 'control_plane_permissions_update'
-  | 'control_plane_resolve_escalation'
   | 'control_plane_memory_info'
   | 'control_plane_model_get'
   | 'control_plane_model_set'

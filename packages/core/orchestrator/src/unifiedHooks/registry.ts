@@ -112,12 +112,15 @@ export function createUnifiedHookRegistry(): UnifiedHookRegistry {
 
     getDecisionHooks<E extends DecisionEventType>(event: E): Array<RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>> {
       const hooksForEvent = getSorted(event);
-      return hooksForEvent.filter((hook) => hook.mode === 'decision') as Array<RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>>;
+      const typedHooks = hooksForEvent as Array<RegisteredUnifiedHook<UnifiedHookRegistration>>;
+      return typedHooks
+        .filter((hook) => hook.mode === 'decision') as unknown as Array<RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>>;
     },
 
     getEffectHooks<E extends EffectEventType>(event: E): Array<RegisteredUnifiedHook<UnifiedEffectHookRegistration<E>>> {
       const hooksForEvent = getSorted(event);
-      return hooksForEvent
+      const typedHooks = hooksForEvent as Array<RegisteredUnifiedHook<UnifiedHookRegistration>>;
+      return typedHooks
         .filter((hook) => hook.mode === 'effect') as unknown as Array<RegisteredUnifiedHook<UnifiedEffectHookRegistration<E>>>;
     },
 

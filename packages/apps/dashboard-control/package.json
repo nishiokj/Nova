@@ -8,10 +8,7 @@
     "build": "bunx --bun vite build",
     "typecheck": "bunx tsc --noEmit",
     "preview": "bunx --bun vite preview",
-    "test": "bunx vitest",
-    "test:run": "bunx vitest run",
-    "test:ui": "bunx vitest --ui",
-    "test:coverage": "bunx vitest --coverage"
+    "test:ui": "bunx vitest --ui"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.0",
@@ -36,7 +33,6 @@
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.18",
     "typescript": "~5.9.3",
-    "vite": "^7.2.4",
-    "vitest": "^4.0.18"
+    "vite": "^7.2.4"
   }
 }

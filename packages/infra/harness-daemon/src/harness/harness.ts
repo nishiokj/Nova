@@ -719,18 +719,242 @@ export class AgentHarness {
     };
   }
 
-  private cleanupSessionInternalHooks(sessionKey: string, state: SessionState): void {
-    const unregisters = state.internalHookUnregisters.splice(0);
-    for (const unregister of unregisters) {
+  private getConfiguredHookRuntime(sessionKey: string, workingDir: string): ConfiguredEffectHooksRunner {
+    const existing = this.configuredHookRuntimes.get(sessionKey);
+    if (existing) return existing;
+    const runtime = new ConfiguredEffectHooksRunner(workingDir);
+    this.configuredHookRuntimes.set(sessionKey, runtime);
+    return runtime;
+  }
+
+  private mapConfiguredHookTriggerToEffectEvent(trigger: string): string | null {
+    switch (trigger) {
+      case 'PreToolUse': return 'pre_tool_use';
+      case 'PostToolUse': return 'post_tool_use';
+      case 'PostGitCommit': return 'post_git_commit';
+      case 'UserPromptSubmit': return 'user_prompt_submit';
+      case 'Stop': return 'session_stop';
+      case 'SessionStart': return 'session_start';
+      case 'Notification': return 'notification';
+      default: return null;
+    }
+  }
+
+  private buildSkillHookContext(
+    eventType: string,
+    payload: Record<string, unknown>,
+    context: { sessionKey: string; requestId: string; workingDir: string }
+  ): SkillHookContext {
+    switch (eventType) {
+      case 'pre_tool_use':
+        return {
+          event: 'PreToolUse',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+          toolName: typeof payload.toolName === 'string' ? payload.toolName : undefined,
+          toolParams: typeof payload.args === 'object' && payload.args ? payload.args as Record<string, unknown> : undefined,
+        };
+      case 'post_tool_use':
+        return {
+          event: 'PostToolUse',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+          toolName: typeof payload.toolName === 'string' ? payload.toolName : undefined,
+          toolParams: typeof payload.args === 'object' && payload.args ? payload.args as Record<string, unknown> : undefined,
+          toolResult: payload.result,
+        };
+      case 'post_git_commit':
+        return {
+          event: 'PostGitCommit',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+          toolName: 'Bash',
+          toolParams: typeof payload.command === 'string' ? { command: payload.command } : undefined,
+          commitSha: typeof payload.sha === 'string' ? payload.sha : undefined,
+          commitMessage: typeof payload.message === 'string' ? payload.message : undefined,
+          commitBranch: typeof payload.branch === 'string' ? payload.branch : undefined,
+        };
+      case 'user_prompt_submit':
+        return {
+          event: 'UserPromptSubmit',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+        };
+      case 'session_start':
+        return {
+          event: 'SessionStart',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+        };
+      case 'session_stop':
+        return {
+          event: 'Stop',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+        };
+      case 'notification':
+      default:
+        return {
+          event: 'Notification',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+        };
+    }
+  }
+
+  private convertConfiguredResultToEffectOutcome(
+    eventType: string,
+    result: LegacyHookResult
+  ): Record<string, unknown> {
+    if (result.action === 'allow') {
+      return { kind: 'allow', ...(result.message ? { message: result.message } : {}) };
+    }
+    if (result.action === 'block') {
+      return { kind: 'block', reason: result.message ?? 'Blocked by configured hook' };
+    }
+    if (result.action === 'modify') {
+      if (eventType === 'pre_tool_use' && result.modified && typeof result.modified === 'object') {
+        return { kind: 'modify', value: result.modified, ...(result.message ? { reason: result.message } : {}) };
+      }
+      if (eventType === 'post_tool_use' && this.isToolResult(result.modified)) {
+        return { kind: 'modify', value: result.modified, ...(result.message ? { reason: result.message } : {}) };
+      }
+      if (eventType === 'user_prompt_submit' && result.modified && typeof result.modified === 'object') {
+        return { kind: 'modify', value: result.modified, ...(result.message ? { reason: result.message } : {}) };
+      }
+      return { kind: 'allow', message: result.message ?? 'Modify ignored for event type' };
+    }
+    return { kind: 'allow' };
+  }
+
+  private registerSessionUnifiedHooks(sessionKey: string, workingDir: string): void {
+    this.sessionHookRegistry.clearSession(sessionKey);
+    const registry = this.sessionHookRegistry.getOrCreateSessionRegistry(sessionKey);
+
+    if (this.entityGraph) {
+      const entityGraphHooks = this.entityGraph.getHooks();
+      registry.register({
+        id: 'builtin:entity_graph:files_modified',
+        mode: 'effect',
+        scope: 'harness',
+        source: 'builtin:entity_graph',
+        event: 'files_modified',
+        priority: 0,
+        timeoutMs: 30_000,
+        callback: async (payload: { paths?: string[] }) => {
+          if (payload.paths && payload.paths.length > 0) {
+            await entityGraphHooks.onFilesModified(payload.paths);
+          }
+          return { kind: 'allow' };
+        },
+      } as never);
+    }
+
+    if (!this.config.hooks.enabled || !this.config.hooks.directory) {
+      return;
+    }
+
+    const hooksDir = path.resolve(workingDir, this.config.hooks.directory);
+    const stubs = loadHookDefinitions(hooksDir);
+    const runtime = this.getConfiguredHookRuntime(sessionKey, workingDir);
+
+    for (const stub of stubs) {
+      if (!stub.enabled) continue;
+      const definition = getHookDefinition(hooksDir, stub.id);
+      if (!definition || !definition.enabled) continue;
+
+      const effectEvent = this.mapConfiguredHookTriggerToEffectEvent(definition.trigger);
+      if (!effectEvent) continue;
+
+      const registrationId = `configured:${definition.id}`;
       try {
-        unregister();
+        registry.register({
+          id: registrationId,
+          mode: 'effect',
+          scope: 'harness',
+          source: `configured:${definition.id}`,
+          event: effectEvent,
+          priority: Number.isFinite(definition.priority) ? definition.priority : 0,
+          timeoutMs: definition.timeout_ms ?? 30_000,
+          callback: async (payload: Record<string, unknown>, callbackContext: { sessionKey: string; requestId: string; workingDir?: string }) => {
+            const sessionHookContext = this.buildSkillHookContext(effectEvent, payload, {
+              sessionKey: callbackContext.sessionKey,
+              requestId: callbackContext.requestId,
+              workingDir: callbackContext.workingDir ?? workingDir,
+            });
+
+            if (!runtime.matches(definition, sessionHookContext.toolName)) {
+              return { kind: 'skip', reason: 'Hook matcher did not match event context' };
+            }
+
+            const result = await runtime.execute(definition, sessionHookContext);
+            return this.convertConfiguredResultToEffectOutcome(effectEvent, result);
+          },
+        } as never);
       } catch (error) {
-        this.logger.warning('Failed to unregister internal session hook', {
+        this.logger.warning('Failed to register configured session hook', {
           sessionKey,
+          hookId: definition.id,
+          event: effectEvent,
           error: error instanceof Error ? error.message : String(error),
         });
       }
     }
+  }
+
+  private async runSessionEffectHooks(
+    sessionKey: string,
+    event: Record<string, unknown> & { type: string },
+    context: { sessionKey: string; requestId: string; workingDir?: string; workId?: string; agentType?: string; internal?: InternalHookContext; metadata?: Record<string, unknown> }
+  ): Promise<{
+    status: 'completed' | 'blocked';
+    outcomes: Array<{ hookId: string; source: string; outcome: { kind: string; [key: string]: unknown } }>;
+    blockedBy?: { hookId: string; source: string; reason: string };
+  }> {
+    try {
+      const result = await runUnifiedEffectHooksForSession(
+        sessionKey,
+        event as never,
+        context as never,
+        this.sessionHookRegistry
+      );
+      return {
+        status: result.status,
+        outcomes: result.outcomes as unknown as Array<{ hookId: string; source: string; outcome: { kind: string; [key: string]: unknown } }>,
+        blockedBy: result.blockedBy,
+      };
+    } catch (error) {
+      this.logger.warning('Session effect hook execution failed', {
+        sessionKey,
+        eventType: event.type,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { status: 'completed', outcomes: [] };
+    }
+  }
+
+  private cleanupSessionInternalHooks(sessionKey: string, state: SessionState): void {
+    const workingDir = state.store.getWorkingDirectory();
+    void this.runSessionEffectHooks(
+      sessionKey,
+      { type: 'session_stop', sessionKey, reason: 'session_cleanup' },
+      { sessionKey, requestId: 'session_cleanup', workingDir }
+    ).catch((error) => {
+      this.logger.warning('Session stop hook failed during cleanup', {
+        sessionKey,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }).finally(() => {
+      this.sessionHookRegistry.clearSession(sessionKey);
+      this.configuredHookRuntimes.delete(sessionKey);
+    });
   }
 
   /**
@@ -833,14 +1057,9 @@ export class AgentHarness {
           this.entityGraph = new EntityGraph(sql, entityGraphConfig);
           await this.entityGraph.initialize();
           this.logger.info('EntityGraph initialized (scan running in background)');
-
-          // Register files_modified hook handler
-          const hooks = this.entityGraph.getHooks();
-          registerHook('files_modified', async (event: { type: string; paths?: string[] }) => {
-            if (event.type === 'files_modified' && event.paths) {
-              await hooks.onFilesModified(event.paths);
-            }
-          });
+          for (const [sessionKey, state] of this.sessions.entries()) {
+            this.registerSessionUnifiedHooks(sessionKey, state.store.getWorkingDirectory());
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -883,6 +1102,16 @@ export class AgentHarness {
 
     const state = createSessionState(store);
     this.sessions.set(sessionKey, state);
+    this.registerSessionUnifiedHooks(sessionKey, workingDir ?? this.config.tools.workingDir);
+    void this.runSessionEffectHooks(
+      sessionKey,
+      { type: 'session_start', sessionKey, workingDir: workingDir ?? this.config.tools.workingDir },
+      {
+        sessionKey,
+        requestId: 'session_start',
+        workingDir: workingDir ?? this.config.tools.workingDir,
+      }
+    );
     return state;
   }
 
@@ -1563,32 +1792,35 @@ export class AgentHarness {
 
     const resultPromise = (async (): Promise<AgentRunResult> => {
       try {
-        // Run UserPromptSubmit hooks before processing
-        if (this.hookExecutor) {
-          const hookContext: SkillHookContext = {
-            event: 'UserPromptSubmit',
+        const userPromptHookResult = await this.runSessionEffectHooks(
+          sessionKey,
+          {
+            type: 'user_prompt_submit',
+            workItemId: requestId,
+            prompt: {},
+          },
+          {
             sessionKey,
             requestId,
             workingDir: effectiveWorkingDir,
-          };
-          const hookResult = await this.hookExecutor.execute('UserPromptSubmit', hookContext);
-          if (hookResult.action === 'block') {
-            const blockMsg = hookResult.message || 'Request blocked by hook';
-            eventQueue.push(createErrorEvent(blockMsg, false));
-            eventQueue.push(createStatusEvent('idle'));
-            emit(createEvent('harness_error', { message: blockMsg, fatal: false }));
-            emit(createEvent('harness_status', { state: 'idle' }));
-            return {
-              requestId,
-              sessionKey,
-              success: false,
-              finalText: blockMsg,
-              errorMessage: hookResult.message,
-              paused: false,
-              toolsUsed: [],
-              durationMs: 0,
-            };
           }
+        );
+        if (userPromptHookResult.status === 'blocked') {
+          const blockMsg = userPromptHookResult.blockedBy?.reason || 'Request blocked by hook';
+          eventQueue.push(createErrorEvent(blockMsg, false));
+          eventQueue.push(createStatusEvent('idle'));
+          emit(createEvent('harness_error', { message: blockMsg, fatal: false }));
+          emit(createEvent('harness_status', { state: 'idle' }));
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: blockMsg,
+            errorMessage: blockMsg,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
         }
 
         // Get the appropriate agent config
@@ -1782,18 +2014,19 @@ export class AgentHarness {
           });
         }
 
-        // Run Stop hooks
-        if (this.hookExecutor) {
-          const hookContext: SkillHookContext = {
-            event: 'Stop',
+        await this.runSessionEffectHooks(
+          sessionKey,
+          {
+            type: 'session_stop',
+            sessionKey,
+            reason: 'run_finished',
+          },
+          {
             sessionKey,
             requestId,
             workingDir: effectiveWorkingDir,
-          };
-          await this.hookExecutor.execute('Stop', hookContext).catch((err) => {
-            this.logger.warning('Stop hook failed', { error: String(err) });
-          });
-        }
+          }
+        );
 
         queueMicrotask(() => {
           try {
@@ -1881,7 +2114,7 @@ export class AgentHarness {
   }
 
   /**
-   * Create AgentHooks that handle permission checking and delegate to HookExecutor.
+   * Create AgentHooks that handle permission checking and session-scoped effect hooks.
    */
   private createAgentHooks(
     sessionKey: string,
@@ -1889,7 +2122,6 @@ export class AgentHarness {
     workingDir: string,
     emit?: (event: AgentEvent) => void
   ): AgentHooks {
-    const executor = this.hookExecutor;
     const logger = this.logger;
     const egHooks = this.entityGraph?.getHooks() ?? null;
     const PERMISSION_REQUEST_TIMEOUT_MS = 60_000;
@@ -1997,22 +2229,36 @@ export class AgentHarness {
           }
         }
 
-        // Run hook executor if available
-        if (executor) {
-          const context: SkillHookContext = {
-            event: 'PreToolUse',
+        const effectResult = await this.runSessionEffectHooks(
+          sessionKey,
+          {
+            type: 'pre_tool_use',
             toolName,
-            toolParams: args,
+            args,
+          },
+          {
             sessionKey,
             requestId,
             workingDir,
-          };
-          const result = await executor.execute('PreToolUse', context);
+          }
+        );
+
+        if (effectResult.status === 'blocked') {
           return {
-            action: result.action,
-            message: result.message,
-            modifiedArgs: result.modified as Record<string, unknown> | undefined,
+            action: 'block',
+            message: effectResult.blockedBy?.reason ?? 'Blocked by hook policy',
           };
+        }
+
+        let modifiedArgs: Record<string, unknown> | undefined;
+        for (const outcomeEntry of effectResult.outcomes) {
+          if (outcomeEntry.outcome.kind === 'modify' && typeof outcomeEntry.outcome.value === 'object' && outcomeEntry.outcome.value) {
+            modifiedArgs = outcomeEntry.outcome.value as Record<string, unknown>;
+          }
+        }
+
+        if (modifiedArgs) {
+          return { action: 'modify', modifiedArgs };
         }
 
         return { action: 'allow' };
@@ -2063,56 +2309,55 @@ export class AgentHarness {
               };
               this.eventBus.publish(createEvent('git_commit', gitCommitData, undefined, requestId, sessionKey));
 
-              // Execute PostGitCommit hooks if executor available
-              if (executor) {
-                const gitContext: SkillHookContext = {
-                  event: 'PostGitCommit',
-                  toolName: 'Bash',
-                  toolParams: args,
-                  toolResult,
+              await this.runSessionEffectHooks(
+                sessionKey,
+                {
+                  type: 'post_git_commit',
+                  sha,
+                  command,
+                },
+                {
                   sessionKey,
                   requestId,
                   workingDir,
-                  commitSha: sha,
-                };
-                await executor.execute('PostGitCommit', gitContext);
-              }
+                }
+              );
             }
           }
         }
 
-        if (!executor) {
-          return egModified
-            ? { action: 'modify', modifiedResult: toolResult }
-            : { action: 'allow' };
+        const effectResult = await this.runSessionEffectHooks(
+          sessionKey,
+          {
+            type: 'post_tool_use',
+            toolName,
+            args,
+            result: toolResult,
+          },
+          {
+            sessionKey,
+            requestId,
+            workingDir,
+          }
+        );
+
+        let modifiedResult: ToolResult | undefined;
+        for (const outcomeEntry of effectResult.outcomes) {
+          if (outcomeEntry.outcome.kind === 'modify' && this.isToolResult(outcomeEntry.outcome.value)) {
+            modifiedResult = outcomeEntry.outcome.value;
+          }
         }
 
-        const context: SkillHookContext = {
-          event: 'PostToolUse',
-          toolName,
-          toolParams: args,
-          toolResult,
-          sessionKey,
-          requestId,
-          workingDir,
-        };
-        const result = await executor.execute('PostToolUse', context);
-
-        // If executor modified the result, use its version.
-        // Otherwise, propagate entity-graph context if present.
-        if (result.action === 'modify' && result.modified) {
-          if (this.isToolResult(result.modified)) {
-            return { action: 'modify', message: result.message, modifiedResult: result.modified };
-          }
-          logger.warning('PostToolUse hook returned invalid ToolResult, ignoring modification', {
-            toolName,
-            sessionKey,
-          });
+        if (modifiedResult) {
+          return { action: 'modify', modifiedResult };
         }
         if (egModified) {
           return { action: 'modify', modifiedResult: toolResult };
         }
-        return { action: result.action, message: result.message };
+        if (effectResult.status === 'blocked') {
+          return { action: 'block', message: effectResult.blockedBy?.reason ?? 'Blocked by hook policy' };
+        }
+        return { action: 'allow' };
       },
     };
   }
@@ -2196,8 +2441,19 @@ export class AgentHarness {
 
     const runtime = {
       hookRegistry,
-      executeLegacyHook: async (event: InternalHookEvent, hookContext: InternalHookContext) => {
-        await executeHooks(event.type, event, hookContext);
+      executeEffectHook: async (event: InternalHookEvent, hookContext: InternalHookContext) => {
+        await this.runSessionEffectHooks(
+          hookContext.sessionKey,
+          event,
+          {
+            sessionKey: hookContext.sessionKey,
+            requestId: hookContext.requestId,
+            workId: hookContext.workId,
+            agentType: hookContext.agentType,
+            workingDir: effectiveWorkingDir,
+            internal: hookContext,
+          }
+        );
       },
       onStart: (activeContext: ContextWindow) => this.attachArtifactSubscriber(activeContext),
       // Pass interruption check callback so orchestrator can avoid premature termination
@@ -2375,19 +2631,6 @@ export class AgentHarness {
       return { success: false, itemsRemoved: 0, bytesRecovered: 0, error: message };
     }
   }
-
-  private emitInternalHookAsync(event: InternalHookEvent, context: InternalHookContext): void {
-    queueMicrotask(() => {
-      void executeHooks(event.type, event, context).catch((err) => {
-        this.logger.warning('Failed to execute internal hook', {
-          sessionKey: context.sessionKey,
-          eventType: event.type,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-    });
-  }
-
 
   /**
    * Shutdown the harness.

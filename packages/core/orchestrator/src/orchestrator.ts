@@ -122,10 +122,10 @@ export interface OrchestratorRuntime {
   /** Control-plane hook registry (orchestrator-owned) */
   hookRegistry?: HookRegistry;
   /**
-   * Legacy internal hook executor (harness-owned runtime path).
+   * Session-scoped effect hook executor (harness-owned runtime path).
    * Orchestrator enqueues internal hook events and delegates execution to this callback.
    */
-  executeLegacyHook?: (event: InternalHookEvent, context: InternalHookContext) => Promise<void>;
+  executeEffectHook?: (event: InternalHookEvent, context: InternalHookContext) => Promise<void>;
   /**
    * Check for pending user interruption that arrived during execution.
    * Called before terminating on goal_state_reached.
@@ -295,7 +295,7 @@ export class Orchestrator {
   private hookMetadata: Map<string, unknown> = new Map();
   private hookAuditLog: Array<{ timestamp: number; source: string; event: string; details: Record<string, unknown> }> = [];
   private hookTerminationReason: TerminationReason | null = null;
-  private legacyHookExecutor?: (event: InternalHookEvent, context: InternalHookContext) => Promise<void>;
+  private effectHookExecutor?: (event: InternalHookEvent, context: InternalHookContext) => Promise<void>;
 
   constructor(
     config: Partial<OrchestratorConfig>,
@@ -380,7 +380,7 @@ export class Orchestrator {
             hookType: event.type,
             event,
             hookContext: context,
-            handler: () => this.executeLegacyHook(event, context),
+            handler: () => this.executeEffectHook(event, context),
           },
         });
 
@@ -478,11 +478,11 @@ export class Orchestrator {
     })();
   }
 
-  private async executeLegacyHook(event: InternalHookEvent, context: InternalHookContext): Promise<void> {
-    if (!this.legacyHookExecutor) {
+  private async executeEffectHook(event: InternalHookEvent, context: InternalHookContext): Promise<void> {
+    if (!this.effectHookExecutor) {
       return;
     }
-    await this.legacyHookExecutor(event, context);
+    await this.effectHookExecutor(event, context);
   }
 
   /**
@@ -520,7 +520,7 @@ export class Orchestrator {
     cwd: string,
     runtime?: OrchestratorRuntime
   ): Promise<OrchestratorResult> {
-    this.legacyHookExecutor = runtime?.executeLegacyHook;
+    this.effectHookExecutor = runtime?.executeEffectHook;
     this.resetExecutionState(context);
 
     const workQueue = this.createWorkQueueAdapter();

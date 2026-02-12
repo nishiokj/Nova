@@ -15,8 +15,6 @@ export interface SessionState {
   lastAccessMs: number;
   /** Set of created work item IDs for this session */
   workItemsCreated: Set<string>;
-  /** Internal-hook unregister callbacks for session-scoped global hooks */
-  internalHookUnregisters: Array<() => void>;
 }
 
 /**
@@ -27,7 +25,6 @@ export function createSessionState(store: SessionStore): SessionState {
     store,
     lastAccessMs: Date.now(),
     workItemsCreated: new Set(),
-    internalHookUnregisters: [],
   };
 }
 
@@ -44,5 +41,4 @@ export function touchSession(state: SessionState): void {
  */
 export function clearSessionState(state: SessionState): void {
   state.workItemsCreated.clear();
-  state.internalHookUnregisters.length = 0;
 }
