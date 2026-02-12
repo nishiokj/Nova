@@ -58,16 +58,16 @@ export type BridgeCommandType =
   | 'set_model'
   | 'get_model'
   | 'set_dangerous_mode'
-  | 'watcher_status'
-  | 'watcher_context'
-  | 'watcher_search'
-  | 'watcher_decisions'
-  | 'watcher_inspect'
-  | 'watcher_memory'
-  | 'watcher_focus'
-  | 'watcher_defocus'
-  | 'watcher_reanchor'
-  | 'watcher_summarize'
+  | 'observer_status'
+  | 'observer_context'
+  | 'observer_search'
+  | 'observer_decisions'
+  | 'observer_inspect'
+  | 'observer_memory'
+  | 'observer_focus'
+  | 'observer_defocus'
+  | 'observer_reanchor'
+  | 'observer_summarize'
   | 'async_start'
   | 'async_cancel'
   | 'async_status'
@@ -212,19 +212,19 @@ export interface AsyncSessionKeyCommandData extends CommandDataBase {
   session_key?: string;
 }
 
-export interface WatcherSearchCommandData extends CommandDataBase {
+export interface ObserverSearchCommandData extends CommandDataBase {
   query: string;
 }
 
-export interface WatcherInspectCommandData extends CommandDataBase {
+export interface ObserverInspectCommandData extends CommandDataBase {
   id: string;
 }
 
-export interface WatcherFocusCommandData extends CommandDataBase {
+export interface ObserverFocusCommandData extends CommandDataBase {
   topic: string;
 }
 
-export interface WatcherReanchorCommandData extends CommandDataBase {
+export interface ObserverReanchorCommandData extends CommandDataBase {
   goal: string;
 }
 
@@ -332,16 +332,16 @@ export interface BridgeCommandDataMap {
   set_model: SetModelCommandData;
   get_model: GetModelCommandData;
   set_dangerous_mode: PermissionSetDangerousModeData;
-  watcher_status: NoData;
-  watcher_context: NoData;
-  watcher_search: WatcherSearchCommandData;
-  watcher_decisions: NoData;
-  watcher_inspect: WatcherInspectCommandData;
-  watcher_memory: NoData;
-  watcher_focus: WatcherFocusCommandData;
-  watcher_defocus: NoData;
-  watcher_reanchor: WatcherReanchorCommandData;
-  watcher_summarize: NoData;
+  observer_status: NoData;
+  observer_context: NoData;
+  observer_search: ObserverSearchCommandData;
+  observer_decisions: NoData;
+  observer_inspect: ObserverInspectCommandData;
+  observer_memory: NoData;
+  observer_focus: ObserverFocusCommandData;
+  observer_defocus: NoData;
+  observer_reanchor: ObserverReanchorCommandData;
+  observer_summarize: NoData;
   async_start: AsyncStartCommandData;
   async_cancel: AsyncSessionKeyCommandData;
   async_status: AsyncSessionKeyCommandData;

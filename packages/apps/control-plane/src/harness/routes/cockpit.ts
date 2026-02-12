@@ -707,7 +707,7 @@ function isAsyncSession(session: SessionRow): boolean {
     const type = (asString(entry.type) ?? '').toLowerCase();
     if (!type) continue;
     if (
-      type.startsWith('watcher_')
+      type.startsWith('observer_')
       || type === 'packet_emitted'
       || type === 'workitem_created'
       || type === 'escalation_raised'

@@ -23,7 +23,7 @@ import type {
   ModelSelection,
   MemoryInjector,
 } from 'agent';
-import { Agent, getAsyncAgentPrompt, getAsyncModeAddendum } from 'agent';
+import { Agent } from 'agent';
 import type { AgentRegistry } from 'agent';
 import { createWorkItem, cloneWorkItemWithDependencies, type WorkItem } from 'work';
 import { createEvent } from 'types';
@@ -74,40 +74,6 @@ import { buildPlanContextFromHandoff, writePlanContext } from './plan-context.js
 // --- Types ---
 
 /**
- * Structural async-mode DB contract.
- * Kept local so orchestrator can compile independently from decision-engine.
- */
-export interface AsyncDecisionDatabase {
-  search(query: string, options?: {
-    category?: string;
-    scope?: string;
-    limit?: number;
-  }): Promise<unknown[]>;
-  get(id: string): Promise<unknown | null>;
-  getAll(): Promise<unknown[]>;
-  upsert(entry: unknown): Promise<void>;
-  delete(id: string): Promise<void>;
-}
-
-/**
- * Structural async-mode observer config contract.
- * Kept local so orchestrator can compile independently from decision-engine.
- */
-export interface AsyncDecisionEngineConfig {
-  enabled: boolean;
-  minConfidenceThreshold: number;
-  maxDecisionsToConsult: number;
-  useLLMSynthesis: boolean;
-  enableConsistencyChecking: boolean;
-  llm?: LLMAdapter;
-  llmModel?: {
-    provider: string;
-    model: string;
-  };
-  customDatabase?: AsyncDecisionDatabase;
-}
-
-/**
  * Orchestrator configuration.
  */
 export interface OrchestratorConfig {
@@ -128,22 +94,9 @@ export interface OrchestratorConfig {
   /** Max chars per tool output during compaction */
   compactTruncateTo: number;
   /** Minimum iteration gap between observer evaluations (default 5) */
-  minWatcherIterationGap: number;
+  minObserverIterationGap: number;
   /** Maximum realign attempts before forcing termination (default 3) */
   maxRealigns: number;
-  /**
-   * Async mode configuration for decision observer.
-   * When enabled, the observer will automatically answer PromptUser questions
-   * using a curated decision and preference database.
-   */
-  asyncMode?: {
-    /** Whether async mode is enabled */
-    enabled: boolean;
-    /** Decision database for async mode */
-    database?: AsyncDecisionDatabase;
-    /** Optional custom observer configuration */
-    watcherConfig?: Partial<AsyncDecisionEngineConfig>;
-  };
   /**
    * Optional memory injector for injecting relevant memory into agent context.
    * When provided, the orchestrator passes it to agents for automatic memory retrieval.
@@ -191,7 +144,6 @@ export interface OrchestratorRuntime {
   onStart?: (context: ContextWindow) => void | (() => void);
   /**
    * Called each iteration with execution state.
-   * Used by the observer to evaluate rules and steer the decision engine.
    * May be sync or async — if async, the orchestrator does not await it
    * (fire-and-forget to avoid blocking the loop).
    */
@@ -207,7 +159,7 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   compactResetPercent: 0.45,
   compactMaxFileCount: 20,
   compactTruncateTo: 5000,
-  minWatcherIterationGap: 5,
+  minObserverIterationGap: 5,
   maxRealigns: 3,
 };
 
@@ -1364,16 +1316,6 @@ export class Orchestrator {
       };
     }
 
-    // Apply async mode modifications to worker agents (not the observer itself)
-    // CRITICAL: Must clear outputSchema - structured output is incompatible with async mode
-    if (this.config.asyncMode?.enabled && agentType !== 'observer' && agentType !== 'planner') {
-      config = {
-        ...config,
-        systemPrompt: getAsyncAgentPrompt(),
-        outputSchema: undefined,  // Async workers use free-form output, not structured schemas
-      };
-    }
-
     // Build LLM config from model selection (source of truth) + agent's llmParams
     const llmConfig = this.buildLlmConfig(config.llmParams, agentType);
 
@@ -1393,12 +1335,12 @@ export class Orchestrator {
 
       const toolCallsSinceLast = metrics.toolCallsMade - lastCadenceToolCalls;
       const timeSinceLast = Date.now() - lastCadenceTimeMs;
-      const shouldInvokeWatcher = runtime?.hookRegistry && (
+      const shouldInvokeObserver = runtime?.hookRegistry && (
         toolCallsSinceLast >= CADENCE_TOOL_THRESHOLD ||
         timeSinceLast >= CADENCE_TIME_THRESHOLD_MS
       );
 
-      if (shouldInvokeWatcher && runtime?.hookRegistry) {
+      if (shouldInvokeObserver && runtime?.hookRegistry) {
         lastCadenceToolCalls = metrics.toolCallsMade;
         lastCadenceTimeMs = Date.now();
 
@@ -1446,7 +1388,7 @@ export class Orchestrator {
                   return {
                     action: 'stop',
                     systemMessage: decision.reason,
-                    terminationReason: 'watcher_work_item_stopped',
+                    terminationReason: 'observer_work_item_stopped',
                     escalationId: decision.escalationId,
                     reason: decision.reason,
                   };
@@ -1454,7 +1396,7 @@ export class Orchestrator {
                   return {
                     action: 'stop',
                     systemMessage: decision.reason,
-                    terminationReason: 'watcher_stopped',
+                    terminationReason: 'observer_stopped',
                     reason: decision.reason,
                   };
                 default:
@@ -1979,8 +1921,8 @@ export class Orchestrator {
         );
       }
       case 'user_stopped':
-      case 'watcher_stopped':
-      case 'watcher_work_item_stopped':
+      case 'observer_stopped':
+      case 'observer_work_item_stopped':
       case 'rate_limit':
       case 'circuit_open':
       case 'timeout':
@@ -2564,14 +2506,14 @@ export class Orchestrator {
     // ============================================================
     // TERMINAL: Observer stopped (mid-agent cadence check intervention)
     // ============================================================
-    if (result.terminationReason === 'watcher_stopped') {
+    if (result.terminationReason === 'observer_stopped') {
       this.log('info', 'Observer stopped execution via cadence check', { workId });
       this.mergeAgentResultContext(context, workId, result);
       return {
         terminal: this.createResult({
           success: !!result.response,
           response: result.response || 'Execution stopped by observer.',
-          terminationReason: 'watcher_stopped',
+          terminationReason: 'observer_stopped',
           metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
         }),
         shouldContinue: false,
@@ -2581,17 +2523,17 @@ export class Orchestrator {
     // ============================================================
     // WORK-ITEM STOP: observer stopped this agent/work item only
     // ============================================================
-    if (result.terminationReason === 'watcher_work_item_stopped') {
-      const reason = result.watcherStop?.reason ?? result.response ?? 'Observer stopped this work item.';
+    if (result.terminationReason === 'observer_work_item_stopped') {
+      const reason = result.observerStop?.reason ?? result.response ?? 'Observer stopped this work item.';
       this.log('info', 'Observer stopped work item', { workId, reason: reason.slice(0, 160) });
       this.mergeAgentResultContext(context, workId, result);
 
       this.hookQueue.enqueue({
-        type: 'watcher_agent_stopped',
+        type: 'observer_agent_stopped',
         sessionKey: context.sessionKey,
         workId,
         reason,
-        escalationId: result.watcherStop?.escalationId,
+        escalationId: result.observerStop?.escalationId,
         agentType: item.agent,
       }, {
         workId,

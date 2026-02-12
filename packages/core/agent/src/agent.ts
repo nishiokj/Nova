@@ -1152,11 +1152,11 @@ export class Agent {
             localContext.addMessage('system', cadenceResult.systemMessage, workItem.workId);
           }
           const stopReason = cadenceResult.reason ?? cadenceResult.systemMessage ?? 'Observer requested stop.';
-          result.watcherStop = {
+          result.observerStop = {
             reason: stopReason,
             escalationId: cadenceResult.escalationId,
           };
-          result.terminationReason = cadenceResult.terminationReason ?? 'watcher_stopped';
+          result.terminationReason = cadenceResult.terminationReason ?? 'observer_stopped';
           break;
         }
       }
@@ -1482,7 +1482,7 @@ export class Agent {
       structuredOutput: result.structuredOutput,
       artifacts: result.artifacts,
       localContext: result.localContext,
-      watcherStop: result.watcherStop,
+      observerStop: result.observerStop,
     };
 
     if (terminationReason !== 'user_input_required' && result.needsUserInput) {
@@ -2022,7 +2022,7 @@ export class Agent {
         }
       }
 
-      // SIAS mode: don't propagate sub-agent user input requests
+      // Don't propagate sub-agent user input requests
       if (isAgentTool && result.needsUserInput) {
         result.needsUserInput = false;
         result.userPrompt = undefined;

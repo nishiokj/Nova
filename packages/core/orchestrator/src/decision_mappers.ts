@@ -116,11 +116,11 @@ export function mapCadenceDecisionToStopResult(decision: CadenceDecision): StopH
       return {
         decision: 'allow',
         systemMessage: decision.reason,
-        terminationReason: 'watcher_work_item_stopped',
+        terminationReason: 'observer_work_item_stopped',
         escalationId: decision.escalationId,
       };
     case 'stop':
-      return { decision: 'allow', systemMessage: decision.reason, terminationReason: 'watcher_stopped' };
+      return { decision: 'allow', systemMessage: decision.reason, terminationReason: 'observer_stopped' };
     default:
       return assertNever(decision);
   }

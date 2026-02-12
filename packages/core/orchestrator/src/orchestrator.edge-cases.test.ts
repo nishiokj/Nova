@@ -9,7 +9,7 @@
  * 2. totalToolCalls bound (per-result check at line 2882, separate from iteration bounds)
  * 3. Deferred work on 'allow' forcing continuation (line 2144: deferredWorkAdded)
  * 4. Handoff rejection → re-queue same item (itemToRequeue at line 2453)
- * 5. watcher_work_item_stopped (line 2586: item marked complete, loop continues)
+ * 5. observer_work_item_stopped (line 2586: item marked complete, loop continues)
  * 6. Continuable errors + hook retry (no_action/stagnation at line 2618)
  * 7. Refusal + hook override attempt (line 2499 — refusal maps to null event, hook can't override)
  * 8. Hard error catch-all vs actionIsContinue bypass (line 2846)
@@ -1092,7 +1092,7 @@ describe('Edge Case: Async Mode Clears Output Schema', () => {
     const llm = createMockLLM([goalReachedResponse('Async done')]);
 
     const orch = new Orchestrator(
-      { maxIterations: 10, asyncMode: { enabled: true } },
+      { maxIterations: 10 },
       createToolRegistry(),
       llm,
       () => {},

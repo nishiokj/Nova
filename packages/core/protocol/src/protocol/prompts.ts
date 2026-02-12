@@ -211,7 +211,7 @@ export const DECISION_PROMPT_BY_EVENT = {
 /**
  * Generate a full observer prompt for an event.
  */
-export function generateWatcherPrompt(
+export function generateObserverPrompt(
   eventType: ControlEventType,
   context: {
     objective: string;

@@ -114,8 +114,6 @@ class FakeHarness {
       sessionKey: string;
       contextItemCount: number;
       contextEstimatedTokens: number;
-      watcherContextItemCount: number;
-      workItemLogCount: number;
       workItemsCreatedCount: number;
       lastAccessMs: number;
       isExecuting: boolean;
@@ -128,8 +126,6 @@ class FakeHarness {
         sessionKey: 'sess-memory',
         contextItemCount: 0,
         contextEstimatedTokens: 0,
-        watcherContextItemCount: 0,
-        workItemLogCount: 0,
         workItemsCreatedCount: 0,
         lastAccessMs: Date.now(),
         isExecuting: false,

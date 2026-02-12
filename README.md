@@ -90,7 +90,6 @@ packages/
     harness-client/      #   Client library for daemon connection
     harness-daemon/      #   Main daemon: sessions, agents, permissions, hooks
     graphd/              #   Standalone SQLite datastore
-    control-plane/       #   HTTP API + Cockpit dashboard proxy
     decision-watcher/    #   Async oversight (watcher agent, decision DB, escalations)
 
   plugins/               # Optional subsystems
@@ -105,6 +104,7 @@ packages/
   apps/                  # User-facing clients
     launcher/            #   Unified CLI entry point (starts daemon + TUI)
     tui/                 #   Ink (React) terminal interface
+    control-plane/       #   HTTP API + Cockpit dashboard proxy
     dashboard/           #   Vite + React GraphD explorer
     dashboard-compact/   #   Minimal dashboard variant
     dashboard-control/   #   Cockpit UI (escalations, session oversight)
@@ -124,17 +124,15 @@ tests/                   # Integration tests
 | Agent | Role | Tools | Budget |
 |-------|------|-------|--------|
 | **routing** | Tier classification | None | 1 iter |
-| **simple** | Direct response | None | 1 iter |
 | **explorer** | Codebase discovery | Read, Glob, Grep, Bash | 8 iter, 60 calls |
 | **standard** | Default execution | Read, Write, Edit, Glob, Grep, Bash, Skill, PromptUser, coding, explorer, WebSearch | 50 iter, 225 calls |
 | **coding** | Deep coding (reasoning) | Read, Write, Edit, Glob, Grep, Bash, Skill, PromptUser, explorer | 50 iter, 250 calls |
 | **context_compactor** | Context summarization | None | 3 iter |
 | **debugger** | Debug analysis | Read, Write, Edit, Glob, Grep, Bash, Skill, PromptUser | 15 iter, 45 calls |
-| **web_crawler** | Web research | WebFetch, WebSearch | 15 iter, 23 calls |
 | **watcher** | Async oversight | Read, Glob, Grep, Bash | 20 iter, 40 calls |
 | **planner** | Async work planning | Read, Glob, Grep, PromptUser | 15 iter, 60 calls |
 
-Model roles are mapped per agent: `fast` (routing, simple, compactor, web_crawler), `standard` (explorer, standard, watcher, planner, debugger), `reasoning` (coding).
+Model roles are mapped per agent: `fast` (routing, compactor), `standard` (explorer, standard, watcher, planner, debugger), `reasoning` (coding).
 
 ## Configuration
 

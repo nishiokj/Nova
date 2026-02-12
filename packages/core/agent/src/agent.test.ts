@@ -102,7 +102,7 @@ describe('Agent', () => {
         response: 'Stopping work item for review',
         goalStateReached: true,
         awaitingUserInput: false,
-        watcherAction: 'stop_work_item',
+        observerAction: 'stop_work_item',
         reason: 'Insufficient evidence to justify completion',
         escalationId: 'esc_test_123',
       }),
@@ -117,7 +117,7 @@ describe('Agent', () => {
       systemPrompt: 'Observer test prompt',
       tools: [],
       budget: { maxIterations: 2, maxToolCalls: 0, maxDurationMs: 1000 },
-      outputSchema: { name: 'watcher_action_output', schema: { type: 'object' }, strict: true, schemaId: 'watcher_action' },
+      outputSchema: { name: 'observer_action_output', schema: { type: 'object' }, strict: true, schemaId: 'observer_action' },
     };
 
     const agent = new Agent(config, {
@@ -130,7 +130,7 @@ describe('Agent', () => {
 
     const result = await agent.run({ globalContext: context, workItem, cwd: process.cwd() });
     expect(result.success).toBe(true);
-    expect(result.structuredOutput?.watcherAction).toBe('stop_work_item');
+    expect(result.structuredOutput?.observerAction).toBe('stop_work_item');
     expect(result.structuredOutput?.escalationId).toBe('esc_test_123');
   });
 

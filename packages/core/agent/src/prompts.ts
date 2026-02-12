@@ -168,14 +168,6 @@ ${COMPLETION_RULES}
 **Script-specific**: If you've produced a WorkItem DAG that captures the goal, you're done. Don't iterate to "refine" unless something is actually wrong.`;
 
 /**
- * SimpleAgent prompt.
- * Quick, lightweight tasks with read-only tools.
- */
-export const SIMPLE_PROMPT = `You are a fast, efficient assistant for simple tasks.
-
-You are expected to respond quickly and concisely, while maintaining intelligence and coherence. `;
-
-/**
  * StandardAgent prompt.
  * Goal-driven execution with delta thinking.
  */
@@ -296,7 +288,7 @@ ${COMPLETION_RULES}
 **Coding-specific**: Cite file:line for each change. Don't add unrequested tests/docs. If you need clarification, use \`PromptUser\` tool then \`action: "done"\`.`;
 
 /**
- * WatcherAgent prompt.
+ * ObserverAgent prompt.
  * Oversight agent that evaluates terminal conditions and makes structured decisions.
  * The observer is NOT an execution agent -- it is the project's chief steward.
  */
@@ -356,7 +348,7 @@ Full browser automation for navigation, auth, form filling, screenshots, video r
 
 ## Decision Types
 
-Return exactly ONE \`watcherAction\`:
+Return exactly ONE \`observerAction\`:
 
 | Action | When | Payload |
 |--------|------|---------|
@@ -406,11 +398,11 @@ Your output MUST include (no omissions, no nulls unless specified):
 - \`goalStateReached\`: ALWAYS \`true\`
 - \`awaitingUserInput\`: ALWAYS \`false\` (observer never asks the user)
 - \`response\`: Short human-readable summary of your decision
-- \`watcherAction\`: One action type from above
+- \`observerAction\`: One action type from above
 - \`reason\`: Your rationale (always required)
 - Relevant payload for your action type
 
-Remember: \`action\` is loop control for the observer; in this system you must always return \`"done"\`. \`watcherAction\` is the actual decision.
+Remember: \`action\` is loop control for the observer; in this system you must always return \`"done"\`. \`observerAction\` is the actual decision.
 
 
 **Observer-specific**: Evaluation, active management, not execution. Read context files, assess the situation, decide. If you cannot justify a decision with evidence, explicitly report what is missing and intervene.`;
@@ -419,7 +411,7 @@ Remember: \`action\` is loop control for the observer; in this system you must a
  * Optional addendum: Decision schemas for control-plane prompts.
  * Use when constructing observer prompts that need explicit decision formats.
  */
-export function getWatcherDecisionProtocolAddendum(): string {
+export function getObserverDecisionProtocolAddendum(): string {
   return `
 ## Control Plane Decision Schemas
 ${getDecisionDocumentation()}
@@ -829,14 +821,12 @@ export function getAsyncAgentPrompt(): string {
  * Map of agent types to their system prompts.
  */
 const AGENT_PROMPTS: Record<string, string> = {
-  simple: SIMPLE_PROMPT,
   explorer: EXPLORER_PROMPT,
   runtime_script: RUNTIME_SCRIPT_PROMPT,
   standard: STANDARD_PROMPT,
   coding: CODING_AGENT_PROMPT,
   debugger: STANDARD_PROMPT,
   context_compactor: STANDARD_PROMPT,
-  web_crawler: STANDARD_PROMPT,
   observer: WATCHER_PROMPT,
   planner: PLANNER_PROMPT,
 };

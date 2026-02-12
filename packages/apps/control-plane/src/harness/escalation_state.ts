@@ -1,5 +1,3 @@
-import type { RaisedEscalation, WatcherTrigger } from 'decision-engine';
-
 export type SessionEscalationStatus = 'pending' | 'acknowledged' | 'resolved' | 'dismissed';
 
 export interface EscalationResolutionInput {
@@ -8,8 +6,17 @@ export interface EscalationResolutionInput {
   resolvedBy: 'user' | 'system' | 'timeout';
 }
 
-export interface SessionEscalationRecord extends RaisedEscalation {
-  trigger?: WatcherTrigger;
+export interface SessionEscalationRecord {
+  id: string;
+  escalationType: string;
+  sessionKey: string;
+  workItemId?: string;
+  title: string;
+  context: string;
+  tradeoffs?: string[];
+  options?: Array<{ id: string; label: string; description: string; implications: string[]; recommended: boolean }>;
+  references: Array<{ type: string; label: string; target: string; preview?: string }>;
+  trigger?: string;
   status: SessionEscalationStatus;
   createdAt: number;
   updatedAt: number;
@@ -110,7 +117,7 @@ function coerceEscalationRecord(input: unknown): SessionEscalationRecord | null 
     : undefined;
 
   const workItemId = asString(input.workItemId) ?? undefined;
-  const trigger = asString(input.trigger) as WatcherTrigger | null;
+  const trigger = asString(input.trigger) as string | null;
   const createdAt = asTimestamp(input.createdAt) ?? Date.now();
   const updatedAt = asTimestamp(input.updatedAt) ?? createdAt;
   const resolvedAt = asTimestamp(input.resolvedAt) ?? undefined;
@@ -118,7 +125,7 @@ function coerceEscalationRecord(input: unknown): SessionEscalationRecord | null 
 
   return {
     id,
-    escalationType: escalationType as RaisedEscalation['escalationType'],
+    escalationType: escalationType as string,
     sessionKey,
     ...(workItemId ? { workItemId } : {}),
     title,

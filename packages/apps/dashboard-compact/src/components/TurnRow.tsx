@@ -105,7 +105,6 @@ function formatAgent(agent: string): string {
     tester: 'ts',
     context_compactor: 'cc',
     debugger: 'db',
-    web_crawler: 'wc',
     orchestrator: 'or',
   };
   return abbrevMap[agent] || agent.slice(0, 2);

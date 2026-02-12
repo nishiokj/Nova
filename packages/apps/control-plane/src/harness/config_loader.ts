@@ -51,14 +51,14 @@ const BEHAVIORAL_RULES_PATH = 'config/behavioral_rules.md';
  * Get the package root directory from this module's location.
  * Works regardless of where the process is started from.
  *
- * In dev:  packages/infra/control-plane/src/harness/config_loader.ts -> ../../../../
- * In dist: packages/infra/control-plane/dist/harness/config_loader.js -> ../../../../
+ * In dev:  packages/apps/control-plane/src/harness/config_loader.ts -> ../../../../../
+ * In dist: packages/apps/control-plane/dist/harness/config_loader.js -> ../../../../../
  */
 function getPackageRoot(): string {
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = dirname(__filename);
-  // Always 4 levels up: harness/ -> (src|dist)/ -> control-plane/ -> packages/ -> root
-  return resolve(__dirname, '..', '..', '..', '..');
+  // Always 5 levels up: harness/ -> (src|dist)/ -> control-plane/ -> apps/ -> packages/ -> root
+  return resolve(__dirname, '..', '..', '..', '..', '..');
 }
 
 // ============================================

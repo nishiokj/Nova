@@ -148,7 +148,7 @@ export interface AgentResultBase {
   /** Agent's execution context - contains tool calls, outputs, reasoning from this run */
   localContext: ContextWindow;
   /** Optional observer stop metadata when cadence intervention terminates a work item/session. */
-  watcherStop?: {
+  observerStop?: {
     reason: string;
     escalationId?: string;
   };
@@ -300,7 +300,7 @@ export interface AgentCadenceMetrics {
 export interface AgentCadenceResult {
   action: 'continue' | 'inject' | 'stop';
   systemMessage?: string;
-  terminationReason?: Extract<TerminationReason, 'watcher_stopped' | 'watcher_work_item_stopped'>;
+  terminationReason?: Extract<TerminationReason, 'observer_stopped' | 'observer_work_item_stopped'>;
   escalationId?: string;
   reason?: string;
 }
@@ -508,7 +508,7 @@ export type InternalHookEvent =
     }
   | {
       /** Fired when observer stops a specific work item during cadence checks. */
-      type: 'watcher_agent_stopped';
+      type: 'observer_agent_stopped';
       sessionKey: string;
       workId: string;
       reason: string;

@@ -155,7 +155,7 @@ export class ControlPlaneServer {
     }
 
     const candidates = [
-      join(__dirname, '../../../../dashboard-control/dist'),
+      join(__dirname, '../../../dashboard-control/dist'),
       join(process.cwd(), 'packages/apps/dashboard-control/dist'),
       join(process.cwd(), 'node_modules/@jesus/dashboard-control/dist'),
     ];
@@ -383,7 +383,7 @@ export class ControlPlaneServer {
                 sessionKey: string;
                 contextItemCount: number;
                 contextEstimatedTokens: number;
-                watcherContextItemCount: number;
+                observerContextItemCount: number;
                 workItemLogCount: number;
                 workItemsCreatedCount: number;
                 lastAccessMs: number;

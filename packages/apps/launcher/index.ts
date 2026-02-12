@@ -59,8 +59,8 @@ const getDaemonPath = () => {
 
 const getControlPlanePath = () => {
   const root = getProjectRoot();
-  const distPath = path.join(root, 'packages', 'infra', 'control-plane', 'dist', 'control-plane.js');
-  const srcPath = path.join(root, 'packages', 'infra', 'control-plane', 'src', 'control-plane.ts');
+  const distPath = path.join(root, 'packages', 'apps', 'control-plane', 'dist', 'control-plane.js');
+  const srcPath = path.join(root, 'packages', 'apps', 'control-plane', 'src', 'control-plane.ts');
   return existsSync(distPath) ? distPath : srcPath;
 };
 

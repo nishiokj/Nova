@@ -74,7 +74,6 @@ export type AgentType =
   | 'tester'
   | 'context_compactor'
   | 'debugger'
-  | 'web_crawler'
   | 'orchestrator';
 
 export interface LLMCall {

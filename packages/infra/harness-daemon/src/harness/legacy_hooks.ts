@@ -217,7 +217,6 @@ function isValidEventType(event: string): event is HookEventType {
     'git_commit',
     'escalation_raised',
     'escalation_resolved',
-    'watcher_agent_stopped',
     'session_status_changed',
     'prompt_user',
     'stop',

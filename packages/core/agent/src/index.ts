@@ -37,7 +37,6 @@ export type {
 
 export { DEFAULT_AGENT_BUDGET, DEFAULT_LLM_PARAMS, noopEmit, noopHookQueue } from './types.js';
 export {
-  SIMPLE_PROMPT,
   EXPLORER_PROMPT,
   RUNTIME_SCRIPT_PROMPT,
   STANDARD_PROMPT,

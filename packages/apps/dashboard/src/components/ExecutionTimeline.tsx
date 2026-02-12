@@ -47,7 +47,6 @@ const AGENT_BADGE_COLORS: Record<AgentType, string> = {
   tester: '#06b6d4',
   context_compactor: '#f97316',
   debugger: '#ef4444',
-  web_crawler: '#6366f1',
   orchestrator: 'var(--text-muted)',
 }
 

@@ -217,7 +217,7 @@ async function main(): Promise<void> {
       'control-plane',
       [
         'run',
-        'packages/infra/control-plane/src/control-plane.ts',
+        'packages/apps/control-plane/src/control-plane.ts',
         '--host', '127.0.0.1',
         '--port', String(controlPlanePort),
         '--bus-host', busHost,

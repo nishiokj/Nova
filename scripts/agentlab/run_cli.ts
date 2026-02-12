@@ -4,6 +4,7 @@ import { createConnection } from 'net';
 import { spawn, type ChildProcess } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { BridgeClient } from '../../packages/apps/tui/bridge_client.ts';
 
 type JsonRecord = Record<string, unknown>;
@@ -47,6 +48,16 @@ type HookEvent = {
 const DEFAULT_BUS_HOST = process.env.EVENT_BUS_HOST || '127.0.0.1';
 const DEFAULT_BUS_PORT = Number(process.env.EVENT_BUS_PORT || '9555');
 const UNKNOWN_CONTROL_VERSION = `sha256:${'0'.repeat(64)}`;
+
+function resolveHarnessRoot(): string {
+  const envRoot = process.env.AGENTLAB_HARNESS_ROOT;
+  if (envRoot && envRoot.trim().length > 0) {
+    return envRoot;
+  }
+  // Fallback to repo root inferred from this file location.
+  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(scriptDir, '..', '..');
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -167,24 +178,21 @@ async function waitForPort(host: string, port: number, timeoutMs: number): Promi
   return false;
 }
 
-function startHarnessDaemon(projectRoot: string, host: string, port: number): ChildProcess {
-  const daemonEntry = path.join(projectRoot, 'packages', 'infra', 'harness-daemon', 'src', 'index.ts');
+function startHarnessDaemon(harnessRoot: string, workspaceRoot: string, host: string, port: number): ChildProcess {
+  const daemonEntry = path.join(harnessRoot, 'packages', 'infra', 'harness-daemon', 'src', 'index.ts');
   const args = ['run', daemonEntry];
   const child = spawn('bun', args, {
-    cwd: projectRoot,
+    cwd: workspaceRoot,
     env: {
       ...process.env,
       EVENT_BUS_HOST: host,
       EVENT_BUS_PORT: String(port),
-      HARNESS_CONFIG_PATH: process.env.HARNESS_CONFIG_PATH || path.join(projectRoot, 'config', 'defaults.json'),
+      HARNESS_CONFIG_PATH: process.env.HARNESS_CONFIG_PATH || path.join(harnessRoot, 'config', 'defaults.json'),
       // Disable auth in evaluation containers for deterministic startup.
       HARNESS_AUTH_ENABLED: 'false',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-
-  child.stdout?.on('data', () => {});
-  child.stderr?.on('data', () => {});
   return child;
 }
 
@@ -515,6 +523,7 @@ async function main(): Promise<void> {
   }
 
   const ti = readJson<TrialInput>(inputPath);
+  const harnessRoot = resolveHarnessRoot();
   const ids = getIds(ti);
   const prompt = pickPrompt(ti.task);
   const integration = resolveIntegrationLevel(ti.design?.integration_level);
@@ -531,6 +540,8 @@ async function main(): Promise<void> {
   const requestTimeoutMs = Number(process.env.AGENTLAB_REQUEST_TIMEOUT_MS || '180000');
   let daemon: ChildProcess | null = null;
   let startedDaemon = false;
+  let daemonStdoutTail = '';
+  let daemonStderrTail = '';
   let client: BridgeClient | null = null;
 
   const startMs = Date.now();
@@ -546,11 +557,26 @@ async function main(): Promise<void> {
   try {
     const busOpen = await isPortOpen(DEFAULT_BUS_HOST, DEFAULT_BUS_PORT);
     if (!busOpen) {
-      daemon = startHarnessDaemon(process.cwd(), DEFAULT_BUS_HOST, DEFAULT_BUS_PORT);
+      daemon = startHarnessDaemon(harnessRoot, workspaceDir, DEFAULT_BUS_HOST, DEFAULT_BUS_PORT);
       startedDaemon = true;
+      daemon.stdout?.on('data', (chunk: Buffer | string) => {
+        daemonStdoutTail = `${daemonStdoutTail}${chunk.toString()}`.slice(-4000);
+      });
+      daemon.stderr?.on('data', (chunk: Buffer | string) => {
+        daemonStderrTail = `${daemonStderrTail}${chunk.toString()}`.slice(-4000);
+      });
       const ready = await waitForPort(DEFAULT_BUS_HOST, DEFAULT_BUS_PORT, 15000);
       if (!ready) {
-        throw new Error('Harness daemon did not start in time');
+        const detail = daemonStderrTail.trim() || daemonStdoutTail.trim();
+        const detailLines = detail
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0);
+        const preferredLine =
+          detailLines.find((line) => line.toLowerCase().startsWith('error:')) ||
+          detailLines[0];
+        const suffix = preferredLine ? `: ${preferredLine}` : '';
+        throw new Error(`Harness daemon did not start in time${suffix}`);
       }
     }
 

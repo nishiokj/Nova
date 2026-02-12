@@ -167,13 +167,13 @@ interface LLMResponseBuilder {
   continueWork(response?: string): LLMResponse;
   awaitingUserInput(question: string): LLMResponse;
   handoff(workItems: WorkItemSpec[]): LLMResponse;
-  watcherAnswer(text: string): LLMResponse;
-  watcherRealign(systemMessage: string, newGoal?: string): LLMResponse;
-  watcherSplit(workItems: WorkItemSpec[]): LLMResponse;
-  watcherQualityGatePassed(): LLMResponse;
-  watcherQualityGateFailed(issues: string[]): LLMResponse;
-  watcherAllow(): LLMResponse;
-  watcherContinue(): LLMResponse;
+  observerAnswer(text: string): LLMResponse;
+  observerRealign(systemMessage: string, newGoal?: string): LLMResponse;
+  observerSplit(workItems: WorkItemSpec[]): LLMResponse;
+  observerQualityGatePassed(): LLMResponse;
+  observerQualityGateFailed(issues: string[]): LLMResponse;
+  observerAllow(): LLMResponse;
+  observerContinue(): LLMResponse;
   error(message: string): LLMResponse;
 }
 
@@ -241,84 +241,84 @@ function createLLMResponseBuilder(): LLMResponseBuilder {
       }));
     },
 
-    watcherAnswer(text: string): LLMResponse {
+    observerAnswer(text: string): LLMResponse {
       return base(JSON.stringify({
         action: 'done',
         response: `Observer answered: ${text}`,
         goalStateReached: true,
         awaitingUserInput: false,
-        watcherAction: 'answer',
+        observerAction: 'answer',
         reason: 'Answered based on codebase conventions.',
         answer: { text, contextAddendum: null },
       }));
     },
 
-    watcherRealign(systemMessage: string, newGoal?: string): LLMResponse {
+    observerRealign(systemMessage: string, newGoal?: string): LLMResponse {
       return base(JSON.stringify({
         action: 'done',
         response: `Observer realigning: ${systemMessage}`,
         goalStateReached: true,
         awaitingUserInput: false,
-        watcherAction: 'realign',
+        observerAction: 'realign',
         reason: 'Agent needs course correction.',
         realign: { systemMessage, newGoal: newGoal ?? null },
       }));
     },
 
-    watcherSplit(workItems: WorkItemSpec[]): LLMResponse {
+    observerSplit(workItems: WorkItemSpec[]): LLMResponse {
       return base(JSON.stringify({
         action: 'done',
         response: `Observer splitting into ${workItems.length} work items.`,
         goalStateReached: true,
         awaitingUserInput: false,
-        watcherAction: 'split',
+        observerAction: 'split',
         reason: 'Task is too large, splitting into atomic units.',
         workItems,
       }));
     },
 
-    watcherQualityGatePassed(): LLMResponse {
+    observerQualityGatePassed(): LLMResponse {
       return base(JSON.stringify({
         action: 'done',
         response: 'Quality gate passed.',
         goalStateReached: true,
         awaitingUserInput: false,
-        watcherAction: 'quality_gate',
+        observerAction: 'quality_gate',
         reason: 'Work meets quality standards.',
         qualityGate: { passed: true },
       }));
     },
 
-    watcherQualityGateFailed(issues: string[]): LLMResponse {
+    observerQualityGateFailed(issues: string[]): LLMResponse {
       return base(JSON.stringify({
         action: 'done',
         response: `Quality gate failed: ${issues.join(', ')}`,
         goalStateReached: true,
         awaitingUserInput: false,
-        watcherAction: 'quality_gate',
+        observerAction: 'quality_gate',
         reason: 'Work does not meet quality standards.',
         qualityGate: { passed: false, issues },
       }));
     },
 
-    watcherAllow(): LLMResponse {
+    observerAllow(): LLMResponse {
       return base(JSON.stringify({
         action: 'done',
         response: 'No intervention needed.',
         goalStateReached: true,
         awaitingUserInput: false,
-        watcherAction: 'allow',
+        observerAction: 'allow',
         reason: 'Agent is on track.',
       }));
     },
 
-    watcherContinue(): LLMResponse {
+    observerContinue(): LLMResponse {
       return base(JSON.stringify({
         action: 'continue',
         response: 'Continuing to evaluate...',
         goalStateReached: false,
         awaitingUserInput: false,
-        watcherAction: 'continue',
+        observerAction: 'continue',
         reason: 'Need more information.',
       }));
     },
@@ -1498,10 +1498,6 @@ describe('Orchestrator', () => {
 
       const config: Partial<OrchestratorConfig> = {
         maxIterations: 10,
-        asyncMode: {
-          enabled: true,
-          database: undefined,
-        },
       };
 
       const orchestrator = new Orchestrator(

@@ -136,7 +136,7 @@ export interface ControlPlaneContext {
       sessionKey: string;
       contextItemCount: number;
       contextEstimatedTokens: number;
-      watcherContextItemCount: number;
+      observerContextItemCount: number;
       workItemLogCount: number;
       workItemsCreatedCount: number;
       lastAccessMs: number;
@@ -149,7 +149,7 @@ export interface ControlPlaneContext {
       sessionKey: string;
       contextItemCount: number;
       contextEstimatedTokens: number;
-      watcherContextItemCount: number;
+      observerContextItemCount: number;
       workItemLogCount: number;
       workItemsCreatedCount: number;
       lastAccessMs: number;

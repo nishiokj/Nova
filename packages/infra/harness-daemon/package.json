@@ -30,7 +30,6 @@
     "shared": "workspace:*",
     "tools": "workspace:*",
     "types": "workspace:*",
-    "decision-engine": "workspace:*",
     "work": "workspace:*"
   },
   "devDependencies": {

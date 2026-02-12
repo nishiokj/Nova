@@ -27,8 +27,8 @@ export const TerminationReasonSchema = z.enum([
   'no_action',
   'refusal',
   'stagnation',
-  'watcher_stopped',
-  'watcher_work_item_stopped',
+  'observer_stopped',
+  'observer_work_item_stopped',
   'cadence_audit',
 ]);
 
