@@ -46,7 +46,6 @@ export interface EventDecisionMap {
   'work_item_completed': WorkItemCompletedDecision;
   'user_stopped': never;  // No decision, always allow
   'transient_error': never;  // No decision, always allow
-  'escalation_resolved': never;  // No decision - this IS the resolution from human
 }
 
 /**
@@ -82,7 +81,7 @@ export function createHook<E extends keyof EventDecisionMap>(
 /**
  * Events that don't require a decision (pass through).
  */
-export type PassThroughEvent = Extract<ControlEventType, 'user_stopped' | 'transient_error' | 'escalation_resolved'>;
+export type PassThroughEvent = Extract<ControlEventType, 'user_stopped' | 'transient_error'>;
 
 /**
  * Events that require a decision (have hooks).
@@ -104,7 +103,6 @@ export function requiresDecision(eventType: ControlEventType): eventType is Deci
       return true;
     case 'user_stopped':
     case 'transient_error':
-    case 'escalation_resolved':
       return false;
     default:
       return assertNever(eventType);

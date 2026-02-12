@@ -216,8 +216,6 @@ function isValidEventType(event: string): event is HookEventType {
     'memory_injected',
     'git_commit',
     'escalation_raised',
-    'escalation_resolved',
-    'session_status_changed',
     'prompt_user',
     'stop',
   ];

@@ -14,7 +14,6 @@ export const SessionCard = memo(function SessionCard({
   onSelect: () => void;
 }) {
   const color = statusColor(row.status);
-  const isBlocked = row.blocking.unresolvedEscalationsCount > 0;
   const hasActivity = row.currentActivity.tool !== 'idle';
 
   return (
@@ -27,13 +26,6 @@ export const SessionCard = memo(function SessionCard({
       }`}
       style={selected ? { borderLeftColor: color } : undefined}
     >
-      {isBlocked && (
-        <span
-          className="absolute right-2 top-2 h-2.5 w-2.5 rounded-full bg-[var(--warning)] escalation-alert-light"
-          title={`${row.blocking.unresolvedEscalationsCount} escalation${row.blocking.unresolvedEscalationsCount === 1 ? '' : 's'} pending`}
-        />
-      )}
-
       <div className="text-[13px] text-[var(--text-primary)] leading-snug line-clamp-2" title={row.title}>{row.title}</div>
 
       <div className="flex items-center gap-2 mt-1">
@@ -42,7 +34,7 @@ export const SessionCard = memo(function SessionCard({
         >
           <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color }} />
           <span className="text-[10px] uppercase tracking-wide" style={{ color }}>
-            {isBlocked ? `blocked (${row.blocking.unresolvedEscalationsCount})` : row.status}
+            {row.status}
           </span>
         </span>
         <span className="text-[11px] text-[var(--text-muted)]">{formatElapsed(row.elapsedSec)}</span>

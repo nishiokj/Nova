@@ -8,10 +8,6 @@ import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import nodePath from 'path';
 import type { SessionPermissionState, PermissionSettings, PermissionRule } from 'types';
-import type {
-  EscalationResolutionInput,
-  SessionEscalationRecord,
-} from '../escalation_state.js';
 
 // ── promisified exec helpers ────────────────────────────────────────
 
@@ -106,29 +102,6 @@ export interface ControlPlaneContext {
     error?: string;
   }>;
   subscribeEvents?: (handler: (event: { type: string; sessionKey?: string; data?: Record<string, unknown> }) => void) => () => void;
-  resolveSessionEscalation?: (
-    sessionKey: string,
-    escalationId: string,
-    resolution: EscalationResolutionInput
-  ) => {
-    success: boolean;
-    escalationId: string;
-    pendingCount?: number;
-    sessionStatus?: string;
-    resumed?: boolean;
-    resumeRequestId?: string;
-    alreadyResolved?: boolean;
-    error?: string;
-  } | Promise<{
-    success: boolean;
-    escalationId: string;
-    pendingCount?: number;
-    sessionStatus?: string;
-    resumed?: boolean;
-    resumeRequestId?: string;
-    alreadyResolved?: boolean;
-    error?: string;
-  }>;
   getDebugMemoryInfo?: () => {
     sessionCount: number;
     maxSessions: number;
@@ -260,7 +233,7 @@ export interface MessageRow {
   metadata?: Record<string, unknown>;
 }
 
-export type SessionPanelStatus = 'running' | 'blocked' | 'ready' | 'done' | 'stopped';
+export type SessionPanelStatus = 'running' | 'ready' | 'done' | 'stopped';
 export type SessionKind = 'feature' | 'issue' | 'refactor' | 'system';
 
 export interface SessionRollup {
@@ -287,9 +260,6 @@ export interface SessionRollup {
     invariantsStatus: 'pass' | 'fail' | 'running' | 'unknown';
     invariantsPassed: number;
     invariantsTotal: number;
-  };
-  blocking: {
-    unresolvedEscalationsCount: number;
   };
   tokenMetrics: {
     input: number;
@@ -514,7 +484,6 @@ export interface CockpitDailyMetricsResult {
       ready: number;
       done: number;
     };
-    escalationsOpen: number;
   } | null;
   error?: string;
 }
@@ -523,7 +492,6 @@ export interface CockpitRollupSnapshotResult {
   runningSessions: SessionRollup[];
   readySessions: SessionRollup[];
   doneSessions: SessionRollup[];
-  escalations: EscalationRollup[];
   commitRollups: CommitRollup[];
   prRollups: PRRollup[];
   metrics: CockpitDailyMetricsResult['metrics'];
@@ -950,7 +918,6 @@ export async function writeSessionPermissionSettingsFile(workingDir: string, set
 // ── session status/kind mappers ─────────────────────────────────────
 
 export function mapSessionStatus(status: string): SessionPanelStatus {
-  if (status === 'blocked') return 'blocked';
   if (status === 'review') return 'ready';
   if (status === 'cancelled') return 'stopped';
   if (status === 'completed' || status === 'failed' || status === 'inactive' || status === 'expired') {

@@ -134,19 +134,6 @@ export interface WorkItemCompletedEvent extends ControlEventBase {
   terminationReason: TerminationReason;
 }
 
-/**
- * Escalation resolved by human or system (Cockpit → Orchestrator).
- */
-export interface EscalationResolvedEvent extends ControlEventBase {
-  type: 'escalation_resolved';
-  escalationId: string;
-  resolution: {
-    optionId?: string;
-    freeformResponse?: string;
-    resolvedBy: 'user' | 'system' | 'timeout';
-  };
-}
-
 // ============================================
 // CONTROL EVENT UNION
 // ============================================
@@ -163,8 +150,7 @@ export type ControlEvent =
   | HandoffRequestedEvent
   | UserStoppedEvent
   | TransientErrorEvent
-  | WorkItemCompletedEvent
-  | EscalationResolvedEvent;
+  | WorkItemCompletedEvent;
 
 /**
  * Extract the type string from a ControlEvent.
@@ -184,7 +170,6 @@ export const ALL_EVENT_TYPES: readonly ControlEventType[] = [
   'user_stopped',
   'transient_error',
   'work_item_completed',
-  'escalation_resolved',
 ] as const;
 
 // ============================================
@@ -284,10 +269,6 @@ export function isTransientError(evt: ControlEvent): evt is TransientErrorEvent 
 
 export function isWorkItemCompleted(evt: ControlEvent): evt is WorkItemCompletedEvent {
   return evt.type === 'work_item_completed';
-}
-
-export function isEscalationResolved(evt: ControlEvent): evt is EscalationResolvedEvent {
-  return evt.type === 'escalation_resolved';
 }
 
 // ============================================
@@ -451,25 +432,3 @@ export function createWorkItemCompletedEvent(
   };
 }
 
-/**
- * Create an EscalationResolvedEvent.
- */
-export function createEscalationResolvedEvent(
-  sessionKey: string,
-  workId: string,
-  escalationId: string,
-  resolution: {
-    optionId?: string;
-    freeformResponse?: string;
-    resolvedBy: 'user' | 'system' | 'timeout';
-  }
-): EscalationResolvedEvent {
-  return {
-    type: 'escalation_resolved',
-    timestamp: Date.now(),
-    sessionKey,
-    workId,
-    escalationId,
-    resolution,
-  };
-}

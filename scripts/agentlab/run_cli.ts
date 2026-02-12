@@ -181,6 +181,10 @@ async function waitForPort(host: string, port: number, timeoutMs: number): Promi
 function startHarnessDaemon(harnessRoot: string, workspaceRoot: string, host: string, port: number): ChildProcess {
   const daemonEntry = path.join(harnessRoot, 'packages', 'infra', 'harness-daemon', 'src', 'index.ts');
   const args = ['run', daemonEntry];
+  const configPath = process.env.HARNESS_CONFIG_PATH;
+  if (configPath && configPath.trim().length > 0) {
+    args.push('--config', configPath.trim());
+  }
   const child = spawn('bun', args, {
     cwd: workspaceRoot,
     env: {

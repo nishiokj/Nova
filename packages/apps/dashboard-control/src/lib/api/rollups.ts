@@ -4,21 +4,18 @@ import type {
   DailyMetrics,
   SessionPanelStatus,
   SessionRollup,
-  EscalationRollup,
   CommitRollup,
   PRRollup,
 } from './types';
 
 export async function getCockpitRollupSnapshot(options: {
   sessionLimit?: number;
-  escalationLimit?: number;
   repoLimit?: number;
   includeRepo?: boolean;
   date?: string;
 } = {}): Promise<CockpitRollupSnapshot> {
   const params = new URLSearchParams();
   params.set('sessionLimit', String(options.sessionLimit ?? 120));
-  params.set('escalationLimit', String(options.escalationLimit ?? 120));
   params.set('repoLimit', String(options.repoLimit ?? 50));
   params.set('includeRepo', options.includeRepo === false ? '0' : '1');
   if (options.date) params.set('date', options.date);
@@ -31,13 +28,6 @@ export async function getCockpitSessionRollups(
 ): Promise<SessionRollup[]> {
   const data = await fetchAPI<{ rollups: SessionRollup[] }>(
     `/cockpit/rollups/sessions?status=${encodeURIComponent(status)}&limit=${limit}`
-  );
-  return data.rollups ?? [];
-}
-
-export async function getCockpitEscalationRollups(limit = 100): Promise<EscalationRollup[]> {
-  const data = await fetchAPI<{ rollups: EscalationRollup[] }>(
-    `/cockpit/rollups/escalations?status=open&limit=${limit}`
   );
   return data.rollups ?? [];
 }

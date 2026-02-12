@@ -91,7 +91,7 @@ export function RightPanel() {
                   row={row}
                   selected={focusTarget?.type === 'session' && focusTarget.id === row.sessionKey}
                   highlighted={highlightedSessionIdx === runningOffset + i}
-                  onSelect={getSessionSelect(row.sessionKey, row.blocking.unresolvedEscalationsCount > 0 ? 'escalations' : undefined)}
+                  onSelect={getSessionSelect(row.sessionKey)}
                 />
               </div>
             ))}
@@ -110,7 +110,7 @@ export function RightPanel() {
                   row={row}
                   selected={focusTarget?.type === 'session' && focusTarget.id === row.sessionKey}
                   highlighted={highlightedSessionIdx === readyOffset + i}
-                  onSelect={getSessionSelect(row.sessionKey, row.blocking.unresolvedEscalationsCount > 0 ? 'escalations' : undefined)}
+                  onSelect={getSessionSelect(row.sessionKey)}
                 />
               </div>
             ))}
@@ -129,7 +129,7 @@ export function RightPanel() {
                   row={row}
                   selected={focusTarget?.type === 'session' && focusTarget.id === row.sessionKey}
                   highlighted={highlightedSessionIdx === doneOffset + i}
-                  onSelect={getSessionSelect(row.sessionKey, row.blocking.unresolvedEscalationsCount > 0 ? 'escalations' : undefined)}
+                  onSelect={getSessionSelect(row.sessionKey)}
                 />
               </div>
             ))}

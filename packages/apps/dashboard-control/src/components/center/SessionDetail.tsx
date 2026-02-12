@@ -82,7 +82,6 @@ export function SessionDetail({ mentionFiles = [] }: { mentionFiles?: string[] }
     focusData?.type === 'escalation'
       || focusData?.isAsync
       || focusRollup?.isAsync
-      || focusRollup?.blocking.unresolvedEscalationsCount
   );
   // Derive from focusTarget (sync) rather than focusData (async) to avoid
   // the tab guard resetting focusTab before focusData loads.

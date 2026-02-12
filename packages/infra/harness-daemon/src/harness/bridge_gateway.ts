@@ -91,24 +91,6 @@ interface HarnessLike {
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
   compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
   getSessionPermissionChecker?(sessionKey: string): PermissionChecker | null;  // Per-session permission checker
-  resolveSessionEscalation?(
-    sessionKey: string,
-    escalationId: string,
-    resolution: {
-      optionId?: string;
-      freeformResponse?: string;
-      resolvedBy: 'user' | 'system' | 'timeout';
-    }
-  ): {
-    success: boolean;
-    escalationId: string;
-    pendingCount?: number;
-    sessionStatus?: string;
-    resumed?: boolean;
-    resumeRequestId?: string;
-    alreadyResolved?: boolean;
-    error?: string;
-  };
   getDebugMemoryInfo?(): {
     sessionCount: number;
     maxSessions: number;
@@ -331,7 +313,6 @@ export class BridgeGateway {
     register('control_plane_fork', (data, ctx) => this.handleControlPlaneFork(ctx.connectionId, data));
     register('control_plane_permissions_get', (data, ctx) => this.handleControlPlanePermissionsGet(ctx.connectionId, data));
     register('control_plane_permissions_update', (data, ctx) => this.handleControlPlanePermissionsUpdate(ctx.connectionId, data));
-    register('control_plane_resolve_escalation', (data, ctx) => this.handleControlPlaneResolveEscalation(ctx.connectionId, data));
     register('control_plane_memory_info', (_data, ctx) => this.handleControlPlaneMemoryInfo(ctx.connectionId));
     register('control_plane_model_get', (data, ctx) => this.handleControlPlaneModelGet(ctx.connectionId, data));
     register('control_plane_model_set', (data, ctx) => this.handleControlPlaneModelSet(ctx.connectionId, data));
@@ -1947,46 +1928,6 @@ export class BridgeGateway {
       success: true,
       state: nextState,
     });
-  }
-
-  private handleControlPlaneResolveEscalation(
-    connectionId: string,
-    data: Record<string, unknown> | undefined
-  ): void {
-    const sessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
-    const escalationId = typeof data?.escalation_id === 'string' ? data.escalation_id.trim() : '';
-    const resolutionRaw = isRecord(data?.resolution) ? data.resolution : {};
-    const resolvedBy = resolutionRaw.resolvedBy === 'system' || resolutionRaw.resolvedBy === 'timeout'
-      ? resolutionRaw.resolvedBy
-      : 'user';
-    const resolution = {
-      ...(typeof resolutionRaw.optionId === 'string' && resolutionRaw.optionId.trim().length > 0
-        ? { optionId: resolutionRaw.optionId.trim() }
-        : {}),
-      ...(typeof resolutionRaw.freeformResponse === 'string' && resolutionRaw.freeformResponse.trim().length > 0
-        ? { freeformResponse: resolutionRaw.freeformResponse.trim() }
-        : {}),
-      resolvedBy,
-    } as const;
-
-    if (!sessionKey) {
-      this.sendAuthResponse(connectionId, 'control_plane_resolve_escalation', { success: false, error: 'Missing session_key' });
-      return;
-    }
-    if (!escalationId) {
-      this.sendAuthResponse(connectionId, 'control_plane_resolve_escalation', { success: false, error: 'Missing escalation_id' });
-      return;
-    }
-    if (!this.harness.resolveSessionEscalation) {
-      this.sendAuthResponse(connectionId, 'control_plane_resolve_escalation', {
-        success: false,
-        error: 'Escalation resolution not available',
-      });
-      return;
-    }
-
-    const result = this.harness.resolveSessionEscalation(sessionKey, escalationId, resolution);
-    this.sendAuthResponse(connectionId, 'control_plane_resolve_escalation', result as Record<string, unknown>);
   }
 
   private handleControlPlaneMemoryInfo(connectionId: string): void {

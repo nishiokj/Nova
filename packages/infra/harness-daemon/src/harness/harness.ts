@@ -57,8 +57,16 @@ import type {
 import { loadConfig, getAgentConfig } from './config_loader.js';
 import type { FullHarnessConfig, ResolvedAgentConfig } from './config.js';
 import { LocalProviderManager } from './local_providers.js';
-import { HookExecutor } from './hook_executor.js';
-import { loadSkillDefinitions, getSkillDefinition, type HookContext as SkillHookContext } from './skills_loader.js';
+import { ConfiguredEffectHooksRunner } from './configured_effect_hooks.js';
+import {
+  loadSkillDefinitions,
+  loadHookDefinitions,
+  getSkillDefinition,
+  getHookDefinition,
+  type HookContext as SkillHookContext,
+  type HookDefinition,
+  type HookResult as LegacyHookResult,
+} from './skills_loader.js';
 import { SessionStore } from './session_store.js';
 import { createFileLogger, type HarnessLogger } from './harness_infra.js';
 import { PermissionChecker } from './permissions.js';
@@ -67,31 +75,18 @@ import type { PermissionedTool, PermissionRequest, PermissionResponse } from 'ty
 import { isPermissionedTool, normalizeToolName } from 'types';
 import { createSessionState, touchSession, clearSessionState, type SessionState } from './session_state.js';
 import type { EntityGraph, EntityGraphConfig } from 'entity-graph';
-import { type HookRegistry } from 'orchestrator';
-import { createMemoryInjector, type MemoryInjector as MemoryInjectorInstance } from 'memory-injector';
 import {
-  buildEscalationResolutionGuidance,
-  parseSessionEscalations,
-  resolveSessionEscalationState,
-  type EscalationResolutionInput,
-} from './escalation_state.js';
-import { executeHooks, registerHook } from './legacy_hooks.js';
+  createSessionScopedUnifiedHookRegistry,
+  runUnifiedEffectHooksForSession,
+  type HookRegistry,
+  type SessionScopedUnifiedHookRegistry,
+} from 'orchestrator';
+import { createMemoryInjector, type MemoryInjector as MemoryInjectorInstance } from 'memory-injector';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
 
 type SessionGetResponse = { session?: GraphDSession; error?: string };
-
-export interface ResolveSessionEscalationResult {
-  success: boolean;
-  escalationId: string;
-  pendingCount?: number;
-  sessionStatus?: string;
-  resumed?: boolean;
-  resumeRequestId?: string;
-  alreadyResolved?: boolean;
-  error?: string;
-}
 
 export interface CloseSessionResult {
   success: boolean;
@@ -387,7 +382,8 @@ export class AgentHarness {
   private logSubscriber: LogSubscriber | null = null;
   private agentRegistry: AgentRegistry;
   private llmAdapter: ReturnType<typeof createAdapter>;
-  private hookExecutor: HookExecutor | null = null;
+  private readonly sessionHookRegistry: SessionScopedUnifiedHookRegistry;
+  private readonly configuredHookRuntimes = new Map<string, ConfiguredEffectHooksRunner>();
   private providerKeyService: HarnessProviderKeyService;
   private orchestratorRunner: OrchestratorRunner;
   private entityGraph: EntityGraph | null = null;
@@ -403,6 +399,7 @@ export class AgentHarness {
     this.sessionTtlMs = config.context.sessionTtlMs;
     this.pauseTimeoutMs = config.context.pauseTimeoutMs;
     this.maxSessions = config.context.maxSessions;
+    this.sessionHookRegistry = createSessionScopedUnifiedHookRegistry();
 
     // Gather environment context once at startup
     const envContext = gatherEnvironmentContext(config.tools.workingDir);
@@ -538,13 +535,6 @@ export class AgentHarness {
         dbPath: config.graphd.dbPath, // Already absolute - resolved relative to config file location
       });
       this.graphd = new GraphDManager(graphdConfig);
-    }
-
-    // Initialize HookExecutor if hooks are enabled
-    if (config.hooks.enabled && config.hooks.directory) {
-      const hooksDir = path.resolve(workingDir, config.hooks.directory);
-      this.hookExecutor = new HookExecutor(hooksDir, workingDir);
-      this.logger.info('HookExecutor initialized', { hooksDir });
     }
 
     if (config.dangerousMode) {
@@ -1222,192 +1212,6 @@ export class AgentHarness {
 
   getAsyncModeStatus(): { ok: boolean; issues: string[] } {
     return { ok: this.asyncModeIssues.length === 0, issues: [...this.asyncModeIssues] };
-  }
-
-  resolveSessionEscalation(
-    sessionKey: string,
-    escalationId: string,
-    resolution: EscalationResolutionInput
-  ): ResolveSessionEscalationResult {
-    if (!this.isGraphDReady() || !this.graphd) {
-      return {
-        success: false,
-        escalationId,
-        error: 'GraphD not available',
-      };
-    }
-
-    const result = this.graphd.sessionGet(sessionKey) as SessionGetResponse;
-    const session = result.session;
-    if (!session) {
-      return {
-        success: false,
-        escalationId,
-        error: result.error || `Session not found: ${sessionKey}`,
-      };
-    }
-
-    const metadata = (session.metadata ?? {}) as Record<string, unknown>;
-    const existingEscalations = parseSessionEscalations(metadata.escalations);
-    const resolvedState = resolveSessionEscalationState(existingEscalations, escalationId, resolution);
-
-    if (!resolvedState.found || !resolvedState.resolved) {
-      return {
-        success: false,
-        escalationId,
-        error: `Escalation not found: ${escalationId}`,
-      };
-    }
-
-    const nextMetadata: Record<string, unknown> = {
-      ...metadata,
-      escalations: resolvedState.escalations,
-    };
-    const metadataUpdate = this.graphd.sessionUpdateMetadata(sessionKey, nextMetadata, false) as {
-      success?: boolean;
-      error?: string;
-    };
-    if (!metadataUpdate.success) {
-      return {
-        success: false,
-        escalationId,
-        error: metadataUpdate.error || `Failed to update escalation metadata for ${sessionKey}`,
-      };
-    }
-
-    // Persist resolution to durable storage (fire-and-forget)
-    if (this.memoryClient) {
-      this.memoryClient.escalations.resolve(escalationId, {
-        optionId: resolution.optionId,
-        freeformResponse: resolution.freeformResponse,
-      }).catch((err) => {
-        this.logger.warning('Failed to persist escalation resolution to database', {
-          sessionKey,
-          escalationId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-    }
-
-    const store = this.ensureSessionHydrated(sessionKey, {
-      workingDir: session.workingDir ?? undefined,
-      includeUserPreferences: false,
-    });
-    const guidance = buildEscalationResolutionGuidance(resolvedState.resolved, resolution);
-    store.getContext().addMessage('system', guidance);
-    store.persistContext();
-
-    const pausedWorkItems = store.listPausedWorkItems();
-    const pausedWorkItem = pausedWorkItems.find((item) => (
-      item.status === 'pending' && (
-        item.escalationId === escalationId ||
-        (!!resolvedState.resolved?.workItemId && item.workId === resolvedState.resolved.workItemId)
-      )
-    ));
-    const resolvedPausedWorkItem = pausedWorkItem
-      ? store.resolvePausedWorkItem(pausedWorkItem.workId, guidance)
-      : null;
-
-    const internalContext: InternalHookContext = {
-      workId: resolvedState.resolved.workItemId ?? escalationId,
-      agentType: 'harness',
-      sessionKey,
-      requestId: '',
-      objective: resolvedState.resolved.title,
-    };
-
-    const resolutionEvent: InternalHookEvent = {
-      type: 'escalation_resolved',
-      escalationId,
-      sessionKey,
-      resolution,
-    };
-    this.emitInternalHookAsync(resolutionEvent, internalContext);
-
-    let nextStatus = session.status;
-    if (resolvedState.pendingCount === 0 && session.status === 'blocked') {
-      const statusUpdate = this.graphd.sessionUpdateStatus(sessionKey, 'active') as {
-        success?: boolean;
-        error?: string;
-      };
-      if (!statusUpdate.success) {
-        return {
-          success: false,
-          escalationId,
-          error: statusUpdate.error || `Failed to transition ${sessionKey} to active`,
-        };
-      }
-
-      nextStatus = 'active';
-      const statusEvent: InternalHookEvent = {
-        type: 'session_status_changed',
-        sessionKey,
-        previousStatus: 'blocked',
-        newStatus: 'active',
-        reason: `Escalation ${escalationId} resolved`,
-        triggeringEscalationId: escalationId,
-      };
-      this.emitInternalHookAsync(statusEvent, internalContext);
-    }
-
-    let resumed = false;
-    let resumeRequestId: string | undefined;
-    const canAutoResume = nextStatus === 'active' &&
-      resolvedState.pendingCount === 0 &&
-      store.isAsyncModeEnabled() &&
-      !this.getSessionAsyncRun(sessionKey);
-
-    if (canAutoResume) {
-      const paused = store.getPausedState();
-      const replayContext = resolvedPausedWorkItem
-        ? [
-            '[Escalation Replay Context]',
-            `Work item: ${resolvedPausedWorkItem.workId}`,
-            `Agent: ${resolvedPausedWorkItem.agentType}`,
-            ...(resolvedPausedWorkItem.objective ? [`Original objective: ${resolvedPausedWorkItem.objective}`] : []),
-            `Pause reason: ${resolvedPausedWorkItem.reason}`,
-            `Escalation: ${escalationId}`,
-            '',
-            'Human resolution guidance:',
-            guidance,
-            '',
-            'Resume this work item using the guidance above. Do not restart unrelated tasks.',
-          ].join('\n')
-        : null;
-
-      const resumeInput = paused
-        ? (resolution.freeformResponse?.trim() || resolution.optionId || guidance)
-        : replayContext ?? `Escalation ${escalationId} has been resolved.\n${guidance}`;
-      const workingDir = paused?.workingDir ?? session.workingDir ?? this.config.tools.workingDir;
-
-      resumeRequestId = `escalation-resume-${randomUUID()}`;
-      const resumeHandle = this.run({
-        requestId: resumeRequestId,
-        inputText: resumeInput,
-        sessionKey,
-        workingDir,
-      });
-      resumed = true;
-
-      void resumeHandle.result.catch((error) => {
-        this.logger.warning('Auto-resume after escalation resolution failed', {
-          sessionKey,
-          escalationId,
-          requestId: resumeRequestId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }
-
-    return {
-      success: true,
-      escalationId,
-      pendingCount: resolvedState.pendingCount,
-      sessionStatus: nextStatus,
-      resumed,
-      ...(resumeRequestId ? { resumeRequestId } : {}),
-      alreadyResolved: resolvedState.alreadyTerminal,
-    };
   }
 
   // --- Session-level exclusive operation management (async runs) ---

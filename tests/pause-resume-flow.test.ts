@@ -12,8 +12,8 @@
  */
 
 import { describe, it, expect, beforeEach } from 'bun:test';
-import { ContextWindow } from '../packages/core/agent-core/src/context/context-window.js';
-import type { UserPromptInfo } from '../packages/core/agent-core/src/agent/types.js';
+import { ContextWindow } from '../packages/core/context/src/context-window.js';
+import type { UserPromptInfo } from '../packages/core/agent/src/types.js';
 
 // Simulate paused state as stored by harness
 interface PausedState {

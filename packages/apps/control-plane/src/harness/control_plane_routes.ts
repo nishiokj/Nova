@@ -59,7 +59,6 @@ import {
   handleGetDebugMemory,
   handleGetCockpitSessionRollups,
   handleGetCockpitRollupSnapshot,
-  handleGetCockpitEscalationRollups,
   handleGetCockpitCommitRollups,
   handleGetCockpitPRRollups,
   handleGetCockpitDailyMetrics,
@@ -77,7 +76,6 @@ import {
   handlePostCockpitSessionPermissions,
   handlePostCockpitPermissionResponse,
   handlePostCockpitPacket,
-  handleResolveCockpitEscalation,
   handleGetCockpitTemplates,
   handlePostCockpitSessionCreate,
   handleGetCockpitEntityGraph,
@@ -251,25 +249,15 @@ export function handleControlPlaneRequest(
   // GET /control-plane/cockpit/rollups/snapshot
   if (pathname === '/control-plane/cockpit/rollups/snapshot' && req.method === 'GET') {
     const sessionLimit = parseBoundedInt(query.get('sessionLimit'), 120, 10, 500);
-    const escalationLimit = parseBoundedInt(query.get('escalationLimit'), 120, 10, 500);
     const repoLimit = parseBoundedInt(query.get('repoLimit'), 50, 5, 200);
     const includeRepo = query.get('includeRepo') !== '0';
     const date = query.get('date');
     void handleGetCockpitRollupSnapshot(res, ctx, {
       sessionLimit,
-      escalationLimit,
       repoLimit,
       includeRepo,
       date,
     });
-    return true;
-  }
-
-  // GET /control-plane/cockpit/rollups/escalations
-  if (pathname === '/control-plane/cockpit/rollups/escalations' && req.method === 'GET') {
-    const status = query.get('status');
-    const limit = parseBoundedInt(query.get('limit'), 100, 1, 500);
-    handleGetCockpitEscalationRollups(res, ctx, status, limit);
     return true;
   }
 
@@ -491,13 +479,6 @@ export function handleControlPlaneRequest(
   params = matchRoute('/control-plane/cockpit/session/:sessionKey/review', pathname);
   if (params && req.method === 'POST') {
     void handlePostSessionReviewDecision(req, res, ctx, params.sessionKey);
-    return true;
-  }
-
-  // POST /control-plane/cockpit/escalations/:id/resolve
-  params = matchRoute('/control-plane/cockpit/escalations/:id/resolve', pathname);
-  if (params && req.method === 'POST') {
-    void handleResolveCockpitEscalation(req, res, ctx, params.id);
     return true;
   }
 

@@ -1329,8 +1329,7 @@ export function formatValidSemanticForInjection(semantic: ValidSemanticData): st
     sections.push('|-----------|--------|----------|');
     for (const cs of semantic.stateAndProgress.currentState) {
       const statusIcon = cs.status === 'complete' ? '✓' :
-        cs.status === 'partial' ? '⚠' :
-          cs.status === 'blocked' ? '✗' : '○';
+        cs.status === 'partial' ? '⚠' : '○';
       sections.push(`| ${cs.component} | ${statusIcon} ${cs.status} | ${cs.location ?? '-'} |`);
     }
     sections.push('');

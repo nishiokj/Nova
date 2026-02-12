@@ -8,13 +8,13 @@
  */
 
 import { describe, it, expect, beforeEach } from 'bun:test';
-import { ContextWindow } from '../packages/core/agent-core/src/context/context-window.js';
-import { Agent } from '../packages/core/agent-core/src/agent/agent.js';
-import type { AgentConfig } from '../packages/core/agent-core/src/agent/types.js';
-import type { LLMAdapter, LLMResponse } from '../packages/core/agent-core/src/llm/index.js';
-import type { ToolRegistry } from '../packages/core/agent-core/src/tools/registry.js';
-import { createWorkItem } from '../packages/core/agent-core/src/work/work-item.js';
-import type { ArtifactKind } from '../packages/core/agent-core/src/types/context.js';
+import { ContextWindow } from '../packages/core/context/src/context-window.js';
+import { Agent } from '../packages/core/agent/src/agent.js';
+import type { AgentConfig } from '../packages/core/agent/src/types.js';
+import type { LLMAdapter, LLMResponse } from '../packages/core/llm/src/index.js';
+import type { ToolRegistry } from '../packages/core/tools/src/registry.js';
+import { createWorkItem } from '../packages/core/work/src/work-item.js';
+import type { ArtifactKind } from '../packages/core/types/src/context.js';
 
 // ============================================================================
 // Test Helpers

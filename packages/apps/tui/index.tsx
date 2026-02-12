@@ -160,7 +160,7 @@ function mapUsageStatus(rawStatus: string, lastAccessedAt: number, nowSec: numbe
   const endedStatuses = new Set(["completed", "failed", "cancelled", "expired", "closed"]);
   if (endedStatuses.has(rawStatus)) return "ended";
 
-  const activeStatuses = new Set(["active", "blocked", "review"]);
+  const activeStatuses = new Set(["active", "review"]);
   if (activeStatuses.has(rawStatus) && nowSec - lastAccessedAt <= SESSION_STALE_THRESHOLD) {
     return "active";
   }
@@ -177,7 +177,7 @@ async function fetchUsageData(client: BridgeClient): Promise<{
   providerStats: UsageProviderStats[];
 }> {
   const response = await client.usageSummary({
-    status: ["active", "blocked", "review", "completed", "failed", "cancelled", "inactive", "expired"],
+    status: ["active", "review", "completed", "failed", "cancelled", "inactive", "expired"],
     limit: 1000,
   });
   if (!response.success) {
@@ -2181,7 +2181,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     store.addMessage("system", "Fetching deletable sessions...");
     try {
       const result = await client.listSessions({
-        status: ["active", "blocked", "review", "completed", "failed", "cancelled", "inactive", "expired"],
+        status: ["active", "review", "completed", "failed", "cancelled", "inactive", "expired"],
         limit: 100,
       });
       if (!result.success) {

@@ -39,7 +39,6 @@ import { nowSeconds, safeJsonParse } from './utils.js';
 const APPEND_ONLY_METADATA_ARRAY_KEYS = new Set([
   'agent_events',
   'packets',
-  'escalations',
   'review_decisions',
 ]);
 

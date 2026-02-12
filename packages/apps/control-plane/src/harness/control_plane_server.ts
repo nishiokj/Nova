@@ -334,41 +334,6 @@ export class ControlPlaneServer {
           return null;
         }
       },
-      resolveSessionEscalation: async (sessionKey, escalationId, resolution) => {
-        try {
-          const result = await this.requestBridge<{
-            success?: boolean;
-            escalationId?: string;
-            pendingCount?: number;
-            sessionStatus?: string;
-            resumed?: boolean;
-            resumeRequestId?: string;
-            alreadyResolved?: boolean;
-            error?: string;
-          }>('control_plane_resolve_escalation', {
-            session_key: sessionKey,
-            escalation_id: escalationId,
-            resolution,
-          });
-
-          return {
-            success: result.success === true,
-            escalationId: typeof result.escalationId === 'string' ? result.escalationId : escalationId,
-            ...(typeof result.pendingCount === 'number' ? { pendingCount: result.pendingCount } : {}),
-            ...(typeof result.sessionStatus === 'string' ? { sessionStatus: result.sessionStatus } : {}),
-            ...(typeof result.resumed === 'boolean' ? { resumed: result.resumed } : {}),
-            ...(typeof result.resumeRequestId === 'string' ? { resumeRequestId: result.resumeRequestId } : {}),
-            ...(typeof result.alreadyResolved === 'boolean' ? { alreadyResolved: result.alreadyResolved } : {}),
-            ...(typeof result.error === 'string' ? { error: result.error } : {}),
-          };
-        } catch (error) {
-          return {
-            success: false,
-            escalationId,
-            error: errorMessage(error),
-          };
-        }
-      },
       getDebugMemoryInfo: async () => {
         try {
           const result = await this.requestBridge<{

@@ -938,7 +938,6 @@ export class CockpitStoreImpl {
       const includeRepo = (now - this.lastRepoRollupRefreshAt) >= REPO_ROLLUP_REFRESH_INTERVAL_MS;
       const snapshot = await getCockpitRollupSnapshot({
         sessionLimit: 120,
-        escalationLimit: 120,
         repoLimit: 50,
         includeRepo,
       });
@@ -949,7 +948,7 @@ export class CockpitStoreImpl {
         runningSessions: snapshot.runningSessions ?? [],
         readySessions: snapshot.readySessions ?? [],
         doneSessions: snapshot.doneSessions ?? [],
-        escalations: snapshot.escalations ?? [],
+        escalations: [],
         commitRollups: includeRepo ? (snapshot.commitRollups ?? []) : this.state.commitRollups,
         prRollups: includeRepo ? (snapshot.prRollups ?? []) : this.state.prRollups,
         metrics: snapshot.metrics ?? null,

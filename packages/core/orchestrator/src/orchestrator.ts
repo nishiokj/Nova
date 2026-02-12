@@ -2042,7 +2042,6 @@ export class Orchestrator {
           const hookResult = await this.runControlHooks<'work_item_completed'>(event, hookContext, context, runtime);
           return this.resolveHookDecision(event.type, hookResult, mapWorkItemDecisionToStopResult);
         }
-        case 'escalation_resolved':
         case 'user_stopped':
         case 'transient_error':
           return null;

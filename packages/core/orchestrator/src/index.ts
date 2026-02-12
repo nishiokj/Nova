@@ -40,6 +40,27 @@ export {
   type HookAuditEntry,
 } from './hookRunner/index.js';
 
+// Unified hook model (decision + effect under one registry)
+export {
+  createUnifiedHookRegistry,
+  createSessionScopedUnifiedHookRegistry,
+  runUnifiedDecisionHooks,
+  runUnifiedDecisionHooksForSession,
+  runUnifiedEffectHooks,
+  runUnifiedEffectHooksForSession,
+  type UnifiedHookRegistry,
+  type SessionScopedUnifiedHookRegistry,
+  type UnifiedHookRegistration,
+  type UnifiedDecisionHookRegistration,
+  type UnifiedEffectHookRegistration,
+  type RegisteredUnifiedHook,
+  type UnifiedEventType,
+  type DecisionEventType,
+  type EffectEventType,
+  type HookScope,
+  type HookMode,
+} from './unifiedHooks/index.js';
+
 // Prompt-protocol helpers (re-exported from protocol)
 export {
   ControlEvents,

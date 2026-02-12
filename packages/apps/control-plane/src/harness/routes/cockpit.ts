@@ -16,7 +16,6 @@ import {
   type SessionPanelStatus,
   type SessionKind,
   type SessionRollup,
-  type EscalationRollup,
   type FocusPacket,
   type NormalizedSessionEvent,
   type TraceSummary,
@@ -78,10 +77,6 @@ import {
   parseNumstatOutput,
 } from './git.js';
 import { buildCockpitFilesystemRoots, normalizeProjectPathInput } from './markdown.js';
-import {
-  parseSessionEscalations,
-  type EscalationResolutionInput,
-} from '../escalation_state.js';
 import { extractSessionFiles, buildSubgraph, type SubgraphResponse } from '../entity_subgraph.js';
 import {
   buildSessionArchitectureContext,
@@ -410,7 +405,6 @@ function gateStatusSatisfied(
 function deriveSessionPanelStatus(
   sessionStatus: string,
   metadata: Record<string, unknown>,
-  unresolvedEscalationsCount: number,
   testsStatus: 'pass' | 'fail' | 'running' | 'unknown',
   invariantsStatus: 'pass' | 'fail' | 'running' | 'unknown'
 ): SessionPanelStatus {
@@ -423,7 +417,6 @@ function deriveSessionPanelStatus(
   const testsRequired = gateIsRequired(metadata, 'tests');
   const invariantsRequired = gateIsRequired(metadata, 'invariants');
 
-  if (unresolvedEscalationsCount > 0) return 'blocked';
   if (!workflowReady) return 'running';
   if (!gateStatusSatisfied(testsStatus, testsRequired)) return 'running';
   if (!gateStatusSatisfied(invariantsStatus, invariantsRequired)) return 'running';
@@ -431,35 +424,7 @@ function deriveSessionPanelStatus(
   return 'ready';
 }
 
-function classifyRequestedDecision(escalationType: string): EscalationRollup['requestedDecision'] {
-  switch (escalationType) {
-    case 'architectural':
-      return 'choose';
-    case 'permission':
-      return 'permission';
-    case 'review':
-      return 'approve';
-    case 'failure':
-      return 'stop';
-    case 'uncertainty':
-    case 'resource':
-    case 'conflict':
-      return 'clarify';
-    default:
-      return 'unknown';
-  }
-}
-
 // ── internal data loading ───────────────────────────────────────────
-
-function getEscalations(session: SessionRow) {
-  return parseSessionEscalations(session.metadata?.escalations);
-}
-
-function unresolvedEscalations(session: SessionRow) {
-  return getEscalations(session).filter((escalation) =>
-    escalation.status === 'pending' || escalation.status === 'acknowledged');
-}
 
 async function loadTraceRecords(
   workingDir: string,
@@ -695,9 +660,6 @@ function isAsyncSession(session: SessionRow): boolean {
 
   if ((session.clientType ?? '').toLowerCase() === 'async') return true;
 
-  const escalations = parseSessionEscalations(metadata.escalations);
-  if (escalations.length > 0) return true;
-
   const packets = parsePackets(metadata.packets, session.sessionKey);
   if (packets.some((packet) => packet.type === 'escalation')) return true;
 
@@ -711,7 +673,6 @@ function isAsyncSession(session: SessionRow): boolean {
       || type === 'packet_emitted'
       || type === 'workitem_created'
       || type === 'escalation_raised'
-      || type === 'escalation_resolved'
     ) {
       return true;
     }
@@ -731,7 +692,6 @@ function buildSessionRollups(
   return sessions.map((session) => {
     const metadata = session.metadata ?? {};
     const trace = traceMap.get(session.sessionKey) ?? { filesTouched: 0 };
-    const escalations = unresolvedEscalations(session);
     const report = testReports.get(session.sessionKey);
     const diffstat = diffstatsBySession.get(session.sessionKey);
     const testsStatus = mapGateStatus(
@@ -769,7 +729,6 @@ function buildSessionRollups(
     const status = deriveSessionPanelStatus(
       session.status,
       metadata,
-      escalations.length,
       testsStatus,
       invariantsStatus
     );
@@ -799,38 +758,9 @@ function buildSessionRollups(
         invariantsPassed,
         invariantsTotal,
       },
-      blocking: {
-        unresolvedEscalationsCount: escalations.length,
-      },
       tokenMetrics: parseSessionTokenMetrics(metadata),
     };
   });
-}
-
-function buildEscalationRollups(sessions: SessionRow[]): EscalationRollup[] {
-  const nowMs = Date.now();
-  const rollups: EscalationRollup[] = [];
-  for (const session of sessions) {
-    for (const escalation of getEscalations(session)) {
-      if (escalation.status !== 'pending' && escalation.status !== 'acknowledged') {
-        continue;
-      }
-      const createdAtMs = escalation.createdAt;
-      const headline = escalation.title.split('\n')[0] || escalation.title;
-      rollups.push({
-        escalationId: escalation.id,
-        sessionKey: escalation.sessionKey,
-        ...(escalation.workItemId ? { workItemId: escalation.workItemId } : {}),
-        createdAt: new Date(createdAtMs).toISOString(),
-        ageSec: Math.max(0, Math.floor((nowMs - createdAtMs) / 1000)),
-        headline,
-        requestedDecision: classifyRequestedDecision(escalation.escalationType),
-        refs: escalation.references,
-      });
-    }
-  }
-
-  return rollups.sort((a, b) => b.ageSec - a.ageSec);
 }
 
 // ── session event builders ──────────────────────────────────────────
@@ -1434,7 +1364,6 @@ function computeCockpitDailyMetrics(
     testReports: Map<string, TestReportSummary>;
     diffstatsBySession: Map<string, { added: number; deleted: number; filesTouched: number }>;
     statusCounts: { running: number; ready: number; done: number };
-    escalationsOpen: number;
   }
 ): CockpitDailyMetricsResult {
   const day = dateParam ?? new Date().toISOString().slice(0, 10);
@@ -1502,7 +1431,6 @@ function computeCockpitDailyMetrics(
       prs: 0,
       tests,
       sessions: precomputed.statusCounts,
-      escalationsOpen: precomputed.escalationsOpen,
     },
   };
 }
@@ -1511,20 +1439,17 @@ async function buildCockpitRollupSnapshot(
   ctx: ControlPlaneContext,
   options: {
     sessionLimit: number;
-    escalationLimit: number;
     repoLimit: number;
     includeRepo: boolean;
     date: string | null;
   }
 ): Promise<CockpitRollupSnapshotResult> {
   const sessionLimit = clampInteger(options.sessionLimit, 120, 10, 500);
-  const escalationLimit = clampInteger(options.escalationLimit, 120, 10, 500);
   const repoLimit = clampInteger(options.repoLimit, 50, 5, 200);
   const emptyPrecomputed = {
     testReports: new Map<string, TestReportSummary>(),
     diffstatsBySession: new Map<string, { added: number; deleted: number; filesTouched: number }>(),
     statusCounts: { running: 0, ready: 0, done: 0 },
-    escalationsOpen: 0,
   };
 
   const { sessions, error } = getAllSessions(ctx, 1000);
@@ -1534,7 +1459,6 @@ async function buildCockpitRollupSnapshot(
       runningSessions: [],
       readySessions: [],
       doneSessions: [],
-      escalations: [],
       commitRollups: [],
       prRollups: [],
       metrics: metrics.metrics,
@@ -1557,7 +1481,7 @@ async function buildCockpitRollupSnapshot(
 
   const allRollups = buildSessionRollups(sessions, traceMap, testReports, diffstatsBySession);
   const runningSessions = allRollups
-    .filter((rollup) => rollup.status === 'running' || rollup.status === 'blocked')
+    .filter((rollup) => rollup.status === 'running')
     .slice(0, sessionLimit);
   const readySessions = allRollups
     .filter((rollup) => rollup.status === 'ready')
@@ -1565,7 +1489,6 @@ async function buildCockpitRollupSnapshot(
   const doneSessions = allRollups
     .filter((rollup) => rollup.status === 'done' || rollup.status === 'stopped')
     .slice(0, sessionLimit);
-  const escalations = buildEscalationRollups(sessions).slice(0, escalationLimit);
 
   // Metrics are now a synchronous derivation from data we already have
   const metrics = computeCockpitDailyMetrics(sessions, options.date, {
@@ -1576,7 +1499,6 @@ async function buildCockpitRollupSnapshot(
       ready: readySessions.length,
       done: doneSessions.length,
     },
-    escalationsOpen: escalations.length,
   });
 
   const [commitRollups, prRollups] = options.includeRepo
@@ -1590,7 +1512,6 @@ async function buildCockpitRollupSnapshot(
     runningSessions,
     readySessions,
     doneSessions,
-    escalations,
     commitRollups,
     prRollups,
     metrics: metrics.metrics,
@@ -1737,7 +1658,6 @@ export async function handleGetCockpitRollupSnapshot(
   ctx: ControlPlaneContext,
   options: {
     sessionLimit: number;
-    escalationLimit: number;
     repoLimit: number;
     includeRepo: boolean;
     date: string | null;
@@ -1747,7 +1667,6 @@ export async function handleGetCockpitRollupSnapshot(
     const cacheKey = [
       ctx.workingDir,
       options.sessionLimit,
-      options.escalationLimit,
       options.repoLimit,
       options.includeRepo ? 'repo:1' : 'repo:0',
       options.date ?? '',
@@ -1781,7 +1700,6 @@ export async function handleGetCockpitRollupSnapshot(
       runningSessions: [],
       readySessions: [],
       doneSessions: [],
-      escalations: [],
       commitRollups: [],
       prRollups: [],
       metrics: null,
@@ -1790,24 +1708,6 @@ export async function handleGetCockpitRollupSnapshot(
       error: error instanceof Error ? error.message : String(error),
     }, 500);
   }
-}
-
-export function handleGetCockpitEscalationRollups(
-  res: ServerResponse,
-  ctx: ControlPlaneContext,
-  status: string | null,
-  limit: number
-): void {
-  const { sessions, error } = getAllSessions(ctx, 1000);
-  if (error) {
-    sendJson(res, { rollups: [], error });
-    return;
-  }
-
-  const rollups = buildEscalationRollups(sessions)
-    .filter((rollup) => !status || status === 'open')
-    .slice(0, limit);
-  sendJson(res, { rollups, total: rollups.length });
 }
 
 export async function handleGetCockpitCommitRollups(
@@ -1860,17 +1760,15 @@ export async function handleGetCockpitDailyMetrics(
     traceMap.set(session.sessionKey, buildSessionTraceSummaryFromEvents(session));
   }
   const allRollups = buildSessionRollups(sessions, traceMap, testReports, diffstatsBySession);
-  const escalations = buildEscalationRollups(sessions);
 
   const metrics = computeCockpitDailyMetrics(sessions, dateParam, {
     testReports,
     diffstatsBySession,
     statusCounts: {
-      running: allRollups.filter((r) => r.status === 'running' || r.status === 'blocked').length,
+      running: allRollups.filter((r) => r.status === 'running').length,
       ready: allRollups.filter((r) => r.status === 'ready').length,
       done: allRollups.filter((r) => r.status === 'done' || r.status === 'stopped').length,
     },
-    escalationsOpen: escalations.length,
   });
   if (metrics.error) {
     sendJson(res, { date: metrics.date, metrics: metrics.metrics, error: metrics.error }, 400);
@@ -1905,7 +1803,6 @@ export async function handleGetCockpitFocus(
     const diffstatsBySession = await loadSessionDiffstats([session]);
     const rollup = buildSessionRollups([session], traceMap, testReports, diffstatsBySession)[0];
     const sessionPackets = parsePackets(session.metadata?.packets, session.sessionKey);
-    const unresolved = unresolvedEscalations(session).sort((a, b) => b.createdAt - a.createdAt);
     const selectedPacket = packetId
       ? sessionPackets.find((packet) => packet.packetId === packetId) ?? null
       : sessionPackets[0] ?? null;
@@ -1921,9 +1818,7 @@ export async function handleGetCockpitFocus(
           title: rollup.title,
           status: rollup.status,
           isAsync: sessionIsAsync,
-          decisionRequest: unresolved[0]?.title ?? null,
           gateState: rollup.gates,
-          blocking: rollup.blocking.unresolvedEscalationsCount,
         },
         packet: selectedPacket,
         pointers: {
@@ -1935,60 +1830,6 @@ export async function handleGetCockpitFocus(
           diff: `/control-plane/cockpit/diff?sessionKey=${encodeURIComponent(session.sessionKey)}`,
           repoLens: `/control-plane/cockpit/repo/lens?sessionKey=${encodeURIComponent(session.sessionKey)}&q=`,
           repoGrep: `/control-plane/cockpit/repo/grep?sessionKey=${encodeURIComponent(session.sessionKey)}&q=`,
-        },
-      },
-    });
-    return;
-  }
-
-  if (focusType === 'escalation') {
-    const { sessions, error } = getAllSessions(ctx, 1000);
-    if (error) {
-      sendJson(res, { error }, 500);
-      return;
-    }
-
-    const ownerSession = sessions.find((session) => getEscalations(session).some((item) => item.id === id));
-    if (!ownerSession) {
-      sendJson(res, { error: 'Escalation not found' }, 404);
-      return;
-    }
-    const fullOwnerSession = getSession(ctx, ownerSession.sessionKey) ?? ownerSession;
-    const escalation = getEscalations(fullOwnerSession).find((item) => item.id === id);
-    if (!escalation) {
-      sendJson(res, { error: 'Escalation not found' }, 404);
-      return;
-    }
-
-    const sessionPackets = parsePackets(fullOwnerSession.metadata?.packets, fullOwnerSession.sessionKey);
-    const selectedPacket = packetId
-      ? sessionPackets.find((packet) => packet.packetId === packetId) ?? null
-      : sessionPackets[0] ?? null;
-    const ownerSessionIsAsync = isAsyncSession(fullOwnerSession);
-
-    sendJson(res, {
-      focus: {
-        type: 'escalation',
-        id: escalation.id,
-        sessionKey: escalation.sessionKey,
-        isAsync: ownerSessionIsAsync,
-        header: {
-          title: escalation.title,
-          status: escalation.status,
-          isAsync: ownerSessionIsAsync,
-          requestedDecision: classifyRequestedDecision(escalation.escalationType),
-          ageSec: Math.max(0, Math.floor((Date.now() - escalation.createdAt) / 1000)),
-        },
-        packet: selectedPacket,
-        pointers: {
-          events: `/control-plane/cockpit/session/${encodeURIComponent(escalation.sessionKey)}/events`,
-          packets: `/control-plane/cockpit/session/${encodeURIComponent(escalation.sessionKey)}/packets`,
-          messages: `/control-plane/sessions/${encodeURIComponent(escalation.sessionKey)}/messages`,
-          traces: `/control-plane/cockpit/traces?sessionKey=${encodeURIComponent(escalation.sessionKey)}`,
-          tests: `/control-plane/cockpit/tests?sessionKey=${encodeURIComponent(escalation.sessionKey)}`,
-          diff: `/control-plane/cockpit/diff?sessionKey=${encodeURIComponent(escalation.sessionKey)}`,
-          repoLens: `/control-plane/cockpit/repo/lens?sessionKey=${encodeURIComponent(escalation.sessionKey)}&q=`,
-          repoGrep: `/control-plane/cockpit/repo/grep?sessionKey=${encodeURIComponent(escalation.sessionKey)}&q=`,
         },
       },
     });
@@ -2745,64 +2586,6 @@ export async function handlePostCockpitPacket(
   }
 
   sendJson(res, { success: true, packet: packetRecord }, 201);
-}
-
-export async function handleResolveCockpitEscalation(
-  req: IncomingMessage,
-  res: ServerResponse,
-  ctx: ControlPlaneContext,
-  escalationId: string
-): Promise<void> {
-  if (!ctx.resolveSessionEscalation) {
-    sendJson(res, { success: false, error: 'Escalation resolution not available in this daemon context' }, 501);
-    return;
-  }
-
-  const body = await readJsonBody(req);
-  const { sessions, error } = getAllSessions(ctx, 1000);
-  if (error) {
-    sendJson(res, { success: false, error }, 500);
-    return;
-  }
-
-  const ownerSession = sessions.find((session) =>
-    getEscalations(session).some((item) => item.id === escalationId));
-  if (!ownerSession) {
-    sendJson(res, { success: false, error: `Escalation not found: ${escalationId}` }, 404);
-    return;
-  }
-
-  const resolvedBy = body.resolvedBy === 'system' || body.resolvedBy === 'timeout'
-    ? body.resolvedBy
-    : 'user';
-  const resolution: EscalationResolutionInput = {
-    ...(asString(body.optionId) ? { optionId: asString(body.optionId) } : {}),
-    ...(asString(body.freeformResponse) || asString(body.note)
-      ? { freeformResponse: asString(body.freeformResponse) ?? asString(body.note) }
-      : {}),
-    resolvedBy,
-  };
-
-  const result = await ctx.resolveSessionEscalation(ownerSession.sessionKey, escalationId, resolution);
-  if (!result.success) {
-    sendJson(res, { success: false, error: result.error ?? 'Failed to resolve escalation' }, 400);
-    return;
-  }
-
-  const updatedSession = getSession(ctx, ownerSession.sessionKey);
-  const updatedEscalation = updatedSession
-    ? getEscalations(updatedSession).find((item) => item.id === escalationId)
-    : null;
-
-  sendJson(res, {
-    success: true,
-    escalation: updatedEscalation ?? {
-      id: escalationId,
-      sessionKey: ownerSession.sessionKey,
-      status: 'resolved',
-    },
-    result,
-  });
 }
 
 export async function handleGetCockpitTemplates(res: ServerResponse): Promise<void> {

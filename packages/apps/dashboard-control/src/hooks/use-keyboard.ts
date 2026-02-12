@@ -14,7 +14,7 @@ function isAsyncFocus(
   if (!focusedKey) return false;
   const row = [...state.runningSessions, ...state.readySessions, ...state.doneSessions]
     .find((session) => session.sessionKey === focusedKey);
-  return Boolean(row?.isAsync || row?.blocking.unresolvedEscalationsCount);
+  return Boolean(row?.isAsync);
 }
 
 function getFocusableTabs(
@@ -393,7 +393,6 @@ export function useKeyboard(store: CockpitStoreImpl, workspace: MarkdownWorkspac
           event.preventDefault();
           store.set({
             focusTarget: { type: 'session', id: session.sessionKey },
-            ...(session.blocking.unresolvedEscalationsCount > 0 ? { focusTab: 'escalations' as const } : {}),
             highlightedSessionIdx: null,
           });
         }

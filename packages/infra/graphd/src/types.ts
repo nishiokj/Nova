@@ -266,18 +266,15 @@ export interface RunArtifact {
 /**
  * Session lifecycle status.
  * Transitions:
- *   active → blocked (escalation raised)
  *   active → review (PR created)
  *   active → completed (goal achieved)
  *   active → failed (unrecoverable)
  *   active → cancelled (user abort)
- *   blocked → active (escalations resolved)
  *   review → active (changes requested)
  *   review → completed (approved + merged)
  */
 export type SessionStatus =
   | 'active' // Work in progress
-  | 'blocked' // Waiting on escalation
   | 'review' // PR created, awaiting review
   | 'completed' // Successfully finished
   | 'failed' // Unrecoverable failure

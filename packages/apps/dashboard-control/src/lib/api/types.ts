@@ -103,7 +103,7 @@ export interface GitInfo {
   }>;
 }
 
-export type SessionPanelStatus = 'running' | 'blocked' | 'ready' | 'done' | 'stopped';
+export type SessionPanelStatus = 'running' | 'ready' | 'done' | 'stopped';
 export type SessionKind = 'feature' | 'issue' | 'refactor' | 'system';
 
 export interface SessionRollup {
@@ -130,9 +130,6 @@ export interface SessionRollup {
     invariantsStatus: 'pass' | 'fail' | 'running' | 'unknown';
     invariantsPassed: number;
     invariantsTotal: number;
-  };
-  blocking: {
-    unresolvedEscalationsCount: number;
   };
   tokenMetrics: {
     input: number;
@@ -166,7 +163,6 @@ export interface DailyMetrics {
     ready: number;
     done: number;
   };
-  escalationsOpen: number;
 }
 
 export interface CommitRollup {
@@ -204,7 +200,6 @@ export interface CockpitRollupSnapshot {
   runningSessions: SessionRollup[];
   readySessions: SessionRollup[];
   doneSessions: SessionRollup[];
-  escalations: EscalationRollup[];
   commitRollups: CommitRollup[];
   prRollups: PRRollup[];
   metrics: DailyMetrics | null;

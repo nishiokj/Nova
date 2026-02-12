@@ -148,7 +148,6 @@ describe('CockpitStoreImpl', () => {
         runningSessions: [{ sessionKey: 'running-1', title: 'Running 1' } as any],
         readySessions: [{ sessionKey: 'ready-1', title: 'Ready 1' } as any],
         doneSessions: [],
-        escalations: [],
         commitRollups: [],
         prRollups: [],
         metrics: null,
@@ -183,7 +182,6 @@ describe('CockpitStoreImpl', () => {
         runningSessions: [{ sessionKey: 'other-session', title: 'Other' } as any],
         readySessions: [],
         doneSessions: [],
-        escalations: [],
         commitRollups: [],
         prRollups: [],
         metrics: null,
@@ -517,7 +515,6 @@ describe('CockpitStoreImpl', () => {
         runningSessions: [],
         readySessions: [],
         doneSessions: [],
-        escalations: [],
         commitRollups: [],
         prRollups: [],
         metrics: null,
@@ -564,7 +561,6 @@ describe('CockpitStoreImpl', () => {
         runningSessions: [],
         readySessions: [],
         doneSessions: [],
-        escalations: [],
         commitRollups: [],
         prRollups: [],
         metrics: null,
@@ -588,7 +584,6 @@ describe('CockpitStoreImpl', () => {
         runningSessions: [],
         readySessions: [],
         doneSessions: [],
-        escalations: [],
         commitRollups: [],
         prRollups: [],
         metrics: null,
@@ -1139,12 +1134,11 @@ describe('CockpitStoreImpl', () => {
     });
 
     it('should resolve escalation', async () => {
-      mockResolveCockpitEscalation.mockResolvedValue(undefined);
+      mockResolveCockpitEscalation.mockResolvedValue({ success: true });
       mockGetCockpitRollupSnapshot.mockResolvedValue({
         runningSessions: [],
         readySessions: [],
         doneSessions: [],
-        escalations: [],
         commitRollups: [],
         prRollups: [],
         metrics: null,
@@ -1184,7 +1178,6 @@ describe('CockpitStoreImpl', () => {
         runningSessions: [],
         readySessions: [],
         doneSessions: [],
-        escalations: [],
         commitRollups: [],
         prRollups: [],
         metrics: null,
@@ -1204,7 +1197,6 @@ describe('CockpitStoreImpl', () => {
         runningSessions: [],
         readySessions: [],
         doneSessions: [],
-        escalations: [],
         commitRollups: [],
         prRollups: [],
         metrics: null,
@@ -1402,7 +1394,6 @@ describe('CockpitStoreImpl', () => {
         runningSessions: [{ sessionKey: 'wf-session-1', title: 'Feature', status: 'running', currentActivity: { tool: '' } } as any],
         readySessions: [],
         doneSessions: [],
-        escalations: [],
         commitRollups: [],
         prRollups: [],
         metrics: null,
@@ -1453,7 +1444,7 @@ describe('CockpitStoreImpl', () => {
       mockGetCockpitSessionEvents.mockResolvedValue({ events: [] });
       mockGetCockpitRollupSnapshot.mockResolvedValue({
         runningSessions: [], readySessions: [], doneSessions: [],
-        escalations: [], commitRollups: [], prRollups: [], metrics: null,
+        commitRollups: [], prRollups: [], metrics: null,
       });
 
       await act(async () => {
@@ -1501,7 +1492,7 @@ describe('CockpitStoreImpl', () => {
       mockGetCockpitSessionEvents.mockResolvedValue({ events: [] });
       mockGetCockpitRollupSnapshot.mockResolvedValue({
         runningSessions: [], readySessions: [], doneSessions: [],
-        escalations: [], commitRollups: [], prRollups: [], metrics: null,
+        commitRollups: [], prRollups: [], metrics: null,
       });
 
       await act(async () => {
@@ -1596,7 +1587,7 @@ describe('CockpitStoreImpl', () => {
       mockGetCockpitSessionEvents.mockResolvedValue({ events: [] });
       mockGetCockpitRollupSnapshot.mockResolvedValue({
         runningSessions: [], readySessions: [], doneSessions: [],
-        escalations: [], commitRollups: [], prRollups: [], metrics: null,
+        commitRollups: [], prRollups: [], metrics: null,
       });
 
       await act(async () => {
@@ -1616,7 +1607,7 @@ describe('CockpitStoreImpl', () => {
       mockGetCockpitSessionEvents.mockResolvedValue({ events: [] });
       mockGetCockpitRollupSnapshot.mockResolvedValue({
         runningSessions: [], readySessions: [], doneSessions: [],
-        escalations: [], commitRollups: [], prRollups: [], metrics: null,
+        commitRollups: [], prRollups: [], metrics: null,
       });
 
       await act(async () => {
@@ -1882,7 +1873,6 @@ describe('CockpitStoreImpl', () => {
         runningSessions: [],
         readySessions: [],
         doneSessions: [],
-        escalations: [],
         commitRollups: [],
         prRollups: [],
         metrics: null,
@@ -1917,7 +1907,6 @@ describe('CockpitStoreImpl', () => {
         runningSessions: [],
         readySessions: [],
         doneSessions: [],
-        escalations: [],
         commitRollups: [],
         prRollups: [],
         metrics: null,

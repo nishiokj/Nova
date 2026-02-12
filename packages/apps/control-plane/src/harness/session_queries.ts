@@ -2,7 +2,6 @@ import type { GraphDManager, GraphDSession } from 'graphd';
 
 export const ALL_SESSION_STATUSES = [
   'active',
-  'blocked',
   'review',
   'completed',
   'failed',

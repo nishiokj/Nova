@@ -496,17 +496,6 @@ export type InternalHookEvent =
       };
     }
   | {
-      /** Fired when an escalation is resolved by human or system */
-      type: 'escalation_resolved';
-      escalationId: string;
-      sessionKey: string;
-      resolution: {
-        optionId?: string;
-        freeformResponse?: string;
-        resolvedBy: 'user' | 'system' | 'timeout';
-      };
-    }
-  | {
       /** Fired when observer stops a specific work item during cadence checks. */
       type: 'observer_agent_stopped';
       sessionKey: string;
@@ -515,15 +504,7 @@ export type InternalHookEvent =
       escalationId?: string;
       agentType: string;
     }
-  | {
-      /** Fired when session status changes (e.g., active → blocked) */
-      type: 'session_status_changed';
-      sessionKey: string;
-      previousStatus: string;
-      newStatus: string;
-      reason?: string;
-      triggeringEscalationId?: string;
-    };
+;
 
 /**
  * Context passed to internal hook handlers.

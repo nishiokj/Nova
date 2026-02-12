@@ -21,7 +21,6 @@ export function formatTokenCount(n: number): string {
 
 export function statusColor(status: string): string {
   if (status === 'running') return 'var(--running)';
-  if (status === 'blocked') return 'var(--warning)';
   if (status === 'ready') return 'var(--accent-cyan)';
   if (status === 'done') return 'var(--success)';
   return 'var(--text-muted)';
