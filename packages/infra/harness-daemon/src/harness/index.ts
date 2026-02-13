@@ -5,6 +5,7 @@
 export { AgentHarness, createHarnessFromEnv } from './harness.js';
 export { BridgeGateway } from './bridge_gateway.js';
 export { HarnessDaemon, runHarnessDaemon, type HarnessDaemonOptions } from './daemon.js';
+export { runHarnessTrialCli } from './trial_cli.js';
 export {
   translateAgentEvent,
   createStreamEvent,
