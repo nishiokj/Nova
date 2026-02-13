@@ -58,16 +58,6 @@ export type BridgeCommandType =
   | 'set_model'
   | 'get_model'
   | 'set_dangerous_mode'
-  | 'watcher_status'
-  | 'watcher_context'
-  | 'watcher_search'
-  | 'watcher_decisions'
-  | 'watcher_inspect'
-  | 'watcher_memory'
-  | 'watcher_focus'
-  | 'watcher_defocus'
-  | 'watcher_reanchor'
-  | 'watcher_summarize'
   | 'async_start'
   | 'async_cancel'
   | 'async_status'
@@ -76,7 +66,6 @@ export type BridgeCommandType =
   | 'control_plane_fork'
   | 'control_plane_permissions_get'
   | 'control_plane_permissions_update'
-  | 'control_plane_resolve_escalation'
   | 'control_plane_memory_info'
   | 'control_plane_model_get'
   | 'control_plane_model_set'
@@ -91,7 +80,6 @@ export interface SendTextCommandData extends CommandDataBase {
   text: string;
   client_request_id?: string;
   tier?: string;
-  plan_mode?: boolean;
   working_dir?: string;
   attachments?: Attachment[];
 }
@@ -100,7 +88,6 @@ export interface SendMediaCommandData extends CommandDataBase {
   text?: string;
   client_request_id?: string;
   tier?: string;
-  plan_mode?: boolean;
   working_dir?: string;
   attachments: Attachment[];
 }
@@ -212,22 +199,6 @@ export interface AsyncSessionKeyCommandData extends CommandDataBase {
   session_key?: string;
 }
 
-export interface WatcherSearchCommandData extends CommandDataBase {
-  query: string;
-}
-
-export interface WatcherInspectCommandData extends CommandDataBase {
-  id: string;
-}
-
-export interface WatcherFocusCommandData extends CommandDataBase {
-  topic: string;
-}
-
-export interface WatcherReanchorCommandData extends CommandDataBase {
-  goal: string;
-}
-
 export interface ControlPlaneDispatchCommandData extends CommandDataBase {
   session_key: string;
   message: string;
@@ -263,16 +234,6 @@ export interface ControlPlanePermissionsUpdateCommandData extends CommandDataBas
     writesNoDeletes?: boolean;
     restrictWriteToPaths?: string[] | null;
     reloadPersistentConfig?: boolean;
-  };
-}
-
-export interface ControlPlaneResolveEscalationCommandData extends CommandDataBase {
-  session_key: string;
-  escalation_id: string;
-  resolution: {
-    optionId?: string;
-    freeformResponse?: string;
-    resolvedBy?: 'user' | 'system' | 'timeout';
   };
 }
 
@@ -332,16 +293,6 @@ export interface BridgeCommandDataMap {
   set_model: SetModelCommandData;
   get_model: GetModelCommandData;
   set_dangerous_mode: PermissionSetDangerousModeData;
-  watcher_status: NoData;
-  watcher_context: NoData;
-  watcher_search: WatcherSearchCommandData;
-  watcher_decisions: NoData;
-  watcher_inspect: WatcherInspectCommandData;
-  watcher_memory: NoData;
-  watcher_focus: WatcherFocusCommandData;
-  watcher_defocus: NoData;
-  watcher_reanchor: WatcherReanchorCommandData;
-  watcher_summarize: NoData;
   async_start: AsyncStartCommandData;
   async_cancel: AsyncSessionKeyCommandData;
   async_status: AsyncSessionKeyCommandData;
@@ -350,7 +301,6 @@ export interface BridgeCommandDataMap {
   control_plane_fork: ControlPlaneForkCommandData;
   control_plane_permissions_get: ControlPlanePermissionsGetCommandData;
   control_plane_permissions_update: ControlPlanePermissionsUpdateCommandData;
-  control_plane_resolve_escalation: ControlPlaneResolveEscalationCommandData;
   control_plane_memory_info: NoData;
   control_plane_model_get: ControlPlaneModelGetCommandData;
   control_plane_model_set: ControlPlaneModelSetCommandData;

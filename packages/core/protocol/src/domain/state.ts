@@ -29,28 +29,6 @@ export interface WorkItemSpec {
 }
 
 /**
- * Planner handoff spec item produced by planning agents.
- */
-export interface HandoffWorkItem {
-  id: string;
-  objective: string;
-  delta: string;
-  agent: string;
-  domain?: string;
-  dependencies?: string[];
-  targetPaths?: string[];
-}
-
-/**
- * Planner handoff spec produced at planning → execution transition.
- */
-export interface HandoffSpec {
-  goal: string;
-  context: string;
-  workItems: HandoffWorkItem[];
-}
-
-/**
  * Work item with runtime state.
  */
 export interface WorkItem extends WorkItemSpec {

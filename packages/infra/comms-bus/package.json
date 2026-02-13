@@ -12,12 +12,10 @@
   },
   "dependencies": {
     "shared": "workspace:*",
-    "types": "workspace:*",
-    "ws": "^8.18.0"
+    "types": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
-    "@types/ws": "^8.5.10",
     "typescript": "^5.9.3"
   }
 }

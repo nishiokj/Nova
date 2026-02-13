@@ -3,7 +3,7 @@ import type { AgentEvent, StructuredOutputSchema, ToolResult, ArtifactItem, LLMR
 import type { ContextWindow } from 'context';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
-import type { HandoffSpec, TerminationReason } from 'protocol';
+import type { TerminationReason } from 'protocol';
 
 // Re-export stop hook types from protocol (moved there to avoid circular deps)
 export type {
@@ -148,7 +148,7 @@ export interface AgentResultBase {
   /** Agent's execution context - contains tool calls, outputs, reasoning from this run */
   localContext: ContextWindow;
   /** Optional observer stop metadata when cadence intervention terminates a work item/session. */
-  watcherStop?: {
+  observerStop?: {
     reason: string;
     escalationId?: string;
   };
@@ -167,17 +167,6 @@ export type AgentResult =
       terminationReason: 'user_input_required';
       needsUserInput: true;
       userPrompt: UserPromptInfo;
-      needsHandoff?: false;
-      handoffSpec?: undefined;
-      isRefusal: false;
-      rateLimitInfo?: undefined;
-    })
-  | (AgentResultBase & {
-      terminationReason: 'handoff_requested';
-      needsUserInput: false;
-      userPrompt?: undefined;
-      needsHandoff: true;
-      handoffSpec: HandoffSpec;
       isRefusal: false;
       rateLimitInfo?: undefined;
     })
@@ -185,8 +174,6 @@ export type AgentResult =
       terminationReason: 'refusal';
       needsUserInput: false;
       userPrompt?: undefined;
-      needsHandoff?: false;
-      handoffSpec?: undefined;
       isRefusal: true;
       rateLimitInfo?: undefined;
     })
@@ -194,17 +181,13 @@ export type AgentResult =
       terminationReason: 'rate_limit';
       needsUserInput: false;
       userPrompt?: undefined;
-      needsHandoff?: false;
-      handoffSpec?: undefined;
       isRefusal: false;
       rateLimitInfo: AgentRateLimitInfo;
     })
   | (AgentResultBase & {
-      terminationReason: Exclude<TerminationReason, 'user_input_required' | 'handoff_requested' | 'refusal' | 'rate_limit'>;
+      terminationReason: Exclude<TerminationReason, 'user_input_required' | 'refusal' | 'rate_limit'>;
       needsUserInput: false;
       userPrompt?: undefined;
-      needsHandoff?: false;
-      handoffSpec?: undefined;
       isRefusal: false;
       rateLimitInfo?: undefined;
     });
@@ -216,10 +199,6 @@ export type MutableAgentResult = AgentResultBase & {
   needsUserInput: boolean;
   /** User prompt info (if needsUserInput) */
   userPrompt?: UserPromptInfo;
-  /** Whether handoff is requested (planning → execution transition) */
-  needsHandoff?: boolean;
-  /** Handoff spec (if needsHandoff) */
-  handoffSpec?: HandoffSpec;
   /** Whether LLM refused to complete */
   isRefusal: boolean;
   /** Rate limit info (if terminationReason is 'rate_limit') */
@@ -300,7 +279,7 @@ export interface AgentCadenceMetrics {
 export interface AgentCadenceResult {
   action: 'continue' | 'inject' | 'stop';
   systemMessage?: string;
-  terminationReason?: Extract<TerminationReason, 'watcher_stopped' | 'watcher_work_item_stopped'>;
+  terminationReason?: Extract<TerminationReason, 'observer_stopped' | 'observer_work_item_stopped'>;
   escalationId?: string;
   reason?: string;
 }
@@ -496,34 +475,15 @@ export type InternalHookEvent =
       };
     }
   | {
-      /** Fired when an escalation is resolved by human or system */
-      type: 'escalation_resolved';
-      escalationId: string;
-      sessionKey: string;
-      resolution: {
-        optionId?: string;
-        freeformResponse?: string;
-        resolvedBy: 'user' | 'system' | 'timeout';
-      };
-    }
-  | {
       /** Fired when observer stops a specific work item during cadence checks. */
-      type: 'watcher_agent_stopped';
+      type: 'observer_agent_stopped';
       sessionKey: string;
       workId: string;
       reason: string;
       escalationId?: string;
       agentType: string;
     }
-  | {
-      /** Fired when session status changes (e.g., active → blocked) */
-      type: 'session_status_changed';
-      sessionKey: string;
-      previousStatus: string;
-      newStatus: string;
-      reason?: string;
-      triggeringEscalationId?: string;
-    };
+;
 
 /**
  * Context passed to internal hook handlers.

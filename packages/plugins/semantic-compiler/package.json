@@ -21,8 +21,7 @@
   "scripts": {
     "build": "tsc",
     "lint": "tsc --noEmit",
-    "clean": "rm -rf dist",
-    "test": "bun test"
+    "clean": "rm -rf dist"
   },
   "dependencies": {
     "zod": "^4.3.5"

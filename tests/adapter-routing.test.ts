@@ -10,7 +10,6 @@
  * - Resilience configuration
  */
 
-import { describe, it, expect, beforeEach } from 'bun:test';
 import {
   createCircuitState,
   shouldAllowRequest,
@@ -23,7 +22,7 @@ import {
   DEFAULT_RESILIENCE_CONFIG,
   type CircuitBreakerState,
   type ResilienceConfig,
-} from '../packages/core/llm/src/retry.js';
+} from 'llm/retry.js';
 
 describe('Circuit Breaker State Machine', () => {
   let state: CircuitBreakerState;

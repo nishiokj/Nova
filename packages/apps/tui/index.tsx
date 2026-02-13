@@ -160,7 +160,7 @@ function mapUsageStatus(rawStatus: string, lastAccessedAt: number, nowSec: numbe
   const endedStatuses = new Set(["completed", "failed", "cancelled", "expired", "closed"]);
   if (endedStatuses.has(rawStatus)) return "ended";
 
-  const activeStatuses = new Set(["active", "blocked", "review"]);
+  const activeStatuses = new Set(["active", "review"]);
   if (activeStatuses.has(rawStatus) && nowSec - lastAccessedAt <= SESSION_STALE_THRESHOLD) {
     return "active";
   }
@@ -177,7 +177,7 @@ async function fetchUsageData(client: BridgeClient): Promise<{
   providerStats: UsageProviderStats[];
 }> {
   const response = await client.usageSummary({
-    status: ["active", "blocked", "review", "completed", "failed", "cancelled", "inactive", "expired"],
+    status: ["active", "review", "completed", "failed", "cancelled", "inactive", "expired"],
     limit: 1000,
   });
   if (!response.success) {
@@ -770,7 +770,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       sendCommand("send_text", {
         text: initialPrompt,
         client_request_id: requestId,
-        plan_mode: store.getSnapshot().planMode,
       });
     }
   };
@@ -1298,8 +1297,8 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     const options = question.options ?? [];
     if (options.length === 0) return AUTO_PROMPT_RESPONSE;
 
-    // Keep planning flows conservative by preferring the "stay in current mode" option.
-    const defaultIndex = (question.question_type === "plan_mode_exit" || question.question_type === "spec_review")
+    // Keep spec review flows conservative by preferring the "stay in current mode" option.
+    const defaultIndex = question.question_type === "spec_review"
       ? Math.min(1, options.length - 1)
       : 0;
     const label = getOptionLabel(options[defaultIndex]!) ?? getOptionLabel(options[0]!);
@@ -1887,18 +1886,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         store.setUIMode("chat");
       }
 
-      // Auto-trigger planning mode: "planning mode <prompt>" or "/plan <prompt>"
-      let effectiveText = text;
-      let effectivePlanMode = snapshot.planMode;
-      const lowerText = text.toLowerCase();
-      if (lowerText.startsWith("planning mode ") || lowerText.startsWith("/plan ")) {
-        const prefixLen = lowerText.startsWith("planning mode ") ? 14 : 6;
-        effectiveText = text.slice(prefixLen).trim();
-        if (effectiveText && !effectivePlanMode) {
-          effectivePlanMode = true;
-        }
-      }
-
       store.batch(() => {
         // Commit any active streaming content to history before adding the user message
         // This ensures proper chronological ordering when user sends follow-up during streaming
@@ -1907,22 +1894,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           store.finalizeStreaming();
           store.finalizeReasoning();
         }
-        if (effectivePlanMode && !snapshot.planMode) {
-          store.setPlanMode(true);
-          store.addMessage("system", "Plan mode auto-enabled. Exploring and planning before implementation.");
-        }
-        store.addMessage("user", effectiveText);
+        store.addMessage("user", text);
         store.clearInput();
         store.incrementRequestCount();
         store.clearProgress();
         store.setState("sending");
       });
-      loggerRef.current?.transcript("user", effectiveText);
+      loggerRef.current?.transcript("user", text);
 
       sendCommand("send_text", {
-        text: effectiveText,
+        text,
         client_request_id: requestId,
-        plan_mode: effectivePlanMode,
       });
       return;
     }
@@ -2181,7 +2163,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     store.addMessage("system", "Fetching deletable sessions...");
     try {
       const result = await client.listSessions({
-        status: ["active", "blocked", "review", "completed", "failed", "cancelled", "inactive", "expired"],
+        status: ["active", "review", "completed", "failed", "cancelled", "inactive", "expired"],
         limit: 100,
       });
       if (!result.success) {
@@ -2446,19 +2428,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
               "  summarize      Compact + epistemic ledger"
             );
         }
-        return;
-      }
-      case "/plan": {
-        const currentPlanMode = snapshot.planMode;
-        store.batch(() => {
-          store.setPlanMode(!currentPlanMode);
-          store.addMessage(
-            "system",
-            !currentPlanMode
-              ? "Plan mode enabled. Write/Edit tools disabled. Agent will explore and plan before implementing."
-              : "Plan mode disabled. Full tool access restored."
-          );
-        });
         return;
       }
       case "/async": {

@@ -13,7 +13,7 @@ import { z, toJSONSchema } from 'zod';
 
 /**
  * Action enum - what execution agents can do next.
- * Planners can use "handoff" via the planner-specific schema.
+ * Valid actions for agent structured output.
  */
 export const AgentActionSchema = z.enum(['done', 'continue']);
 
@@ -28,27 +28,10 @@ export const RoutingOutputSchema = z.object({
 // Base action outputs (explicit state handling)
 // --------------------------------------------
 
-const HandoffWorkItemSchema = z.object({
-  id: z.string().min(1),
-  objective: z.string().min(1),
-  delta: z.string().min(1),
-  agent: z.string().min(1),
-  domain: z.string().optional(),
-  dependencies: z.array(z.string()).optional(),
-  targetPaths: z.array(z.string()).optional(),
-}).strict();
-
-const HandoffSpecSchema = z.object({
-  goal: z.string().min(1),
-  context: z.string().min(1),
-  workItems: z.array(HandoffWorkItemSchema).min(1),
-}).strict();
-
 const DoneOutputSchema = z.object({
   action: z.literal('done'),
   response: z.string(),
   goalStateReached: z.literal(true),
-  handoffSpec: z.null(),
   awaitingUserInput: z.literal(false),
 }).strict();
 
@@ -56,7 +39,6 @@ const AwaitingUserInputOutputSchema = z.object({
   action: z.literal('done'),
   response: z.string(),
   goalStateReached: z.literal(false),
-  handoffSpec: z.null(),
   awaitingUserInput: z.literal(true),
 }).strict();
 
@@ -64,15 +46,6 @@ const ContinueOutputSchema = z.object({
   action: z.literal('continue'),
   response: z.string(),
   goalStateReached: z.literal(false),
-  handoffSpec: z.null(),
-  awaitingUserInput: z.literal(false),
-}).strict();
-
-const HandoffOutputSchema = z.object({
-  action: z.literal('handoff'),
-  response: z.string(),
-  goalStateReached: z.literal(true),
-  handoffSpec: HandoffSpecSchema,
   awaitingUserInput: z.literal(false),
 }).strict();
 
@@ -155,13 +128,6 @@ export const ExplorerOutputSchema = z.union([
     os: z.string(),
     artifacts: z.array(ArtifactSchema).describe('Semantic code artifacts extracted from source files'),
   }).strict(),
-  HandoffOutputSchema.extend({
-    packageManagers: z.array(z.string()),
-    frameworks: z.array(z.string()),
-    languages: z.array(z.string()),
-    os: z.string(),
-    artifacts: z.array(ArtifactSchema).describe('Semantic code artifacts extracted from source files'),
-  }).strict(),
 ]);
 
 /**
@@ -194,20 +160,15 @@ export const RuntimeScriptOutputSchema = z.union([
     goal: z.string(),
     workItems: z.array(WorkItemOutputSchema),
   }).strict(),
-  HandoffOutputSchema.extend({
-    goal: z.string(),
-    workItems: z.array(WorkItemOutputSchema),
-  }).strict(),
 ]);
 
 /**
- * Planner output schema (planning agent). Allows handoff.
+ * Planner output schema (planning agent).
  */
 export const PlannerOutputSchema = z.union([
   DoneOutputSchema,
   AwaitingUserInputOutputSchema,
   ContinueOutputSchema,
-  HandoffOutputSchema,
 ]);
 
 // ============================================

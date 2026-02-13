@@ -4,7 +4,7 @@
 
 ```bash
 EVENT_BUS_HOST=127.0.0.1 EVENT_BUS_PORT=9555 \
-bun run packages/infra/control-plane/src/control-plane.ts --host 127.0.0.1 --port 9557 --bus-host 127.0.0.1 --bus-port 9555
+bun run packages/apps/control-plane/src/control-plane.ts --host 127.0.0.1 --port 9557 --bus-host 127.0.0.1 --bus-port 9555
 ```
 
 Important: control-plane is GraphD client-only. Start GraphD first.

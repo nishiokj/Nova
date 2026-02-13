@@ -6,7 +6,6 @@
  */
 
 import type { TerminationReason } from './termination.js';
-import type { HandoffSpec } from './state.js';
 
 /**
  * Deferred work item specification for stop hooks.
@@ -106,8 +105,6 @@ export interface StopHookContext {
   userPrompt?: StopHookUserPrompt;
   /** Execution snapshot for enriched stop hook evaluation */
   executionSnapshot?: ExecutionSnapshot;
-  /** Handoff spec when terminationReason is 'handoff_requested' */
-  handoffSpec?: HandoffSpec;
 }
 
 /**

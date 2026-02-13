@@ -12,7 +12,6 @@
  * These tests verify data structures, serialization, and flow patterns.
  */
 
-import { describe, it, expect, beforeEach } from 'bun:test';
 import type {
   CockpitSessionControlInput,
   CockpitSessionReviewDecisionInput,
@@ -23,7 +22,7 @@ import type {
   NormalizedSessionEvent,
   SessionRollup,
   SessionPanelStatus,
-} from '../packages/apps/dashboard-control/src/lib/api/types';
+} from '@/lib/api/types';
 
 // Simulate backend session row
 interface SessionRow {
@@ -371,13 +370,7 @@ describe('Workflow Handling - Frontend to Backend', () => {
         applied: true,
         templateId: 'template-auth',
         templateName: 'Authentication Workflow',
-        dispatchMetadata: {
-          cockpit_handoff_spec: {
-            goal: 'Setup auth',
-            context: 'Template: Authentication Workflow',
-            workItems: [],
-          },
-        },
+        dispatchMetadata: {},
         metadataPatch: {
           workflow_template_applied: true,
           workflow_template_id: 'template-auth',

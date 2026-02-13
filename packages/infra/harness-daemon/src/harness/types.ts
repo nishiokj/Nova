@@ -17,8 +17,6 @@ export interface AgentRunParams {
   sessionKey: string;
   workingDir: string;
   context?: string;
-  handoffSpec?: Record<string, unknown>;
-  planMode?: boolean;
   hookRegistry?: import('orchestrator').HookRegistry;
 }
 

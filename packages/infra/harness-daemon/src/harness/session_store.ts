@@ -2,7 +2,6 @@ import { ContextWindow } from 'context';
 import type { GraphDManager } from 'graphd';
 import type { ContextWindowSnapshot, SessionPermissionState } from 'types';
 import type { ModelSelection } from 'agent';
-import type { HandoffSpec } from 'protocol';
 import { PermissionChecker } from './permissions.js';
 import path from 'path';
 
@@ -35,9 +34,7 @@ export interface PausedState {
   goal: string;
   agentType: string;
   workingDir: string;
-  planMode?: boolean;
   userPromptType?: string;
-  handoffSpec?: HandoffSpec; // Stored for execution after user approval
   pausedAt: number; // Timestamp when session entered paused state
 }
 
@@ -54,24 +51,6 @@ export interface PausedWorkItemState {
   updatedAt: number;
   resolvedAt?: number;
   resolutionSummary?: string;
-}
-
-function normalizeHandoffSpec(value: unknown): HandoffSpec | undefined {
-  if (!value) return undefined;
-  let candidate = value;
-  if (typeof candidate === 'string') {
-    try {
-      candidate = JSON.parse(candidate);
-    } catch {
-      return undefined;
-    }
-  }
-  if (typeof candidate !== 'object' || Array.isArray(candidate)) return undefined;
-  const spec = candidate as HandoffSpec;
-  if (typeof spec.goal !== 'string' || typeof spec.context !== 'string' || !Array.isArray(spec.workItems)) {
-    return undefined;
-  }
-  return spec;
 }
 
 function asNonEmptyString(value: unknown): string | undefined {
@@ -195,6 +174,10 @@ export class SessionStore {
     return this.asyncModeEnabled;
   }
 
+  getWorkingDirectory(): string {
+    return this.workingDir;
+  }
+
   // --- Session-level exclusive operation management ---
 
   /**
@@ -284,13 +267,8 @@ export class SessionStore {
       const pausedStateMetadata = metadata?.paused_state as Omit<PausedState, 'pausedAt'> | undefined;
 
       if (pausedStateMetadata) {
-        const normalizedHandoffSpec = normalizeHandoffSpec(pausedStateMetadata.handoffSpec);
-        if (pausedStateMetadata.handoffSpec && !normalizedHandoffSpec) {
-          this.logger.warning('Dropped invalid paused handoffSpec from metadata', { sessionKey: this.sessionKey });
-        }
         this.pausedState = {
           ...pausedStateMetadata,
-          handoffSpec: normalizedHandoffSpec,
           pausedAt: Date.now(),
         };
         this.logger.debug('Recovered paused state from GraphD', {

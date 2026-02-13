@@ -23,7 +23,6 @@ import { toGatewayModel } from "types";
  *   Capabilities - system feature flags
  *   Paste        - large paste handling
  *   Theme        - theme selection cursor
- *   Plan Mode    - planning mode flag
  *   Response     - modal content display
  *
  * PATTERNS:
@@ -149,8 +148,6 @@ export interface StoreSnapshot {
   pasteBytesReceived: number;
   // Theme selection
   themeCursor: number;
-  // Plan mode
-  planMode: boolean;
   // Response pane content
   responseContent: ResponseContent | null;
   // Models selection
@@ -277,9 +274,6 @@ export class Store {
   // ─── Theme ───
   private themeCursor = 0;
 
-  // ─── Plan Mode ───
-  private planMode = false;
-
   // ─── Response Pane ───
   private responseContent: ResponseContent | null = null;
 
@@ -353,8 +347,6 @@ export class Store {
       pasteBytesReceived: this.pasteBytesReceived,
       // Theme selection
       themeCursor: this.themeCursor,
-      // Plan mode
-      planMode: this.planMode,
       // Response pane content
       responseContent: this.responseContent,
       // Models selection
@@ -1027,18 +1019,6 @@ export class Store {
    */
   exitThemeMode(): void {
     this.uiMode = "chat";
-    this.emit();
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PLAN MODE METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  /**
-   * Sets plan mode on or off.
-   */
-  setPlanMode(enabled: boolean): void {
-    this.planMode = enabled;
     this.emit();
   }
 

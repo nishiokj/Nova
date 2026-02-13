@@ -18,7 +18,6 @@ import {
 import type { ToolRegistry } from 'tools';
 import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema, MessageItem, ContextItem, ArtifactItem, LLMItem, ContentBlock } from 'types';
 import { isLLMMessageItem, isLLMFunctionCallItem, isLLMFunctionCallOutputItem } from 'types';
-import type { HandoffSpec } from 'protocol';
 import { createEvent, errorResult, successResult } from 'types';
 import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS, unwrapStructuredOutput } from 'shared';
 import { ContextWindow, buildSystemMessage } from 'context';
@@ -58,7 +57,7 @@ const CADENCE_CHECK_INTERVAL = 10;
 // Re-export circuit breaker functions for backwards compatibility
 export { resetProviderCircuit, getCircuitStatus };
 
-type AgentAction = 'done' | 'continue' | 'handoff';
+type AgentAction = 'done' | 'continue';
 
 const QUESTION_CLEANUP_REGEX = /```[\s\S]*?```|`[^`]*`/g;
 
@@ -601,29 +600,9 @@ export class Agent {
   }
 
   /**
-   * Handle handoff action from structured output.
-   * @returns 'return' if should exit loop, 'continue' if should continue to next iteration, null if not a handoff
-   */
-  private handleHandoff(
-    structuredOutput: Record<string, unknown> | null,
-    result: MutableAgentResult
-  ): 'return' | 'continue' | null {
-    const handoffSpec = structuredOutput?.handoffSpec;
-    if (handoffSpec && this.isHandoffSpecCandidate(handoffSpec)) {
-      result.needsHandoff = true;
-      result.handoffSpec = handoffSpec;
-      result.terminationReason = 'handoff_requested';
-      return 'return';
-    }
-
-    // No valid handoffSpec provided, continue execution
-    return 'continue';
-  }
-
-  /**
    * Resolve the action from structured output into a loop control directive.
    * Sets result fields as side effects (terminationReason, success, response, etc.)
-   * @returns loop control: 'done' | 'handoff' | 'user_input' | 'continue' | 'no_action'
+   * @returns loop control: 'done' | 'user_input' | 'continue' | 'no_action'
    */
   private resolveAction(
     action: AgentAction | null,
@@ -631,7 +610,7 @@ export class Agent {
     responseText: string | undefined,
     content: string,
     result: MutableAgentResult
-  ): 'done' | 'handoff' | 'user_input' | 'continue' | 'no_action' {
+  ): 'done' | 'user_input' | 'continue' | 'no_action' {
     const avoidRawStructured = !!this.config.outputSchema;
     const contentFallback = avoidRawStructured && (structuredOutput || coerceStructuredOutput(content))
       ? ''
@@ -692,10 +671,7 @@ export class Agent {
       return 'done';
     }
 
-    // Handle handoff action
-    if (action === 'handoff') {
-      return 'handoff';
-    }
+
 
     // Handle continue action
     if (action === 'continue') {
@@ -1152,11 +1128,11 @@ export class Agent {
             localContext.addMessage('system', cadenceResult.systemMessage, workItem.workId);
           }
           const stopReason = cadenceResult.reason ?? cadenceResult.systemMessage ?? 'Observer requested stop.';
-          result.watcherStop = {
+          result.observerStop = {
             reason: stopReason,
             escalationId: cadenceResult.escalationId,
           };
-          result.terminationReason = cadenceResult.terminationReason ?? 'watcher_stopped';
+          result.terminationReason = cadenceResult.terminationReason ?? 'observer_stopped';
           break;
         }
       }
@@ -1353,13 +1329,6 @@ export class Agent {
           this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
           return;
 
-        case 'handoff': {
-          const handoffResult = this.handleHandoff(structuredOutput, result);
-          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-          if (handoffResult === 'return') return;
-          continue;
-        }
-
         case 'continue':
           this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
           continue;
@@ -1482,14 +1451,11 @@ export class Agent {
       structuredOutput: result.structuredOutput,
       artifacts: result.artifacts,
       localContext: result.localContext,
-      watcherStop: result.watcherStop,
+      observerStop: result.observerStop,
     };
 
     if (terminationReason !== 'user_input_required' && result.needsUserInput) {
       throw new Error(`AgentResult invariant violation: needsUserInput=true with terminationReason=${terminationReason}`);
-    }
-    if (terminationReason !== 'handoff_requested' && result.needsHandoff) {
-      throw new Error(`AgentResult invariant violation: needsHandoff=true with terminationReason=${terminationReason}`);
     }
     if (terminationReason !== 'refusal' && result.isRefusal) {
       throw new Error(`AgentResult invariant violation: isRefusal=true with terminationReason=${terminationReason}`);
@@ -1505,20 +1471,6 @@ export class Agent {
           terminationReason,
           needsUserInput: true,
           userPrompt: result.userPrompt,
-          needsHandoff: false,
-          isRefusal: false,
-        };
-      }
-      case 'handoff_requested': {
-        if (!result.handoffSpec) {
-          throw new Error('AgentResult invariant violation: handoff_requested without handoffSpec');
-        }
-        return {
-          ...base,
-          terminationReason,
-          needsUserInput: false,
-          needsHandoff: true,
-          handoffSpec: result.handoffSpec,
           isRefusal: false,
         };
       }
@@ -1527,7 +1479,6 @@ export class Agent {
           ...base,
           terminationReason,
           needsUserInput: false,
-          needsHandoff: false,
           isRefusal: true,
         };
       }
@@ -1539,7 +1490,6 @@ export class Agent {
           ...base,
           terminationReason,
           needsUserInput: false,
-          needsHandoff: false,
           isRefusal: false,
           rateLimitInfo: result.rateLimitInfo,
         };
@@ -1549,7 +1499,6 @@ export class Agent {
           ...base,
           terminationReason,
           needsUserInput: false,
-          needsHandoff: false,
           isRefusal: false,
         };
       }
@@ -2022,7 +1971,7 @@ export class Agent {
         }
       }
 
-      // SIAS mode: don't propagate sub-agent user input requests
+      // Don't propagate sub-agent user input requests
       if (isAgentTool && result.needsUserInput) {
         result.needsUserInput = false;
         result.userPrompt = undefined;
@@ -2775,7 +2724,7 @@ export class Agent {
     }
 
     void schemaId;
-    return `[SCHEMA REMINDER] You must set action, goalStateReached, awaitingUserInput, and handoffSpec every turn. Valid actions: "done", "continue". If you need user input, call PromptUser then action="done", goalStateReached=false, awaitingUserInput=true, handoffSpec=null. handoffSpec must always be null (handoff is planner-only).`;
+    return `[SCHEMA REMINDER] You must set action, goalStateReached, and awaitingUserInput every turn. Valid actions: "done", "continue". If you need user input, call PromptUser then action="done", goalStateReached=false, awaitingUserInput=true.`;
   }
 
   private parseBoolean(
@@ -2797,7 +2746,6 @@ export class Agent {
     candidate: Record<string, unknown>,
     schemaId: string
   ): Record<string, unknown> | null {
-    const allowHandoff = schemaId === 'planner_output';
     const actionRaw = typeof candidate.action === 'string'
       ? candidate.action.trim().toLowerCase()
       : '';
@@ -2807,14 +2755,9 @@ export class Agent {
 
     const awaitingUserInput = this.parseBoolean(awaitingUserInputValue, false);
 
-    const handoffSpecValue = (candidate.handoffSpec ?? candidate.handoff_spec) as unknown;
-    const hasHandoffSpec = handoffSpecValue !== undefined && handoffSpecValue !== null;
-
-    let action: 'done' | 'continue' | 'handoff';
-    if (actionRaw === 'done' || actionRaw === 'continue' || actionRaw === 'handoff') {
-      action = actionRaw as 'done' | 'continue' | 'handoff';
-    } else if (allowHandoff && hasHandoffSpec) {
-      action = 'handoff';
+    let action: 'done' | 'continue';
+    if (actionRaw === 'done' || actionRaw === 'continue') {
+      action = actionRaw;
     } else if (awaitingUserInput) {
       action = 'done';
     } else {
@@ -2822,22 +2765,16 @@ export class Agent {
       action = inferredGoal ? 'done' : 'continue';
     }
 
-    if (!allowHandoff && action === 'handoff') {
-      action = 'done';
-    }
-
     const response = typeof candidate.response === 'string' ? candidate.response : '';
-    const goalStateReachedDefault = action === 'done' || action === 'handoff';
     const goalStateReached = action === 'continue'
       ? false
-      : this.parseBoolean(goalStateReachedValue, goalStateReachedDefault);
+      : this.parseBoolean(goalStateReachedValue, true);
 
     const normalized: Record<string, unknown> = {
       action,
       response,
       goalStateReached,
       awaitingUserInput,
-      handoffSpec: action === 'handoff' && allowHandoff ? handoffSpecValue : null,
     };
 
     if (schemaId === 'goal_driven') {
@@ -2983,14 +2920,6 @@ export class Agent {
 
     const validated = schema.safeParse(parsed);
     if (!validated.success) {
-      if (schemaId === 'planner_output') {
-        const fallback = this.coercePlannerOutputFromSpec(parsed);
-        if (fallback) {
-          console.warn('[agent] Coerced planner output from raw handoffSpec object (missing action).');
-          return fallback;
-        }
-      }
-
       const lenient = this.parseActionOutputLenient(schemaId, parsed, content);
       if (lenient) {
         console.warn(`[agent] Leniently parsed ${schemaId} structured output after validation failure.`);
@@ -3006,57 +2935,6 @@ export class Agent {
     return validated.data as Record<string, unknown>;
   }
 
-  private coercePlannerOutputFromSpec(parsed: Record<string, unknown>): Record<string, unknown> | null {
-    if (!this.isHandoffSpecCandidate(parsed)) return null;
-
-    const workItems = parsed.workItems.length;
-    const response = workItems > 0
-      ? `Planner produced ${workItems} work items.`
-      : 'Planner produced handoffSpec.';
-
-    return {
-      action: 'handoff',
-      response,
-      goalStateReached: true,
-      awaitingUserInput: false,
-      handoffSpec: parsed,
-    };
-  }
-
-  private isHandoffSpecCandidate(parsed: unknown): parsed is HandoffSpec {
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
-    const spec = parsed as Record<string, unknown>;
-
-    if ('action' in spec) return false;
-    if (typeof spec.goal !== 'string' || spec.goal.trim().length === 0) return false;
-    if (typeof spec.context !== 'string') return false;
-    if (!Array.isArray(spec.workItems)) return false;
-
-    for (const item of spec.workItems) {
-      if (!item || typeof item !== 'object') return false;
-      const entry = item as Record<string, unknown>;
-
-      if (typeof entry.id !== 'string' || entry.id.trim().length === 0) return false;
-      if (typeof entry.objective !== 'string' || entry.objective.trim().length === 0) return false;
-      if (typeof entry.delta !== 'string' || entry.delta.trim().length === 0) return false;
-      if (typeof entry.agent !== 'string' || entry.agent.trim().length === 0) return false;
-
-      if (entry.targetPaths !== undefined) {
-        if (!Array.isArray(entry.targetPaths) || !entry.targetPaths.every(p => typeof p === 'string')) {
-          return false;
-        }
-      }
-
-      if (entry.dependencies !== undefined) {
-        if (!Array.isArray(entry.dependencies) || !entry.dependencies.every(d => typeof d === 'string')) {
-          return false;
-        }
-      }
-    }
-
-    return true;
-  }
-
   /**
    * Extract action from structured output.
    */
@@ -3069,7 +2947,6 @@ export class Agent {
     const normalized = raw.trim().toLowerCase();
     if (normalized === 'done') return 'done';
     if (normalized === 'continue') return 'continue';
-    if (normalized === 'handoff') return 'handoff';
     return null;
   }
 

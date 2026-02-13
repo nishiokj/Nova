@@ -11,7 +11,6 @@ import type {
   PromptAnswerDecision,
   CadenceDecision,
   AgentErrorDecision,
-  HandoffDecision,
   WorkItemCompletedDecision,
   StopHookResult,
   DeferredWorkItem,
@@ -116,11 +115,11 @@ export function mapCadenceDecisionToStopResult(decision: CadenceDecision): StopH
       return {
         decision: 'allow',
         systemMessage: decision.reason,
-        terminationReason: 'watcher_work_item_stopped',
+        terminationReason: 'observer_work_item_stopped',
         escalationId: decision.escalationId,
       };
     case 'stop':
-      return { decision: 'allow', systemMessage: decision.reason, terminationReason: 'watcher_stopped' };
+      return { decision: 'allow', systemMessage: decision.reason, terminationReason: 'observer_stopped' };
     default:
       return assertNever(decision);
   }
@@ -136,22 +135,6 @@ export function mapAgentErrorDecisionToStopResult(decision: AgentErrorDecision):
     case 'abort':
     case 'escalate':
       return { decision: 'allow' };
-    default:
-      return assertNever(decision);
-  }
-}
-
-/**
- * Map handoff decision to stop result.
- */
-export function mapHandoffDecisionToStopResult(decision: HandoffDecision): StopHookResult {
-  switch (decision.action) {
-    case 'approve':
-      return { decision: 'allow' };
-    case 'reject':
-      return { decision: 'block', reason: decision.feedback };
-    case 'modify':
-      return { decision: 'block', reason: decision.changes };
     default:
       return assertNever(decision);
   }

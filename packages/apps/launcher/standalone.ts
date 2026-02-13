@@ -112,38 +112,27 @@ async function main(): Promise<void> {
 
   // Import daemon and tui directly - bundler will inline them
   if (values['daemon-only']) {
-    const { runHarnessDaemon } = await import('../harness-daemon/src/harness/daemon.js');
+    const { runHarnessDaemon } = await import('../../infra/harness-daemon/src/harness/daemon.js');
     await runHarnessDaemon();
   } else {
     // Start daemon in-process, then TUI
-    const { HarnessDaemon } = await import('../harness-daemon/src/harness/daemon.js');
+    const { HarnessDaemon } = await import('../../infra/harness-daemon/src/harness/daemon.js');
 
     const daemon = new HarnessDaemon({
       configPath: configPath ?? undefined,
       idleTimeoutMs: 0, // Disable idle timeout in standalone mode
     });
 
-    const { ControlPlaneServer } = await import('../control-plane/src/harness/control_plane_server.js');
-    const controlPlane = new ControlPlaneServer({
-      host: process.env.CONTROL_PLANE_HOST ?? '127.0.0.1',
-      port: Number(process.env.CONTROL_PLANE_PORT ?? '9445'),
-      configPath: configPath ?? undefined,
-      workingDir: process.cwd(),
-      busHost: process.env.EVENT_BUS_HOST ?? '127.0.0.1',
-      busPort: Number(process.env.EVENT_BUS_PORT ?? '9555'),
-    });
-
     // Run daemon startup
     const address = await daemon.start();
     console.log(`[rex] Daemon started on ${address.host}:${address.port}`);
-    const controlPlaneAddress = await controlPlane.start();
-    console.log(`[rex] Control-plane started on ${controlPlaneAddress.host}:${controlPlaneAddress.port}`);
 
     // Small delay for daemon to fully initialize
     await new Promise(r => setTimeout(r, 200));
 
     // Start TUI (this blocks until exit)
-    const { startTui } = await import('../tui/main.js');
+    const tuiEntry = '../tui/main.js';
+    const { startTui } = await import(tuiEntry);
 
     // Pass positional arguments as initial prompt
     const initialPrompt = positionals.length > 0 ? positionals.join(' ') : undefined;
@@ -152,7 +141,6 @@ async function main(): Promise<void> {
       await startTui({ initialPrompt });
     } finally {
       // Clean shutdown
-      await controlPlane.stop();
       await daemon.stop();
     }
 

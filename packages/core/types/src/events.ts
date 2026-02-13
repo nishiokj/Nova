@@ -45,7 +45,7 @@ export type OrchestratorEventType =
   | 'workitem_status'
   | 'goal_achieved'
   | 'goal_not_achieved'
-  | 'watcher_decision';
+  | 'observer_decision';
 
 /**
  * All event types.
@@ -403,12 +403,12 @@ export interface MemoryInjectedData {
 }
 
 /**
- * Data for watcher_decision event.
+ * Data for observer_decision event.
  * Emitted when the decision observer makes an autonomous decision.
  */
-export interface WatcherDecisionData {
+export interface ObserverDecisionData {
   trigger: string;
-  watcherAction: string;
+  observerAction: string;
   question?: string;
   answer?: string;
   rationale: string;

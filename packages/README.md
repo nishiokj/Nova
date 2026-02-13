@@ -21,7 +21,6 @@ Core runtime primitives and contracts. These packages should stay low-level and 
 Runtime infrastructure, transport, and service wiring:
 
 - `comms-bus`
-- `control-plane`
 - `decision-watcher`
 - `graphd`
 - `harness-client`
@@ -51,6 +50,7 @@ User-facing entrypoints and clients:
 - `dashboard`
 - `dashboard-compact`
 - `dashboard-control`
+- `control-plane`
 
 ## Boundary Rules
 

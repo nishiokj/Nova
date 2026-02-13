@@ -13,8 +13,7 @@
     "profile:cpu": "BUN_JSC_dumpSamplingProfilerData=1 bun run src/index.ts",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "build": "tsc",
-    "test": "bun test"
+    "build": "tsc"
   },
   "dependencies": {
     "agent": "workspace:*",
@@ -30,7 +29,6 @@
     "shared": "workspace:*",
     "tools": "workspace:*",
     "types": "workspace:*",
-    "decision-engine": "workspace:*",
     "work": "workspace:*"
   },
   "devDependencies": {

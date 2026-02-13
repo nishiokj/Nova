@@ -266,18 +266,15 @@ export interface RunArtifact {
 /**
  * Session lifecycle status.
  * Transitions:
- *   active → blocked (escalation raised)
  *   active → review (PR created)
  *   active → completed (goal achieved)
  *   active → failed (unrecoverable)
  *   active → cancelled (user abort)
- *   blocked → active (escalations resolved)
  *   review → active (changes requested)
  *   review → completed (approved + merged)
  */
 export type SessionStatus =
   | 'active' // Work in progress
-  | 'blocked' // Waiting on escalation
   | 'review' // PR created, awaiting review
   | 'completed' // Successfully finished
   | 'failed' // Unrecoverable failure
@@ -360,119 +357,6 @@ export interface GraphDEvent {
   timestamp: number;
   dataJson: string | null;
   data?: Record<string, unknown>;
-}
-
-// ============================================
-// SIAS KERNEL TYPES
-// ============================================
-
-export interface SiasSessionRecord {
-  sessionId: string;
-  startedAt: number;
-  lastCheckpointAt: number;
-  iterationCount: number;
-  status: string;
-  metadataJson: string | null;
-  metadata?: Record<string, unknown>;
-}
-
-export interface SiasCheckpointRecord {
-  id: number;
-  sessionId: string;
-  version: number;
-  iteration: number;
-  createdAt: number;
-  payloadJson: string;
-  payload?: Record<string, unknown>;
-}
-
-export interface SiasPatchRecord {
-  patchId: string;
-  sessionId: string;
-  iteration: number;
-  timestamp: number;
-  objective: string | null;
-  reasoning: string | null;
-  filesChangedJson: string | null;
-  filesChanged?: string[];
-  diffSummary: string | null;
-  status: string;
-  rollbackReason: string | null;
-  benchmarkBeforeJson: string | null;
-  benchmarkAfterJson: string | null;
-  testSummaryJson: string | null;
-  benchmarkBefore?: Record<string, unknown>;
-  benchmarkAfter?: Record<string, unknown>;
-  testSummary?: Record<string, unknown>;
-}
-
-export interface SiasDecisionRecord {
-  decisionId: string;
-  sessionId: string;
-  iteration: number;
-  agent: string;
-  decisionType: string;
-  reasoning: string | null;
-  outcome: string | null;
-  relatedDecisionsJson: string | null;
-  relatedDecisions?: string[];
-  createdAt: number;
-}
-
-export interface SiasPrincipalContextRecord {
-  sessionId: string;
-  patchSummary: string | null;
-  currentFocus: string | null;
-  learnedConstraintsJson: string | null;
-  learnedConstraints?: string[];
-  horizonObjectivesJson: string | null;
-  horizonObjectives?: string[];
-  lastUpdated: number;
-}
-
-export interface SiasHealthSnapshotRecord {
-  id: number;
-  sessionId: string;
-  capturedAt: number;
-  metricsJson: string;
-  metrics?: Record<string, unknown>;
-}
-
-export interface SiasBenchmarkRunRecord {
-  id: number;
-  sessionId: string;
-  tier: string;
-  startedAt: number;
-  completedAt: number;
-  score: number;
-  resultJson: string;
-  result?: Record<string, unknown>;
-}
-
-export interface SiasWorktreeRecord {
-  version: string;
-  path: string;
-  status: string;
-  createdAt: number;
-  promotedAt: number | null;
-  archivedAt: number | null;
-  iterationsRun: number | null;
-  benchmarkScore: number | null;
-  failureCount: number | null;
-  failureReason: string | null;
-  failureIteration: number | null;
-  gitCommit: string | null;
-  patchesIncludedJson: string | null;
-  patchesIncluded?: string[];
-  benchmarkScoresJson: string | null;
-  benchmarkScores?: Record<string, unknown>[];
-}
-
-export interface SiasDecisionEmbeddingRecord {
-  decisionId: string;
-  embeddingJson: string;
-  embedding?: number[];
-  createdAt: number;
 }
 
 // ============================================

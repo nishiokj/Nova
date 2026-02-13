@@ -18,7 +18,6 @@ import {
   PromptAnswerDecisionSchema,
   CadenceDecisionSchema,
   AgentErrorDecisionSchema,
-  HandoffDecisionSchema,
   WorkItemCompletedDecisionSchema,
 } from './schemas.js';
 import { prompt, type Prompt, type Validator } from 'prompt-protocol';
@@ -111,18 +110,6 @@ Consider:
 - Does the error indicate a fundamental problem?
 `.trim();
 
-const HANDOFF_DECISION_PROMPT = `
-The planner is requesting handoff. Choose one action:
-- { "action": "approve" } - Approve the handoff
-- { "action": "reject", "feedback": "..." } - Reject with feedback
-- { "action": "modify", "changes": "..." } - Approve with modifications
-
-Consider:
-- Is the plan reasonable and achievable?
-- Are the work items well-defined?
-- Are there obvious gaps or issues?
-`.trim();
-
 const WORK_ITEM_COMPLETED_PROMPT = `
 A work item has completed. Choose one action:
 - { "action": "accept", "summary": "..." } - Accept the result
@@ -175,13 +162,6 @@ export const AGENT_ERROR_DECISION_PROMPT = prompt({
   control: DECISION_CONTROL_BY_EVENT.agent_error,
 });
 
-export const HANDOFF_DECISION_PROTOCOL_PROMPT = prompt({
-  id: 'decision.handoff.v1',
-  text: HANDOFF_DECISION_PROMPT,
-  output: zodValidator(HandoffDecisionSchema),
-  control: DECISION_CONTROL_BY_EVENT.handoff_requested,
-});
-
 export const WORK_ITEM_COMPLETED_DECISION_PROMPT = prompt({
   id: 'decision.work_item_completed.v1',
   text: WORK_ITEM_COMPLETED_PROMPT,
@@ -200,7 +180,6 @@ export const DECISION_PROMPT_BY_EVENT = {
   'user_input_required': PROMPT_ANSWER_DECISION_PROMPT,
   'cadence_audit': CADENCE_DECISION_PROTOCOL_PROMPT,
   'agent_error': AGENT_ERROR_DECISION_PROMPT,
-  'handoff_requested': HANDOFF_DECISION_PROTOCOL_PROMPT,
   'work_item_completed': WORK_ITEM_COMPLETED_DECISION_PROMPT,
 } as const satisfies { [E in DecisionRequiredEvent]: DecisionPrompt<E> };
 
@@ -211,7 +190,7 @@ export const DECISION_PROMPT_BY_EVENT = {
 /**
  * Generate a full observer prompt for an event.
  */
-export function generateWatcherPrompt(
+export function generateObserverPrompt(
   eventType: ControlEventType,
   context: {
     objective: string;
@@ -282,8 +261,5 @@ ${CADENCE_DECISION_PROMPT}
 Used for: agent_error
 ${AGENT_ERROR_PROMPT}
 
-## HandoffDecision
-Used for: handoff_requested
-${HANDOFF_DECISION_PROMPT}
 `.trim();
 }

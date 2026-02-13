@@ -410,50 +410,6 @@ export class HarnessClient extends EventEmitter {
     return this.sendAuthCommand('async_status', {});
   }
 
-  // =========================================================================
-  // Observer Commands
-  // =========================================================================
-
-  async watcherStatus(): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string }> {
-    return this.sendAuthCommand('watcher_status', {});
-  }
-
-  async watcherContext(): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string }> {
-    return this.sendAuthCommand('watcher_context', {});
-  }
-
-  async watcherSearch(query: string): Promise<{ success: boolean; results?: unknown[]; error?: string }> {
-    return this.sendAuthCommand('watcher_search', { query });
-  }
-
-  async watcherDecisions(): Promise<{ success: boolean; decisions?: unknown[]; error?: string }> {
-    return this.sendAuthCommand('watcher_decisions', {});
-  }
-
-  async watcherInspect(id: string): Promise<{ success: boolean; decision?: Record<string, unknown>; error?: string }> {
-    return this.sendAuthCommand('watcher_inspect', { id });
-  }
-
-  async watcherMemory(): Promise<{ success: boolean; memory?: Record<string, unknown>; error?: string }> {
-    return this.sendAuthCommand('watcher_memory', {});
-  }
-
-  async watcherFocus(topic: string): Promise<{ success: boolean; topic?: string; error?: string }> {
-    return this.sendAuthCommand('watcher_focus', { topic });
-  }
-
-  async watcherDefocus(): Promise<{ success: boolean; error?: string }> {
-    return this.sendAuthCommand('watcher_defocus', {});
-  }
-
-  async watcherReanchor(goal: string): Promise<{ success: boolean; goal?: string; error?: string }> {
-    return this.sendAuthCommand('watcher_reanchor', { goal });
-  }
-
-  async watcherSummarize(): Promise<{ success: boolean; ledger?: Record<string, unknown>; error?: string }> {
-    return this.sendAuthCommand('watcher_summarize', {});
-  }
-
   async request<T extends Record<string, unknown>>(
     type: BridgeCommandType,
     data: Record<string, unknown> = {}

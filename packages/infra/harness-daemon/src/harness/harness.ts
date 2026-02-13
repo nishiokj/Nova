@@ -22,7 +22,6 @@ import {
   type InternalHookContext,
   getAgentPrompt,
   buildAgentConfig,
-  getPlanningPromptAddendum,
 } from 'agent';
 import os from 'os';
 import { execSync } from 'child_process';
@@ -57,65 +56,36 @@ import type {
 import { loadConfig, getAgentConfig } from './config_loader.js';
 import type { FullHarnessConfig, ResolvedAgentConfig } from './config.js';
 import { LocalProviderManager } from './local_providers.js';
-import { HookExecutor } from './hook_executor.js';
-import { loadSkillDefinitions, getSkillDefinition, type HookContext as SkillHookContext } from './skills_loader.js';
+import { ConfiguredEffectHooksRunner } from './configured_effect_hooks.js';
+import {
+  loadSkillDefinitions,
+  loadHookDefinitions,
+  getSkillDefinition,
+  getHookDefinition,
+  type HookContext as SkillHookContext,
+  type HookDefinition,
+  type HookResult as LegacyHookResult,
+} from './skills_loader.js';
 import { SessionStore } from './session_store.js';
 import { createFileLogger, type HarnessLogger } from './harness_infra.js';
 import { PermissionChecker } from './permissions.js';
 import { DefaultOrchestratorRunner, type OrchestratorRunner } from './orchestrator_runner.js';
-import type { PermissionedTool, PermissionRequest, PermissionResponse, EscalationCreateInput } from 'types';
+import type { PermissionedTool, PermissionRequest, PermissionResponse } from 'types';
 import { isPermissionedTool, normalizeToolName } from 'types';
 import { createSessionState, touchSession, clearSessionState, type SessionState } from './session_state.js';
-import {
-  DecisionEngine,
-  InMemoryDecisionDatabase,
-  createDecisionEngine,
-  createWatcherConfig,
-  DEFAULT_DECISIONS,
-  createWatcherControlHooks,
-  buildPlanningObjective,
-  writeSalienceFile,
-  createDecisionLog,
-  createWorkLog,
-  getWorkItemLog,
-  createWorkItemLog,
-  writeSemanticFileAsync,
-  type WatcherTrigger,
-  type DecisionDatabase,
-  type WorkItemLog,
-  type WorkLog,
-  type RaisedEscalation,
-  type SemanticOutput,
-  type WatcherRuntime,
-} from 'decision-engine';
 import type { EntityGraph, EntityGraphConfig } from 'entity-graph';
-import { createHookRegistry, DEFAULT_ORCHESTRATOR_CONFIG, type HookRegistry } from 'orchestrator';
-import { createWorkItem } from 'work';
-import { createMemoryInjector, type MemoryInjector as MemoryInjectorInstance } from 'memory-injector';
-import { getProtocolId } from 'protocol';
 import {
-  buildEscalationResolutionGuidance,
-  parseSessionEscalations,
-  resolveSessionEscalationState,
-  type EscalationResolutionInput,
-} from './escalation_state.js';
-import { executeHooks, registerHook } from './legacy_hooks.js';
+  createSessionScopedUnifiedHookRegistry,
+  runUnifiedEffectHooksForSession,
+  type HookRegistry,
+  type SessionScopedUnifiedHookRegistry,
+} from 'orchestrator';
+import { createMemoryInjector, type MemoryInjector as MemoryInjectorInstance } from 'memory-injector';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
 
 type SessionGetResponse = { session?: GraphDSession; error?: string };
-
-export interface ResolveSessionEscalationResult {
-  success: boolean;
-  escalationId: string;
-  pendingCount?: number;
-  sessionStatus?: string;
-  resumed?: boolean;
-  resumeRequestId?: string;
-  alreadyResolved?: boolean;
-  error?: string;
-}
 
 export interface CloseSessionResult {
   success: boolean;
@@ -227,227 +197,6 @@ function resolveGitCommitRange(
   }
 
   return { headSha: normalizedSha };
-}
-
-function normalizeEscalationRefType(type: string): string {
-  const normalized = type.trim().toLowerCase();
-  if (normalized === 'testreport' || normalized === 'test_report' || normalized === 'test-report') return 'testReport';
-  if (normalized === 'workitem' || normalized === 'work_item' || normalized === 'work-item') return 'workItem';
-  if (normalized === 'pull_request' || normalized === 'pull-request' || normalized === 'pullrequest') return 'pr';
-  if (normalized === 'session') return 'session';
-  if (normalized === 'commit') return 'commit';
-  if (normalized === 'file') return 'file';
-  if (normalized === 'trace') return 'trace';
-  if (normalized === 'pr') return 'pr';
-  return normalized.replace(/[^a-z0-9]/g, '');
-}
-
-function toEscalationEvidenceRefs(
-  escalation: RaisedEscalation
-): Array<{ type: string; value: string; label: string }> {
-  const refs: Array<{ type: string; value: string; label: string }> = [];
-  const seen = new Set<string>();
-  for (const reference of escalation.references ?? []) {
-    const type = normalizeEscalationRefType(reference.type ?? '');
-    const value = String(reference.target ?? '').trim();
-    if (!type || !value) continue;
-    const key = `${type.toLowerCase()}::${value}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    refs.push({
-      type,
-      value,
-      label: reference.label || reference.type || type,
-    });
-  }
-  return refs;
-}
-
-function inlineRef(type: string, value: string): string {
-  return `@${type}(${value})`;
-}
-
-function yamlString(value: string): string {
-  return JSON.stringify(value);
-}
-
-type EscalationOption = NonNullable<RaisedEscalation['options']>[number];
-
-function defaultEscalationOptions(trigger: WatcherTrigger): EscalationOption[] {
-  switch (trigger) {
-    case 'cadence_audit':
-      return [
-        {
-          id: 'continue_with_checkpoint',
-          label: 'Continue with checkpoint',
-          description: 'Resume execution, but require concrete output before the next audit (file change, test/log output, or non-empty status update).',
-          implications: ['Fastest path forward while still enforcing evidence.'],
-          recommended: true,
-        },
-        {
-          id: 'retry_audit',
-          label: 'Retry audit',
-          description: 'Run one more iteration to gather stronger evidence, then re-evaluate.',
-          implications: ['Delays resolution by one audit cycle.'],
-          recommended: false,
-        },
-        {
-          id: 'pause_and_debug',
-          label: 'Pause and debug',
-          description: 'Stop execution and investigate observer/runtime reliability.',
-          implications: ['Highest confidence in diagnosis, highest interruption cost.'],
-          recommended: false,
-        },
-      ];
-    case 'agent_error':
-      return [
-        {
-          id: 'retry_with_recovery',
-          label: 'Retry with recovery',
-          description: 'Retry the work item with explicit recovery guidance from the error context.',
-          implications: ['Keeps progress moving if error is transient or localized.'],
-          recommended: true,
-        },
-        {
-          id: 'stop_and_investigate',
-          label: 'Stop and investigate',
-          description: 'Pause execution and investigate root cause before proceeding.',
-          implications: ['Reduces repeat failures but pauses delivery.'],
-          recommended: false,
-        },
-      ];
-    default:
-      return [
-        {
-          id: 'proceed',
-          label: 'Proceed',
-          description: 'Accept current state and continue execution.',
-          implications: ['Fastest option with least additional review.'],
-          recommended: true,
-        },
-        {
-          id: 'stop_and_investigate',
-          label: 'Stop and investigate',
-          description: 'Pause and inspect before continuing.',
-          implications: ['Safer, but blocks progress until investigation completes.'],
-          recommended: false,
-        },
-      ];
-  }
-}
-
-function buildEscalationPacketMarkdown(
-  escalation: RaisedEscalation,
-  trigger: WatcherTrigger
-): {
-  markdown: string;
-  evidenceIndex: Array<{ type: string; value: string }>;
-  requestedDecision: 'choose' | 'approve' | 'clarify';
-} {
-  const evidenceRefs = toEscalationEvidenceRefs(escalation);
-  const options = (escalation.options && escalation.options.length > 0)
-    ? escalation.options
-    : defaultEscalationOptions(trigger);
-  const requestedDecision: 'choose' | 'approve' | 'clarify' = options.length > 1
-    ? 'choose'
-    : options.length === 1
-      ? 'approve'
-      : 'clarify';
-
-  const recommendedOption = options.find((option) => option.recommended) ?? options[0];
-  const commitRef = evidenceRefs.find((ref) => ref.type.toLowerCase() === 'commit');
-  const testReportRef = evidenceRefs.find((ref) => ref.type.toLowerCase() === 'testreport');
-  const links: Array<{ key: string; target: string }> = [];
-  if (commitRef) {
-    links.push({ key: 'diff', target: `/diff?head=${encodeURIComponent(commitRef.value)}` });
-  }
-  if (testReportRef) {
-    links.push({ key: 'tests', target: `/tests?id=${encodeURIComponent(testReportRef.value)}` });
-  }
-  if (escalation.workItemId) {
-    links.push({
-      key: 'trace',
-      target: `/trace?sessionKey=${encodeURIComponent(escalation.sessionKey)}&workItemId=${encodeURIComponent(escalation.workItemId)}`,
-    });
-  }
-
-  const lines: string[] = ['---', 'type: escalation', `sessionKey: ${yamlString(escalation.sessionKey)}`];
-  if (escalation.workItemId) {
-    lines.push(`workItemId: ${yamlString(escalation.workItemId)}`);
-  }
-  lines.push(`requestedDecision: ${requestedDecision}`);
-  if (links.length > 0) {
-    lines.push('links:');
-    for (const link of links) {
-      lines.push(`  ${link.key}: ${yamlString(link.target)}`);
-    }
-  }
-  if (evidenceRefs.length > 0) {
-    lines.push('refs:');
-    for (const ref of evidenceRefs) {
-      lines.push(`  - ${ref.type}: ${yamlString(ref.value)}`);
-    }
-  }
-  lines.push('---', '');
-
-  lines.push(`# Escalation: ${escalation.title}`);
-  lines.push('', '## Action');
-  lines.push('Select one option, then click **Resolve Escalation** in Cockpit.');
-  lines.push('', '## Situation');
-  const context = escalation.context.trim() || `Observer escalation triggered by ${trigger}.`;
-  lines.push(context.slice(0, 420));
-
-  lines.push('', '## Options');
-  for (let idx = 0; idx < options.length; idx += 1) {
-    const option = options[idx];
-    lines.push(`${idx + 1}. **${option.label}**`);
-    if (option.description) {
-      lines.push(`   ${option.description.slice(0, 220)}`);
-    }
-    const primaryImplication = option.implications?.[0];
-    if (primaryImplication) {
-      lines.push(`   Impact: ${primaryImplication.slice(0, 180)}`);
-    }
-    if (option.recommended) {
-      lines.push('   Recommended');
-    }
-  }
-
-  lines.push('', '## Recommendation');
-  if (recommendedOption) {
-    lines.push(`Prefer **${recommendedOption.label}** based on current evidence.`);
-  } else {
-    lines.push('Select the option that best matches your risk tolerance.');
-  }
-
-  lines.push('', '## Evidence');
-  if (evidenceRefs.length === 0) {
-    lines.push('- No explicit refs were provided by observer.');
-  } else {
-    for (const ref of evidenceRefs.slice(0, 8)) {
-      lines.push(`- ${ref.label}: ${inlineRef(ref.type, ref.value)}`);
-    }
-  }
-
-  return {
-    markdown: lines.join('\n'),
-    evidenceIndex: evidenceRefs.map((ref) => ({ type: ref.type, value: ref.value })),
-    requestedDecision,
-  };
-}
-
-async function writeEscalationPacketFile(
-  watcherDir: string,
-  escalationId: string,
-  markdown: string
-): Promise<string> {
-  const packetsDir = path.join(watcherDir, '.cockpit', 'packets');
-  await fs.promises.mkdir(packetsDir, { recursive: true });
-  const safeEscalationId = escalationId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const absolutePath = path.join(packetsDir, `${stamp}_${safeEscalationId}.md`);
-  await fs.promises.writeFile(absolutePath, markdown, 'utf8');
-  return path.relative(watcherDir, absolutePath);
 }
 
 function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentContext): AgentRegistry {
@@ -632,7 +381,8 @@ export class AgentHarness {
   private logSubscriber: LogSubscriber | null = null;
   private agentRegistry: AgentRegistry;
   private llmAdapter: ReturnType<typeof createAdapter>;
-  private hookExecutor: HookExecutor | null = null;
+  private readonly sessionHookRegistry: SessionScopedUnifiedHookRegistry;
+  private readonly configuredHookRuntimes = new Map<string, ConfiguredEffectHooksRunner>();
   private providerKeyService: HarnessProviderKeyService;
   private orchestratorRunner: OrchestratorRunner;
   private entityGraph: EntityGraph | null = null;
@@ -648,6 +398,7 @@ export class AgentHarness {
     this.sessionTtlMs = config.context.sessionTtlMs;
     this.pauseTimeoutMs = config.context.pauseTimeoutMs;
     this.maxSessions = config.context.maxSessions;
+    this.sessionHookRegistry = createSessionScopedUnifiedHookRegistry();
 
     // Gather environment context once at startup
     const envContext = gatherEnvironmentContext(config.tools.workingDir);
@@ -785,13 +536,6 @@ export class AgentHarness {
       this.graphd = new GraphDManager(graphdConfig);
     }
 
-    // Initialize HookExecutor if hooks are enabled
-    if (config.hooks.enabled && config.hooks.directory) {
-      const hooksDir = path.resolve(workingDir, config.hooks.directory);
-      this.hookExecutor = new HookExecutor(hooksDir, workingDir);
-      this.logger.info('HookExecutor initialized', { hooksDir });
-    }
-
     if (config.dangerousMode) {
       this.logger.warning('Permission checks DISABLED - running in dangerous mode');
     }
@@ -878,8 +622,6 @@ export class AgentHarness {
       sessionKey: string;
       contextItemCount: number;
       contextEstimatedTokens: number;
-      watcherContextItemCount: number;
-      workItemLogCount: number;
       workItemsCreatedCount: number;
       lastAccessMs: number;
       isExecuting: boolean;
@@ -910,8 +652,6 @@ export class AgentHarness {
         sessionKey,
         contextItemCount,
         contextEstimatedTokens: Math.ceil(contextChars / 4),
-        watcherContextItemCount: state.watcherContext?.items.length ?? 0,
-        workItemLogCount: state.workItemLogs.size,
         workItemsCreatedCount: state.workItemsCreated.size,
         lastAccessMs: state.lastAccessMs,
         isExecuting: state.store.isExecuting(),
@@ -978,18 +718,242 @@ export class AgentHarness {
     };
   }
 
-  private cleanupSessionInternalHooks(sessionKey: string, state: SessionState): void {
-    const unregisters = state.internalHookUnregisters.splice(0);
-    for (const unregister of unregisters) {
+  private getConfiguredHookRuntime(sessionKey: string, workingDir: string): ConfiguredEffectHooksRunner {
+    const existing = this.configuredHookRuntimes.get(sessionKey);
+    if (existing) return existing;
+    const runtime = new ConfiguredEffectHooksRunner(workingDir);
+    this.configuredHookRuntimes.set(sessionKey, runtime);
+    return runtime;
+  }
+
+  private mapConfiguredHookTriggerToEffectEvent(trigger: string): string | null {
+    switch (trigger) {
+      case 'PreToolUse': return 'pre_tool_use';
+      case 'PostToolUse': return 'post_tool_use';
+      case 'PostGitCommit': return 'post_git_commit';
+      case 'UserPromptSubmit': return 'user_prompt_submit';
+      case 'Stop': return 'session_stop';
+      case 'SessionStart': return 'session_start';
+      case 'Notification': return 'notification';
+      default: return null;
+    }
+  }
+
+  private buildSkillHookContext(
+    eventType: string,
+    payload: Record<string, unknown>,
+    context: { sessionKey: string; requestId: string; workingDir: string }
+  ): SkillHookContext {
+    switch (eventType) {
+      case 'pre_tool_use':
+        return {
+          event: 'PreToolUse',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+          toolName: typeof payload.toolName === 'string' ? payload.toolName : undefined,
+          toolParams: typeof payload.args === 'object' && payload.args ? payload.args as Record<string, unknown> : undefined,
+        };
+      case 'post_tool_use':
+        return {
+          event: 'PostToolUse',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+          toolName: typeof payload.toolName === 'string' ? payload.toolName : undefined,
+          toolParams: typeof payload.args === 'object' && payload.args ? payload.args as Record<string, unknown> : undefined,
+          toolResult: payload.result,
+        };
+      case 'post_git_commit':
+        return {
+          event: 'PostGitCommit',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+          toolName: 'Bash',
+          toolParams: typeof payload.command === 'string' ? { command: payload.command } : undefined,
+          commitSha: typeof payload.sha === 'string' ? payload.sha : undefined,
+          commitMessage: typeof payload.message === 'string' ? payload.message : undefined,
+          commitBranch: typeof payload.branch === 'string' ? payload.branch : undefined,
+        };
+      case 'user_prompt_submit':
+        return {
+          event: 'UserPromptSubmit',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+        };
+      case 'session_start':
+        return {
+          event: 'SessionStart',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+        };
+      case 'session_stop':
+        return {
+          event: 'Stop',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+        };
+      case 'notification':
+      default:
+        return {
+          event: 'Notification',
+          sessionKey: context.sessionKey,
+          requestId: context.requestId,
+          workingDir: context.workingDir,
+        };
+    }
+  }
+
+  private convertConfiguredResultToEffectOutcome(
+    eventType: string,
+    result: LegacyHookResult
+  ): Record<string, unknown> {
+    if (result.action === 'allow') {
+      return { kind: 'allow', ...(result.message ? { message: result.message } : {}) };
+    }
+    if (result.action === 'block') {
+      return { kind: 'block', reason: result.message ?? 'Blocked by configured hook' };
+    }
+    if (result.action === 'modify') {
+      if (eventType === 'pre_tool_use' && result.modified && typeof result.modified === 'object') {
+        return { kind: 'modify', value: result.modified, ...(result.message ? { reason: result.message } : {}) };
+      }
+      if (eventType === 'post_tool_use' && this.isToolResult(result.modified)) {
+        return { kind: 'modify', value: result.modified, ...(result.message ? { reason: result.message } : {}) };
+      }
+      if (eventType === 'user_prompt_submit' && result.modified && typeof result.modified === 'object') {
+        return { kind: 'modify', value: result.modified, ...(result.message ? { reason: result.message } : {}) };
+      }
+      return { kind: 'allow', message: result.message ?? 'Modify ignored for event type' };
+    }
+    return { kind: 'allow' };
+  }
+
+  private registerSessionUnifiedHooks(sessionKey: string, workingDir: string): void {
+    this.sessionHookRegistry.clearSession(sessionKey);
+    const registry = this.sessionHookRegistry.getOrCreateSessionRegistry(sessionKey);
+
+    if (this.entityGraph) {
+      const entityGraphHooks = this.entityGraph.getHooks();
+      registry.register({
+        id: 'builtin:entity_graph:files_modified',
+        mode: 'effect',
+        scope: 'harness',
+        source: 'builtin:entity_graph',
+        event: 'files_modified',
+        priority: 0,
+        timeoutMs: 30_000,
+        callback: async (payload: { paths?: string[] }) => {
+          if (payload.paths && payload.paths.length > 0) {
+            await entityGraphHooks.onFilesModified(payload.paths);
+          }
+          return { kind: 'allow' };
+        },
+      } as never);
+    }
+
+    if (!this.config.hooks.enabled || !this.config.hooks.directory) {
+      return;
+    }
+
+    const hooksDir = path.resolve(workingDir, this.config.hooks.directory);
+    const stubs = loadHookDefinitions(hooksDir);
+    const runtime = this.getConfiguredHookRuntime(sessionKey, workingDir);
+
+    for (const stub of stubs) {
+      if (!stub.enabled) continue;
+      const definition = getHookDefinition(hooksDir, stub.id);
+      if (!definition || !definition.enabled) continue;
+
+      const effectEvent = this.mapConfiguredHookTriggerToEffectEvent(definition.trigger);
+      if (!effectEvent) continue;
+
+      const registrationId = `configured:${definition.id}`;
       try {
-        unregister();
+        registry.register({
+          id: registrationId,
+          mode: 'effect',
+          scope: 'harness',
+          source: `configured:${definition.id}`,
+          event: effectEvent,
+          priority: Number.isFinite(definition.priority) ? definition.priority : 0,
+          timeoutMs: definition.timeout_ms ?? 30_000,
+          callback: async (payload: Record<string, unknown>, callbackContext: { sessionKey: string; requestId: string; workingDir?: string }) => {
+            const sessionHookContext = this.buildSkillHookContext(effectEvent, payload, {
+              sessionKey: callbackContext.sessionKey,
+              requestId: callbackContext.requestId,
+              workingDir: callbackContext.workingDir ?? workingDir,
+            });
+
+            if (!runtime.matches(definition, sessionHookContext.toolName)) {
+              return { kind: 'skip', reason: 'Hook matcher did not match event context' };
+            }
+
+            const result = await runtime.execute(definition, sessionHookContext);
+            return this.convertConfiguredResultToEffectOutcome(effectEvent, result);
+          },
+        } as never);
       } catch (error) {
-        this.logger.warning('Failed to unregister internal session hook', {
+        this.logger.warning('Failed to register configured session hook', {
           sessionKey,
+          hookId: definition.id,
+          event: effectEvent,
           error: error instanceof Error ? error.message : String(error),
         });
       }
     }
+  }
+
+  private async runSessionEffectHooks(
+    sessionKey: string,
+    event: Record<string, unknown> & { type: string },
+    context: { sessionKey: string; requestId: string; workingDir?: string; workId?: string; agentType?: string; internal?: InternalHookContext; metadata?: Record<string, unknown> }
+  ): Promise<{
+    status: 'completed' | 'blocked';
+    outcomes: Array<{ hookId: string; source: string; outcome: { kind: string; [key: string]: unknown } }>;
+    blockedBy?: { hookId: string; source: string; reason: string };
+  }> {
+    try {
+      const result = await runUnifiedEffectHooksForSession(
+        sessionKey,
+        event as never,
+        context as never,
+        this.sessionHookRegistry
+      );
+      return {
+        status: result.status,
+        outcomes: result.outcomes as unknown as Array<{ hookId: string; source: string; outcome: { kind: string; [key: string]: unknown } }>,
+        blockedBy: result.blockedBy,
+      };
+    } catch (error) {
+      this.logger.warning('Session effect hook execution failed', {
+        sessionKey,
+        eventType: event.type,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { status: 'completed', outcomes: [] };
+    }
+  }
+
+  private cleanupSessionInternalHooks(sessionKey: string, state: SessionState): void {
+    const workingDir = state.store.getWorkingDirectory();
+    void this.runSessionEffectHooks(
+      sessionKey,
+      { type: 'session_stop', sessionKey, reason: 'session_cleanup' },
+      { sessionKey, requestId: 'session_cleanup', workingDir }
+    ).catch((error) => {
+      this.logger.warning('Session stop hook failed during cleanup', {
+        sessionKey,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }).finally(() => {
+      this.sessionHookRegistry.clearSession(sessionKey);
+      this.configuredHookRuntimes.delete(sessionKey);
+    });
   }
 
   /**
@@ -1092,14 +1056,9 @@ export class AgentHarness {
           this.entityGraph = new EntityGraph(sql, entityGraphConfig);
           await this.entityGraph.initialize();
           this.logger.info('EntityGraph initialized (scan running in background)');
-
-          // Register files_modified hook handler
-          const hooks = this.entityGraph.getHooks();
-          registerHook('files_modified', async (event: { type: string; paths?: string[] }) => {
-            if (event.type === 'files_modified' && event.paths) {
-              await hooks.onFilesModified(event.paths);
-            }
-          });
+          for (const [sessionKey, state] of this.sessions.entries()) {
+            this.registerSessionUnifiedHooks(sessionKey, state.store.getWorkingDirectory());
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1142,6 +1101,16 @@ export class AgentHarness {
 
     const state = createSessionState(store);
     this.sessions.set(sessionKey, state);
+    this.registerSessionUnifiedHooks(sessionKey, workingDir ?? this.config.tools.workingDir);
+    void this.runSessionEffectHooks(
+      sessionKey,
+      { type: 'session_start', sessionKey, workingDir: workingDir ?? this.config.tools.workingDir },
+      {
+        sessionKey,
+        requestId: 'session_start',
+        workingDir: workingDir ?? this.config.tools.workingDir,
+      }
+    );
     return state;
   }
 
@@ -1473,210 +1442,6 @@ export class AgentHarness {
     return { ok: this.asyncModeIssues.length === 0, issues: [...this.asyncModeIssues] };
   }
 
-  resolveSessionEscalation(
-    sessionKey: string,
-    escalationId: string,
-    resolution: EscalationResolutionInput
-  ): ResolveSessionEscalationResult {
-    if (!this.isGraphDReady() || !this.graphd) {
-      return {
-        success: false,
-        escalationId,
-        error: 'GraphD not available',
-      };
-    }
-
-    const result = this.graphd.sessionGet(sessionKey) as SessionGetResponse;
-    const session = result.session;
-    if (!session) {
-      return {
-        success: false,
-        escalationId,
-        error: result.error || `Session not found: ${sessionKey}`,
-      };
-    }
-
-    const metadata = (session.metadata ?? {}) as Record<string, unknown>;
-    const existingEscalations = parseSessionEscalations(metadata.escalations);
-    const resolvedState = resolveSessionEscalationState(existingEscalations, escalationId, resolution);
-
-    if (!resolvedState.found || !resolvedState.resolved) {
-      return {
-        success: false,
-        escalationId,
-        error: `Escalation not found: ${escalationId}`,
-      };
-    }
-
-    const nextMetadata: Record<string, unknown> = {
-      ...metadata,
-      escalations: resolvedState.escalations,
-    };
-    const metadataUpdate = this.graphd.sessionUpdateMetadata(sessionKey, nextMetadata, false) as {
-      success?: boolean;
-      error?: string;
-    };
-    if (!metadataUpdate.success) {
-      return {
-        success: false,
-        escalationId,
-        error: metadataUpdate.error || `Failed to update escalation metadata for ${sessionKey}`,
-      };
-    }
-
-    // Persist resolution to durable storage (fire-and-forget)
-    if (this.memoryClient) {
-      this.memoryClient.escalations.resolve(escalationId, {
-        optionId: resolution.optionId,
-        freeformResponse: resolution.freeformResponse,
-      }).catch((err) => {
-        this.logger.warning('Failed to persist escalation resolution to database', {
-          sessionKey,
-          escalationId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-    }
-
-    const store = this.ensureSessionHydrated(sessionKey, {
-      workingDir: session.workingDir ?? undefined,
-      includeUserPreferences: false,
-    });
-    const guidance = buildEscalationResolutionGuidance(resolvedState.resolved, resolution);
-    store.getContext().addMessage('system', guidance);
-    store.persistContext();
-
-    const pausedWorkItems = store.listPausedWorkItems();
-    const pausedWorkItem = pausedWorkItems.find((item) => (
-      item.status === 'pending' && (
-        item.escalationId === escalationId ||
-        (!!resolvedState.resolved?.workItemId && item.workId === resolvedState.resolved.workItemId)
-      )
-    ));
-    const resolvedPausedWorkItem = pausedWorkItem
-      ? store.resolvePausedWorkItem(pausedWorkItem.workId, guidance)
-      : null;
-
-    const internalContext: InternalHookContext = {
-      workId: resolvedState.resolved.workItemId ?? escalationId,
-      agentType: 'observer',
-      sessionKey,
-      requestId: '',
-      objective: resolvedState.resolved.title,
-    };
-
-    const resolutionEvent: InternalHookEvent = {
-      type: 'escalation_resolved',
-      escalationId,
-      sessionKey,
-      resolution,
-    };
-    this.emitInternalHookAsync(resolutionEvent, internalContext);
-
-    const sessionState = this.sessions.get(sessionKey);
-    if (sessionState?.workLog) {
-      void sessionState.workLog.append({
-        type: 'note',
-        timestamp: new Date().toISOString(),
-        workId: resolvedState.resolved.workItemId ?? escalationId,
-        note: `[escalation_resolved] ${resolvedState.resolved.id} (${resolution.resolvedBy})`,
-        source: 'observer',
-      }).catch((err) => {
-        this.logger.warning('Work log write failed (escalation_resolved)', {
-          sessionKey,
-          escalationId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-    }
-
-    let nextStatus = session.status;
-    if (resolvedState.pendingCount === 0 && session.status === 'blocked') {
-      const statusUpdate = this.graphd.sessionUpdateStatus(sessionKey, 'active') as {
-        success?: boolean;
-        error?: string;
-      };
-      if (!statusUpdate.success) {
-        return {
-          success: false,
-          escalationId,
-          error: statusUpdate.error || `Failed to transition ${sessionKey} to active`,
-        };
-      }
-
-      nextStatus = 'active';
-      const statusEvent: InternalHookEvent = {
-        type: 'session_status_changed',
-        sessionKey,
-        previousStatus: 'blocked',
-        newStatus: 'active',
-        reason: `Escalation ${escalationId} resolved`,
-        triggeringEscalationId: escalationId,
-      };
-      this.emitInternalHookAsync(statusEvent, internalContext);
-    }
-
-    let resumed = false;
-    let resumeRequestId: string | undefined;
-    const canAutoResume = nextStatus === 'active' &&
-      resolvedState.pendingCount === 0 &&
-      store.isAsyncModeEnabled() &&
-      !this.getSessionAsyncRun(sessionKey);
-
-    if (canAutoResume) {
-      const paused = store.getPausedState();
-      const replayContext = resolvedPausedWorkItem
-        ? [
-            '[Observer Replay Context]',
-            `Work item: ${resolvedPausedWorkItem.workId}`,
-            `Agent: ${resolvedPausedWorkItem.agentType}`,
-            ...(resolvedPausedWorkItem.objective ? [`Original objective: ${resolvedPausedWorkItem.objective}`] : []),
-            `Observer stop reason: ${resolvedPausedWorkItem.reason}`,
-            `Escalation: ${escalationId}`,
-            ...(sessionState?.workLog ? [`Work log: ${sessionState.workLog.filePath()}`] : []),
-            '',
-            'Human resolution guidance:',
-            guidance,
-            '',
-            'Resume this work item using the guidance above. Do not restart unrelated tasks.',
-          ].join('\n')
-        : null;
-
-      const resumeInput = paused
-        ? (resolution.freeformResponse?.trim() || resolution.optionId || guidance)
-        : replayContext ?? `Escalation ${escalationId} has been resolved.\n${guidance}`;
-      const workingDir = paused?.workingDir ?? session.workingDir ?? this.config.tools.workingDir;
-
-      resumeRequestId = `escalation-resume-${randomUUID()}`;
-      const resumeHandle = this.run({
-        requestId: resumeRequestId,
-        inputText: resumeInput,
-        sessionKey,
-        workingDir,
-      });
-      resumed = true;
-
-      void resumeHandle.result.catch((error) => {
-        this.logger.warning('Auto-resume after escalation resolution failed', {
-          sessionKey,
-          escalationId,
-          requestId: resumeRequestId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }
-
-    return {
-      success: true,
-      escalationId,
-      pendingCount: resolvedState.pendingCount,
-      sessionStatus: nextStatus,
-      resumed,
-      ...(resumeRequestId ? { resumeRequestId } : {}),
-      alreadyResolved: resolvedState.alreadyTerminal,
-    };
-  }
-
   // --- Session-level exclusive operation management (async runs) ---
 
   /**
@@ -1787,9 +1552,6 @@ export class AgentHarness {
       }
     };
 
-    if (!this.agentRegistry.has('observer')) {
-      issues.push('Missing required agent config: observer');
-    }
     check('planner', 'planner_output');
 
     this.asyncModeIssues = issues;
@@ -1821,14 +1583,12 @@ export class AgentHarness {
       sessionKey,
       workingDir,
       context: supplementalContextRaw,
-      handoffSpec,
-      planMode,
       hookRegistry,
     } = params;
     const supplementalContext = typeof supplementalContextRaw === 'string'
       ? supplementalContextRaw.trim()
       : '';
-    profiler.instant('harness.run', 'harness', 'p', { requestId, tier: requestedTier, planMode });
+    profiler.instant('harness.run', 'harness', 'p', { requestId, tier: requestedTier });
     const runId = requestId;
     const eventQueue = new AsyncEventQueue();
     // Create emit early so harness-level events (status, response, error, user_prompt)
@@ -1909,94 +1669,20 @@ export class AgentHarness {
     // Determine execution parameters based on paused state
     let goal: string;
     let effectiveAgentType: AgentType;
-    let effectivePlanMode: boolean | undefined;
     let effectiveWorkingDir: string;
-    let contextWindow = store.getContext();
-    let clearContextForHandoff = false;
+    const contextWindow = store.getContext();
 
     if (isResume) {
       // This is a resume - inputText is the answer to a pending question
-      const normalizedAnswer = inputText.trim().toLowerCase();
-      const isSpecReview = paused.userPromptType === 'spec_review';
-      const isHandoffApproval = paused.userPromptType === 'handoff_approval';
-      const isPlanModeExit = paused.userPromptType === 'plan_mode_exit';
-
-      const userApproved = (
-        normalizedAnswer.startsWith('yes') ||
-        normalizedAnswer === '0' ||
-        normalizedAnswer === 'y' ||
-        normalizedAnswer === 'true'
-      );
-
-      const userHandoff = normalizedAnswer === 'handoff';
-
-      // Handle handoff from plan mode - user says "handoff" to approve spec
-      if (paused.handoffSpec && userHandoff) {
-        const handoffSpecText = JSON.stringify(paused.handoffSpec, null, 2);
-        // User approved spec - clear context and execute with handoffSpec
-        this.logger.info('User approved spec review, executing with spec', {
-          sessionKey,
-          specLength: handoffSpecText.length,
-        });
-        contextWindow = store.clearContext();
-        store.clearPausedState();
-        goal = handoffSpecText;
-        effectiveAgentType = 'standard';
-        effectivePlanMode = false;
-        effectiveWorkingDir = workingDir ?? paused.workingDir;
-        clearContextForHandoff = true;
-      }
-      // Handle legacy handoff_approval (orchestrator-level approval)
-      else if (isHandoffApproval && paused.handoffSpec && userApproved) {
-        const handoffSpecText = JSON.stringify(paused.handoffSpec, null, 2);
-        // User approved handoff - clear context and execute with handoffSpec
-        this.logger.info('User approved handoff, executing with spec', {
-          sessionKey,
-          specLength: handoffSpecText.length,
-        });
-        contextWindow = store.clearContext();
-        store.clearPausedState();
-        goal = handoffSpecText;
-        effectiveAgentType = 'standard';
-        effectivePlanMode = false;
-        effectiveWorkingDir = workingDir ?? paused.workingDir;
-        clearContextForHandoff = true;
-      } else {
-        // Normal resume or rejection - add answer to context and continue
-        contextWindow.addMessage('user', inputText);
-
-        if ((isSpecReview || isHandoffApproval) && !userApproved) {
-          contextWindow.addMessage(
-            'system',
-            'User rejected the plan. Revise based on their feedback and ask for approval again when ready.'
-          );
-        } else if (isPlanModeExit) {
-          if (userApproved) {
-            contextWindow.addMessage(
-              'system',
-              'User approved handoff. Set action: "handoff" with your complete implementation spec in handoffSpec (structured object). The system will automatically clear context and start execution with your spec.'
-            );
-          } else {
-            contextWindow.addMessage(
-              'system',
-              'User rejected the handoff and wants you to continue planning. Revise your plan based on their feedback and ask for approval again when ready.'
-            );
-          }
-        }
-
-        goal = paused.goal;
-        effectiveAgentType = paused.agentType as AgentType;
-        effectivePlanMode = isPlanModeExit && userApproved ? false : paused.planMode;
-        effectiveWorkingDir = workingDir ?? paused.workingDir;
-      }
+      contextWindow.addMessage('user', inputText);
+      goal = paused.goal;
+      effectiveAgentType = paused.agentType as AgentType;
+      effectiveWorkingDir = workingDir ?? paused.workingDir;
     } else {
       // Fresh run - inputText is the goal
       contextWindow.addMessage('user', inputText);
-      goal = (handoffSpec && typeof handoffSpec === 'object' && !Array.isArray(handoffSpec) && Object.keys(handoffSpec).length > 0)
-        ? JSON.stringify({ handoffSpec })
-        : inputText;
+      goal = inputText;
       effectiveAgentType = requestedTier || 'standard';
-      effectivePlanMode = planMode;
       effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
     }
 
@@ -2020,7 +1706,7 @@ export class AgentHarness {
       }
     }
 
-    const userMessagePersisted = clearContextForHandoff ? false : this.persistUserMessage(sessionKey, requestId, inputText);
+    const userMessagePersisted = this.persistUserMessage(sessionKey, requestId, inputText);
 
     // NOTE: Agent events (agent_message, tool_call, etc.) are forwarded directly
     // from EventBus to BusServer via BusServer's direct subscription. Harness-level
@@ -2029,32 +1715,35 @@ export class AgentHarness {
 
     const resultPromise = (async (): Promise<AgentRunResult> => {
       try {
-        // Run UserPromptSubmit hooks before processing
-        if (this.hookExecutor) {
-          const hookContext: SkillHookContext = {
-            event: 'UserPromptSubmit',
+        const userPromptHookResult = await this.runSessionEffectHooks(
+          sessionKey,
+          {
+            type: 'user_prompt_submit',
+            workItemId: requestId,
+            prompt: {},
+          },
+          {
             sessionKey,
             requestId,
             workingDir: effectiveWorkingDir,
-          };
-          const hookResult = await this.hookExecutor.execute('UserPromptSubmit', hookContext);
-          if (hookResult.action === 'block') {
-            const blockMsg = hookResult.message || 'Request blocked by hook';
-            eventQueue.push(createErrorEvent(blockMsg, false));
-            eventQueue.push(createStatusEvent('idle'));
-            emit(createEvent('harness_error', { message: blockMsg, fatal: false }));
-            emit(createEvent('harness_status', { state: 'idle' }));
-            return {
-              requestId,
-              sessionKey,
-              success: false,
-              finalText: blockMsg,
-              errorMessage: hookResult.message,
-              paused: false,
-              toolsUsed: [],
-              durationMs: 0,
-            };
           }
+        );
+        if (userPromptHookResult.status === 'blocked') {
+          const blockMsg = userPromptHookResult.blockedBy?.reason || 'Request blocked by hook';
+          eventQueue.push(createErrorEvent(blockMsg, false));
+          eventQueue.push(createStatusEvent('idle'));
+          emit(createEvent('harness_error', { message: blockMsg, fatal: false }));
+          emit(createEvent('harness_status', { state: 'idle' }));
+          return {
+            requestId,
+            sessionKey,
+            success: false,
+            finalText: blockMsg,
+            errorMessage: blockMsg,
+            paused: false,
+            toolsUsed: [],
+            durationMs: 0,
+          };
         }
 
         // Get the appropriate agent config
@@ -2099,7 +1788,6 @@ export class AgentHarness {
           llmAdapter,
           effectiveAgentType,
           effectiveWorkingDir,
-          effectivePlanMode,
           store,
           isResume ? undefined : hookRegistry
         );
@@ -2248,18 +1936,19 @@ export class AgentHarness {
           });
         }
 
-        // Run Stop hooks
-        if (this.hookExecutor) {
-          const hookContext: SkillHookContext = {
-            event: 'Stop',
+        await this.runSessionEffectHooks(
+          sessionKey,
+          {
+            type: 'session_stop',
+            sessionKey,
+            reason: 'run_finished',
+          },
+          {
             sessionKey,
             requestId,
             workingDir: effectiveWorkingDir,
-          };
-          await this.hookExecutor.execute('Stop', hookContext).catch((err) => {
-            this.logger.warning('Stop hook failed', { error: String(err) });
-          });
-        }
+          }
+        );
 
         queueMicrotask(() => {
           try {
@@ -2317,14 +2006,6 @@ export class AgentHarness {
       this.logger.warning('GraphD persist failed', { error: String(error) });
     }
   }
-  /**
-   * Filter tools for plan mode - removes write/edit capabilities.
-   */
-  private filterPlanModeTools(tools: string[]): string[] {
-    const writeTools = new Set(['Write', 'Edit', 'BatchEdit']);
-    return tools.filter(tool => !writeTools.has(tool));
-  }
-
   private isToolResult(value: unknown): value is ToolResult {
     if (!value || typeof value !== 'object') {
       return false;
@@ -2347,7 +2028,7 @@ export class AgentHarness {
   }
 
   /**
-   * Create AgentHooks that handle permission checking and delegate to HookExecutor.
+   * Create AgentHooks that handle permission checking and session-scoped effect hooks.
    */
   private createAgentHooks(
     sessionKey: string,
@@ -2355,7 +2036,6 @@ export class AgentHarness {
     workingDir: string,
     emit?: (event: AgentEvent) => void
   ): AgentHooks {
-    const executor = this.hookExecutor;
     const logger = this.logger;
     const egHooks = this.entityGraph?.getHooks() ?? null;
     const PERMISSION_REQUEST_TIMEOUT_MS = 60_000;
@@ -2463,22 +2143,36 @@ export class AgentHarness {
           }
         }
 
-        // Run hook executor if available
-        if (executor) {
-          const context: SkillHookContext = {
-            event: 'PreToolUse',
+        const effectResult = await this.runSessionEffectHooks(
+          sessionKey,
+          {
+            type: 'pre_tool_use',
             toolName,
-            toolParams: args,
+            args,
+          },
+          {
             sessionKey,
             requestId,
             workingDir,
-          };
-          const result = await executor.execute('PreToolUse', context);
+          }
+        );
+
+        if (effectResult.status === 'blocked') {
           return {
-            action: result.action,
-            message: result.message,
-            modifiedArgs: result.modified as Record<string, unknown> | undefined,
+            action: 'block',
+            message: effectResult.blockedBy?.reason ?? 'Blocked by hook policy',
           };
+        }
+
+        let modifiedArgs: Record<string, unknown> | undefined;
+        for (const outcomeEntry of effectResult.outcomes) {
+          if (outcomeEntry.outcome.kind === 'modify' && typeof outcomeEntry.outcome.value === 'object' && outcomeEntry.outcome.value) {
+            modifiedArgs = outcomeEntry.outcome.value as Record<string, unknown>;
+          }
+        }
+
+        if (modifiedArgs) {
+          return { action: 'modify', modifiedArgs };
         }
 
         return { action: 'allow' };
@@ -2529,56 +2223,55 @@ export class AgentHarness {
               };
               this.eventBus.publish(createEvent('git_commit', gitCommitData, undefined, requestId, sessionKey));
 
-              // Execute PostGitCommit hooks if executor available
-              if (executor) {
-                const gitContext: SkillHookContext = {
-                  event: 'PostGitCommit',
-                  toolName: 'Bash',
-                  toolParams: args,
-                  toolResult,
+              await this.runSessionEffectHooks(
+                sessionKey,
+                {
+                  type: 'post_git_commit',
+                  sha,
+                  command,
+                },
+                {
                   sessionKey,
                   requestId,
                   workingDir,
-                  commitSha: sha,
-                };
-                await executor.execute('PostGitCommit', gitContext);
-              }
+                }
+              );
             }
           }
         }
 
-        if (!executor) {
-          return egModified
-            ? { action: 'modify', modifiedResult: toolResult }
-            : { action: 'allow' };
+        const effectResult = await this.runSessionEffectHooks(
+          sessionKey,
+          {
+            type: 'post_tool_use',
+            toolName,
+            args,
+            result: toolResult,
+          },
+          {
+            sessionKey,
+            requestId,
+            workingDir,
+          }
+        );
+
+        let modifiedResult: ToolResult | undefined;
+        for (const outcomeEntry of effectResult.outcomes) {
+          if (outcomeEntry.outcome.kind === 'modify' && this.isToolResult(outcomeEntry.outcome.value)) {
+            modifiedResult = outcomeEntry.outcome.value;
+          }
         }
 
-        const context: SkillHookContext = {
-          event: 'PostToolUse',
-          toolName,
-          toolParams: args,
-          toolResult,
-          sessionKey,
-          requestId,
-          workingDir,
-        };
-        const result = await executor.execute('PostToolUse', context);
-
-        // If executor modified the result, use its version.
-        // Otherwise, propagate entity-graph context if present.
-        if (result.action === 'modify' && result.modified) {
-          if (this.isToolResult(result.modified)) {
-            return { action: 'modify', message: result.message, modifiedResult: result.modified };
-          }
-          logger.warning('PostToolUse hook returned invalid ToolResult, ignoring modification', {
-            toolName,
-            sessionKey,
-          });
+        if (modifiedResult) {
+          return { action: 'modify', modifiedResult };
         }
         if (egModified) {
           return { action: 'modify', modifiedResult: toolResult };
         }
-        return { action: result.action, message: result.message };
+        if (effectResult.status === 'blocked') {
+          return { action: 'block', message: effectResult.blockedBy?.reason ?? 'Blocked by hook policy' };
+        }
+        return { action: 'allow' };
       },
     };
   }
@@ -2625,19 +2318,11 @@ export class AgentHarness {
     llm: ReturnType<typeof createAdapter>,
     agentType: AgentType = 'standard',
     workingDir?: string,
-    planMode?: boolean,
     store?: SessionStore,
     hookRegistry?: HookRegistry
   ): Promise<AgentRunResult> {
     const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
     const hooks = this.createAgentHooks(context.sessionKey, requestId, effectiveWorkingDir, emit);
-
-    // Build plan mode options if enabled
-    const planModeOptions = planMode ? {
-      enabled: true,
-      promptAddendum: getPlanningPromptAddendum(),
-      toolFilter: (tools: string[]) => this.filterPlanModeTools(tools),
-    } : undefined;
 
     // Create closure for per-agent-type model selection lookup
     // NO FALLBACK: Each agent type must have an explicit model selection
@@ -2658,54 +2343,23 @@ export class AgentHarness {
         }
       : undefined;
 
-    // Build orchestrator runtime with optional hooks
     const sessionKey = context.sessionKey;
-    const sessionState = this.getSessionState(sessionKey);
-    let lastWatcherIteration = 0;
-    const minWatcherGap = DEFAULT_ORCHESTRATOR_CONFIG.minWatcherIterationGap;
-    const watcherCompactTrigger = DEFAULT_ORCHESTRATOR_CONFIG.compactTriggerPercent;
-    const asyncEnabledForRun = (store?.isAsyncModeEnabled() ?? false) || !!hookRegistry;
-
-    // Register logging hooks for ALL sessions (async and interactive)
-    if (!sessionState?.workLog) {
-      await this.registerSessionLoggingHooks(
-        sessionKey,
-        goal,
-        effectiveWorkingDir,
-        this.config.tools.workingDir,
-        asyncEnabledForRun ? 'async' : 'interactive'
-      );
-    }
-
-    // Only create/use observer hooks when async mode is enabled for this session/run
-    let effectiveHookRegistry = hookRegistry;
-    if (asyncEnabledForRun && !hookRegistry) {
-      // Check if we already have a cached hook registry for this session
-      const cachedRegistry = sessionState?.hookRegistry;
-      if (cachedRegistry) {
-        effectiveHookRegistry = cachedRegistry;
-        this.logger.debug('Using cached observer hook registry', { sessionKey });
-      } else {
-        // Create the observer hook registry - registers logging hooks and sets up observer
-        // Pass daemon's config working dir as watcherDir for .observer artifacts (project root)
-        this.logger.info('Creating observer hook registry for async mode', { sessionKey, goal });
-        const { hookRegistry: watcherRegistry } = await this.createWatcherHookRegistryForSession(
-          sessionKey,
-          goal,
-          effectiveWorkingDir,
-          this.config.tools.workingDir  // Observer artifacts at project root
-        );
-        effectiveHookRegistry = watcherRegistry;
-        if (sessionState) {
-          sessionState.hookRegistry = watcherRegistry;
-        }
-      }
-    }
 
     const runtime = {
-      hookRegistry: asyncEnabledForRun ? effectiveHookRegistry : undefined,
-      executeLegacyHook: async (event: InternalHookEvent, hookContext: InternalHookContext) => {
-        await executeHooks(event.type, event, hookContext);
+      hookRegistry,
+      executeEffectHook: async (event: InternalHookEvent, hookContext: InternalHookContext) => {
+        await this.runSessionEffectHooks(
+          hookContext.sessionKey,
+          event,
+          {
+            sessionKey: hookContext.sessionKey,
+            requestId: hookContext.requestId,
+            workId: hookContext.workId,
+            agentType: hookContext.agentType,
+            workingDir: effectiveWorkingDir,
+            internal: hookContext,
+          }
+        );
       },
       onStart: (activeContext: ContextWindow) => this.attachArtifactSubscriber(activeContext),
       // Pass interruption check callback so orchestrator can avoid premature termination
@@ -2717,50 +2371,12 @@ export class AgentHarness {
       } : undefined,
       // Pass stop request check so agent can exit loop early on explicit "stop" from user
       checkStopRequest: store ? () => store.hasPendingStopRequest() : undefined,
-      // Observer evaluation — rule-based, fires every minWatcherIterationGap iterations
-      onIteration: asyncEnabledForRun ? (state: { iteration: number; context: ContextWindow; totalToolCalls: number; totalLlmCalls: number; elapsedMs: number }) => {
-        if (state.iteration - lastWatcherIteration < minWatcherGap) return;
-        lastWatcherIteration = state.iteration;
-
-        const pct = state.context.metrics.percentageUsed;
-        const engine = this.getOrCreateWatcherEngine(sessionKey);
-        const hasDecisions = engine.hasDecisions(sessionKey);
-
-        // Summarize (compact + epistemic ledger) when context is high and decisions exist
-        if (pct >= watcherCompactTrigger && hasDecisions) {
-          this.logger.info('Observer: summarizing (context high + decisions in play)', {
-            pct,
-            sessionKey,
-            watcherCompactTrigger,
-          });
-          this.watcherSummarize(sessionKey);
-          return;
-        }
-
-        // Plain compact when context is high but no decisions to ledger
-        if (pct >= watcherCompactTrigger) {
-          this.logger.info('Observer: triggering compact', {
-            pct,
-            sessionKey,
-            watcherCompactTrigger,
-          });
-          this.watcherSummarize(sessionKey);
-          return;
-        }
-      } : undefined,
     };
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
-    const sessionDb = asyncEnabledForRun ? this.getOrCreateDecisionDatabase(context.sessionKey) : undefined;
     const asyncId = profiler.asyncBegin(`orchestrator:${agentType}`, 'orchestrator');
     const result = await this.orchestratorRunner.execute({
       config: {
-        ...(asyncEnabledForRun ? {
-          asyncMode: {
-            enabled: true,
-            database: sessionDb as DecisionDatabase,
-          },
-        } : {}),
         memoryInjector: this.memoryInjector ?? undefined,
       },
       toolRegistry: this.toolRegistry,
@@ -2770,7 +2386,6 @@ export class AgentHarness {
       logger: this.logger,
       agentRegistry: this.agentRegistry,
       hooks,
-      planModeOptions,
       getModelSelection,
       context,
       goal,
@@ -2780,24 +2395,13 @@ export class AgentHarness {
     });
     profiler.asyncEnd(`orchestrator:${agentType}`, asyncId, 'orchestrator', { toolCalls: result.metrics.totalToolCalls, paused: result.paused });
 
-    // Handle handoff: store handoffSpec for approval in paused state
-    if (result.handoffSpec && store) {
-      const handoffSpecText = JSON.stringify(result.handoffSpec);
-      this.logger.info('Handoff requested, pausing for user approval', {
-        sessionKey: context.sessionKey,
-        specLength: handoffSpecText.length,
-      });
-    }
-
     // Store paused state for resume, or clear it on completion
     if (result.paused) {
       store?.setPausedState({
         goal,
         agentType,
         workingDir: effectiveWorkingDir,
-        planMode,
         userPromptType: result.userPrompt?.questionType,
-        handoffSpec: result.handoffSpec,
       });
     } else {
       store?.clearPausedState();
@@ -2920,859 +2524,6 @@ export class AgentHarness {
       this.logger.error('Context compaction failed', { sessionKey, error: message });
       return { success: false, itemsRemoved: 0, bytesRecovered: 0, error: message };
     }
-  }
-
-  private emitInternalHookAsync(event: InternalHookEvent, context: InternalHookContext): void {
-    queueMicrotask(() => {
-      void executeHooks(event.type, event, context).catch((err) => {
-        this.logger.warning('Failed to execute internal hook', {
-          sessionKey: context.sessionKey,
-          eventType: event.type,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-    });
-  }
-
-  /**
-   * Register session-level logging hooks that run for ALL sessions (async and interactive).
-   * Creates work log, workitem logs, and registers internal hooks for execution audit trail.
-   * Idempotent — skips if workLog already exists on session state.
-   *
-   * @param sessionKey - Session identifier
-   * @param goal - The goal for the session
-   * @param workingDir - Agent's working directory for file operations (used for cwd in logs)
-   * @param watcherDir - Directory for observer artifacts (.observer/), defaults to workingDir
-   * @param mode - Session mode for the work log entry
-   */
-  async registerSessionLoggingHooks(
-    sessionKey: string,
-    goal: string,
-    workingDir: string,
-    watcherDir?: string,
-    mode: 'async' | 'interactive' = 'interactive'
-  ): Promise<{ workLog: WorkLog }> {
-    const sessionState = this.getOrCreateSessionState(sessionKey, false, workingDir);
-    const effectiveWatcherDir = watcherDir ?? workingDir;
-
-    // Idempotent — if work log already exists, logging hooks are already registered
-    if (sessionState.workLog) {
-      return { workLog: sessionState.workLog };
-    }
-
-    const workLog = await createWorkLog(effectiveWatcherDir, sessionKey);
-    sessionState.workLog = workLog;
-
-    const safeAppend = async (label: string, op: () => Promise<void>): Promise<void> => {
-      try {
-        await op();
-      } catch (err) {
-        console.warn(`[HARNESS] ${label}:`, err instanceof Error ? err.message : String(err));
-      }
-    };
-
-    if (sessionState.internalHookUnregisters.length > 0) {
-      this.cleanupSessionInternalHooks(sessionKey, sessionState);
-    }
-
-    const registerSessionInternalHook = (
-      event: InternalHookEvent['type'],
-      hook: (event: InternalHookEvent, ctx: InternalHookContext) => Promise<void>
-    ): void => {
-      const unregister = registerHook(event, hook);
-      sessionState.internalHookUnregisters.push(unregister);
-    };
-
-    // Helper to get or create workitem log for this session
-    const getOrCreateWorkItemLog = async (
-      workId: string,
-      agentType: string,
-      objective?: string,
-      meta?: { domain?: string; dependencies?: string[]; targetPaths?: string[] }
-    ): Promise<WorkItemLog> => {
-      let log = sessionState.workItemLogs.get(workId);
-      if (!log) {
-        log = await getWorkItemLog(effectiveWatcherDir, sessionKey, workId) ?? undefined;
-        if (!log) {
-          log = await createWorkItemLog(effectiveWatcherDir, sessionKey, {
-            workId,
-            objective: objective ?? 'unknown',
-            agent: agentType,
-            cwd: workingDir,
-            domain: meta?.domain,
-            dependencies: meta?.dependencies,
-            targetPaths: meta?.targetPaths,
-          });
-        }
-        sessionState.workItemLogs.set(workId, log);
-      }
-      return log;
-    };
-
-    const getWorkItemLogSafe = async (
-      label: string,
-      workId: string,
-      agentType: string,
-      objective?: string,
-      meta?: { domain?: string; dependencies?: string[]; targetPaths?: string[] }
-    ): Promise<WorkItemLog | null> => {
-      try {
-        return await getOrCreateWorkItemLog(workId, agentType, objective, meta);
-      } catch (err) {
-        console.warn(`[HARNESS] WorkItem log creation failed (${label}):`, err instanceof Error ? err.message : String(err));
-        return null;
-      }
-    };
-
-    const publishWorkItemStatus = (
-      payload: {
-        workId: string;
-        objective: string;
-        delta?: string;
-        agent: string;
-        dependencies: string[];
-        status: 'started' | 'completed' | 'failed' | 'skipped';
-        response?: string;
-        metrics?: {
-          llmCallsMade: number;
-          toolCallsMade: number;
-          durationMs: number;
-        };
-        error?: string;
-        toolErrors?: string[];
-        terminationReason?: string;
-        reason?: string;
-      },
-      requestId: string
-    ): void => {
-      this.eventBus.publish(createEvent(
-        'workitem_status',
-        payload,
-        payload.workId,
-        requestId,
-        sessionKey
-      ));
-    };
-
-    // Write session_start entry
-    await safeAppend('Work log write failed (session_start)', () => workLog.append({
-      type: 'session_start',
-      timestamp: new Date().toISOString(),
-      goal,
-      mode,
-    }));
-
-    // Register auto-logging hooks for workitem activity
-    // NOTE: Hooks are global, so we filter by sessionKey to only process this session's events
-    registerSessionInternalHook('workitem_created', async (event: InternalHookEvent, ctx: InternalHookContext) => {
-      if (event.type !== 'workitem_created') return;
-      if (ctx.sessionKey !== sessionKey) return;
-
-      if (sessionState.workItemsCreated.has(ctx.workId)) return;
-
-      const itemLog = await getWorkItemLogSafe(
-        'workitem_created',
-        ctx.workId,
-        event.agent ?? ctx.agentType,
-        event.objective ?? ctx.objective,
-        {
-          domain: event.domain,
-          dependencies: event.dependencies,
-          targetPaths: event.targetPaths,
-        }
-      );
-
-      if (itemLog) {
-        sessionState.workItemsCreated.add(ctx.workId);
-        await safeAppend('Work log write failed (workitem_created)', () => workLog.append({
-          type: 'workitem_created',
-          timestamp: new Date().toISOString(),
-          workId: ctx.workId,
-          objective: event.objective ?? ctx.objective ?? 'unknown',
-          agent: event.agent ?? ctx.agentType,
-          domain: event.domain,
-          dependencies: event.dependencies,
-        }));
-
-        // Write semantic if attached (from observer split/create)
-        if (event.semantic) {
-          writeSemanticFileAsync(
-            {
-              workingDir: effectiveWatcherDir,
-              sessionId: sessionKey,
-              workId: ctx.workId,
-            },
-            event.semantic as SemanticOutput,
-            new Date().toISOString()
-          );
-        }
-      }
-    });
-    registerSessionInternalHook('turn_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
-      if (event.type !== 'turn_completed') return;
-      if (ctx.sessionKey !== sessionKey) return;
-
-      const itemLog = await getWorkItemLogSafe('turn_completed', ctx.workId, ctx.agentType, ctx.objective);
-
-      if (itemLog) {
-        if (event.iteration === 1) {
-          await safeAppend('WorkItem log write failed (markStarted)', () => itemLog.markStarted());
-        }
-      }
-
-      if (event.iteration === 1) {
-        if (!sessionState.workItemsCreated.has(ctx.workId)) {
-          sessionState.workItemsCreated.add(ctx.workId);
-          await safeAppend('Work log write failed (workitem_created)', () => workLog.append({
-            type: 'workitem_created',
-            timestamp: new Date().toISOString(),
-            workId: ctx.workId,
-            objective: ctx.objective ?? 'unknown',
-            agent: ctx.agentType,
-          }));
-        }
-
-        publishWorkItemStatus({
-          workId: ctx.workId,
-          objective: ctx.objective ?? 'unknown',
-          agent: ctx.agentType,
-          dependencies: [],
-          status: 'started',
-        }, ctx.requestId);
-      }
-    });
-
-    registerSessionInternalHook('agent_message', async (event: InternalHookEvent, ctx: InternalHookContext) => {
-      if (event.type !== 'agent_message') return;
-      if (ctx.sessionKey !== sessionKey) return;
-
-      const itemLog = await getWorkItemLogSafe('agent_message', ctx.workId, ctx.agentType, ctx.objective);
-      if (itemLog) {
-        await safeAppend('WorkItem log write failed (agent_message)', () => itemLog.appendMessage(
-          event.role,
-          event.content,
-          undefined,
-          event.reasoning
-        ));
-      }
-    });
-
-    registerSessionInternalHook('tool_call_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
-      if (event.type !== 'tool_call_completed') return;
-      if (ctx.sessionKey !== sessionKey) return;
-
-      const itemLog = await getWorkItemLogSafe('tool_call_completed', ctx.workId, ctx.agentType, ctx.objective);
-      if (itemLog) {
-        await safeAppend('WorkItem log write failed (tool_call_completed)', () => itemLog.appendToolCall(
-          event.tool,
-          event.args,
-          event.success,
-          event.result,
-          event.durationMs
-        ));
-      }
-    });
-
-    registerSessionInternalHook('memory_injected', async (event: InternalHookEvent, ctx: InternalHookContext) => {
-      if (event.type !== 'memory_injected') return;
-      if (ctx.sessionKey !== sessionKey) return;
-
-      const itemLog = await getWorkItemLogSafe('memory_injected', ctx.workId, ctx.agentType, ctx.objective);
-      if (itemLog) {
-        await safeAppend('WorkItem log write failed (memory_injected)', () => itemLog.append({
-          type: 'memory_injection',
-          timestamp: new Date().toISOString(),
-          query: event.query,
-          memoryContent: event.memoryContent,
-          contextWithMemory: event.contextWithMemory,
-          resultPreview: event.resultPreview,
-          itemCount: event.itemCount,
-          success: event.success,
-          iteration: event.iteration,
-          version: event.version,
-          latencyMs: event.latencyMs,
-          coverage: event.coverage,
-          discriminatorsIncluded: event.discriminatorsIncluded,
-          totalTokens: event.totalTokens,
-          fallbackToV1: event.fallbackToV1,
-          trainingSignal: event.trainingSignal,
-        }));
-      }
-
-      this.eventBus.publish(createEvent('memory_injected', {
-        query: event.query,
-        resultPreview: event.resultPreview,
-        memoryContent: event.memoryContent,
-        contextWithMemory: event.contextWithMemory,
-        itemCount: event.itemCount,
-        success: event.success,
-        iteration: event.iteration,
-        version: event.version,
-        latencyMs: event.latencyMs,
-        coverage: event.coverage,
-        discriminatorsIncluded: event.discriminatorsIncluded,
-        totalTokens: event.totalTokens,
-        fallbackToV1: event.fallbackToV1,
-        trainingSignal: event.trainingSignal,
-      }, ctx.workId, ctx.requestId, ctx.sessionKey));
-    });
-
-    registerSessionInternalHook('tool_batch_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
-      if (event.type !== 'tool_batch_completed') return;
-      if (ctx.sessionKey !== sessionKey) return;
-    });
-
-    registerSessionInternalHook('files_modified', async (event: InternalHookEvent, ctx: InternalHookContext) => {
-      if (event.type !== 'files_modified') return;
-      if (ctx.sessionKey !== sessionKey) return;
-
-      await safeAppend('Work log write failed (files_modified)', () => workLog.append({
-        type: 'note',
-        timestamp: new Date().toISOString(),
-        workId: ctx.workId,
-        note: `Files modified: ${event.paths.slice(0, 5).join(', ')}${event.paths.length > 5 ? ` (+${event.paths.length - 5} more)` : ''}`,
-        source: 'orchestrator',
-      }));
-
-      const itemLog = await getWorkItemLogSafe('files_modified', ctx.workId, ctx.agentType, ctx.objective);
-      if (itemLog) {
-        await safeAppend('WorkItem log write failed (files_modified)', () => itemLog.appendToolCall(
-          'Edit/Write',
-          { paths: event.paths },
-          true,
-          `Modified: ${event.paths.join(', ')}`
-        ));
-      }
-
-      this.eventBus.publish(createEvent('files_modified', {
-        paths: event.paths,
-      }, ctx.workId, ctx.requestId, ctx.sessionKey));
-    });
-
-    registerSessionInternalHook('agent_completed', async (event: InternalHookEvent, ctx: InternalHookContext) => {
-      if (event.type !== 'agent_completed') return;
-      if (ctx.sessionKey !== sessionKey) return;
-
-      const workId = ctx.workId ?? event.workId ?? 'unknown';
-
-      await safeAppend('Work log write failed (agent_completed)', () => workLog.append({
-        type: 'workitem_status',
-        timestamp: new Date().toISOString(),
-        workId,
-        status: 'completed',
-        filesModified: event.invalidatedPaths,
-      }));
-
-      const itemLog = await getWorkItemLogSafe('agent_completed', workId, ctx.agentType, ctx.objective);
-      if (itemLog) {
-        await safeAppend('WorkItem log write failed (markCompleted)', () => itemLog.markCompleted(
-          event.response ?? 'Agent completed',
-          event.metrics ? {
-            llmCalls: event.metrics.llmCallsMade,
-            toolCalls: event.metrics.toolCallsMade,
-            contextPercentUsed: event.contextPercentUsed ?? 0,
-            durationMs: 0,
-            filesRead: event.filesRead,
-            filesModified: event.invalidatedPaths,
-          } : undefined
-        ));
-      }
-
-      const terminalStatus: 'completed' | 'failed' | 'skipped' =
-        event.success
-          ? 'completed'
-          : (event.terminationReason === 'watcher_stopped'
-              || event.terminationReason === 'watcher_work_item_stopped'
-              || event.terminationReason === 'user_stopped')
-            ? 'skipped'
-            : 'failed';
-      const objective = ctx.objective ?? 'unknown';
-
-      if (terminalStatus === 'completed') {
-        publishWorkItemStatus({
-          workId,
-          objective,
-          agent: ctx.agentType,
-          dependencies: [],
-          status: 'completed',
-          response: event.response ?? '',
-          metrics: {
-            llmCallsMade: event.metrics?.llmCallsMade ?? 0,
-            toolCallsMade: event.metrics?.toolCallsMade ?? 0,
-            durationMs: 0,
-          },
-          terminationReason: event.terminationReason,
-        }, ctx.requestId);
-      } else if (terminalStatus === 'skipped') {
-        publishWorkItemStatus({
-          workId,
-          objective,
-          agent: ctx.agentType,
-          dependencies: [],
-          status: 'skipped',
-          reason: event.terminationReason,
-          terminationReason: event.terminationReason,
-        }, ctx.requestId);
-      } else {
-        publishWorkItemStatus({
-          workId,
-          objective,
-          agent: ctx.agentType,
-          dependencies: [],
-          status: 'failed',
-          error: `Work item failed (${event.terminationReason})`,
-          toolErrors: [],
-          terminationReason: event.terminationReason,
-        }, ctx.requestId);
-      }
-    });
-
-    return { workLog };
-  }
-
-  /**
-   * Create a observer-backed hook registry for a session.
-   * This is the bridge between the orchestrator control-plane hooks and the LLM-backed observer.
-   * Calls registerSessionLoggingHooks first (idempotent), then adds observer-specific setup.
-   *
-   * @param sessionKey - Session identifier
-   * @param goal - The goal for the async session
-   * @param workingDir - Agent's working directory for file operations (used for cwd in logs)
-   * @param watcherDir - Directory for observer artifacts (.observer/), defaults to workingDir
-   */
-  async createWatcherHookRegistryForSession(
-    sessionKey: string,
-    goal: string,
-    workingDir: string,
-    watcherDir?: string
-  ): Promise<{ hookRegistry: HookRegistry; planningObjective: string }> {
-    const store = this.ensureSessionHydrated(sessionKey, { workingDir, includeUserPreferences: true });
-    const sessionState = this.getOrCreateSessionState(sessionKey, false, workingDir);
-    const effectiveWatcherDir = watcherDir ?? workingDir;
-    if (!this.agentRegistry.has('observer')) {
-      throw new Error('Observer agent config missing from registry');
-    }
-    const watcherAgentConfig = this.agentRegistry.getConfig('observer');
-    const watcherContext = store.getContext();
-    sessionState.watcherContext = watcherContext;
-    const watcherRuntime: WatcherRuntime = {
-      llm: this.llmAdapter,
-      toolRegistry: this.toolRegistry,
-      agentConfig: watcherAgentConfig,
-      workingDir,
-      agentRegistry: this.agentRegistry,
-      contextWindow: watcherContext,
-      sessionKey,
-      getModelSelection: (agentType: string) => store.getModelSelection(agentType),
-      memoryInjector: this.memoryInjector ?? undefined,
-    };
-
-    // Register logging hooks first (idempotent — skips if already registered)
-    const { workLog } = await this.registerSessionLoggingHooks(sessionKey, goal, workingDir, watcherDir, 'async');
-
-    // NOTE: Skill knowledge is baked into system prompts. No need to discover skill files.
-    const saliencePath = await writeSalienceFile(effectiveWatcherDir, {
-      sessionId: sessionKey,
-      goal,
-      mode: 'async',
-    });
-
-    const decisionLog = await createDecisionLog(effectiveWatcherDir, sessionKey);
-
-    const safeAppend = async (label: string, op: () => Promise<void>): Promise<void> => {
-      try {
-        await op();
-      } catch (err) {
-        console.warn(`[HARNESS] ${label}:`, err instanceof Error ? err.message : String(err));
-      }
-    };
-
-    const registerSessionInternalHook = (
-      event: InternalHookEvent['type'],
-      hook: (event: InternalHookEvent, ctx: InternalHookContext) => Promise<void>
-    ): void => {
-      const unregister = registerHook(event, hook);
-      sessionState.internalHookUnregisters.push(unregister);
-    };
-
-    registerSessionInternalHook('watcher_agent_stopped', async (event: InternalHookEvent, ctx: InternalHookContext) => {
-      if (event.type !== 'watcher_agent_stopped') return;
-      if (ctx.sessionKey !== sessionKey) return;
-
-      const now = Date.now();
-      sessionState.store.upsertPausedWorkItem({
-        workId: event.workId,
-        agentType: event.agentType,
-        objective: ctx.objective,
-        reason: event.reason,
-        escalationId: event.escalationId,
-        status: 'pending',
-        timestamp: now,
-      });
-
-      await safeAppend('Work log write failed (watcher_agent_stopped)', () => workLog.append({
-        type: 'note',
-        timestamp: new Date(now).toISOString(),
-        workId: event.workId,
-        note: `[watcher_stop] ${event.reason}`,
-        source: 'observer',
-      }));
-
-      if (event.escalationId && this.graphd) {
-        const sessionResult = this.graphd.sessionGet(sessionKey) as { session?: { status?: string; metadata?: Record<string, unknown> } } | undefined;
-        const sessionMeta = sessionResult?.session?.metadata ?? {};
-        const escalations = parseSessionEscalations(sessionMeta.escalations);
-        const hasPendingEscalation = escalations.some((item) => item.id === event.escalationId && item.status === 'pending');
-        const previousStatus = sessionResult?.session?.status ?? 'active';
-
-        if (hasPendingEscalation && previousStatus !== 'blocked') {
-          this.graphd.sessionUpdateStatus(sessionKey, 'blocked');
-          const statusEvent: InternalHookEvent = {
-            type: 'session_status_changed',
-            sessionKey,
-            previousStatus,
-            newStatus: 'blocked',
-            reason: `Escalation ${event.escalationId} pending`,
-            triggeringEscalationId: event.escalationId,
-          };
-          this.emitInternalHookAsync(statusEvent, {
-            workId: event.workId,
-            agentType: event.agentType,
-            sessionKey,
-            requestId: '',
-            objective: ctx.objective,
-          });
-        }
-      }
-    });
-
-    const watcherHooks = createWatcherControlHooks({
-      sessionId: sessionKey,
-      salienceFilePath: saliencePath,
-      decisionLog,
-      workLog,
-      getWorkItemLog: async (workId: string) => {
-        // First check our cache, then try to get from disk (artifacts in watcherDir)
-        const cached = sessionState.workItemLogs.get(workId);
-        if (cached) return cached;
-        return getWorkItemLog(effectiveWatcherDir, sessionKey, workId);
-      },
-      workingDir: effectiveWatcherDir,
-      runtime: watcherRuntime,
-      onDecision: (entry) => {
-        // Increment decision counter for memory-efficient tracking
-        const engine = this.getOrCreateWatcherEngine(sessionKey);
-        engine.incrementDecisionCount(sessionKey);
-
-        this.logger.info('Observer decision', {
-          sessionKey,
-          trigger: entry.trigger,
-          watcherAction: entry.watcherAction,
-          rationale: entry.rationale,
-          answer: entry.answer,
-        });
-        this.eventBus.publish(createEvent('watcher_decision', {
-          trigger: entry.trigger,
-          watcherAction: entry.watcherAction,
-          question: entry.question,
-          answer: entry.answer,
-          rationale: entry.rationale,
-          qualityGate: entry.qualityGate,
-        }, entry.workItemId, '', sessionKey));
-      },
-      onEscalationRaised: async (
-        escalation: RaisedEscalation,
-        hookContext,
-        trigger
-      ) => {
-        const internalContext: InternalHookContext = {
-          workId: escalation.workItemId ?? hookContext.workId,
-          agentType: hookContext.agentType,
-          sessionKey,
-          requestId: '',
-          objective: hookContext.objective,
-        };
-
-        const escalationEvent: InternalHookEvent = {
-          type: 'escalation_raised',
-          escalation,
-        };
-        this.emitInternalHookAsync(escalationEvent, internalContext);
-
-        const sessionResult = this.graphd?.sessionGet(sessionKey) as { session?: { status?: string } } | undefined;
-        const previousStatus = sessionResult?.session?.status ?? 'active';
-        const now = Date.now();
-        const createdAtIso = new Date(now).toISOString();
-        const packetDraft = buildEscalationPacketMarkdown(escalation, trigger);
-        const packetId = `pkt_${escalation.id}`;
-        let packetSourcePath: string | undefined;
-        try {
-          packetSourcePath = await writeEscalationPacketFile(effectiveWatcherDir, escalation.id, packetDraft.markdown);
-        } catch (error) {
-          this.logger.warning('Failed to write escalation packet markdown file', {
-            sessionKey,
-            escalationId: escalation.id,
-            error: getErrorMessage(error),
-          });
-        }
-
-        const packetRecord: Record<string, unknown> = {
-          packetId,
-          sessionKey,
-          type: 'escalation',
-          createdAt: createdAtIso,
-          contentMarkdown: packetDraft.markdown,
-          source: 'observer',
-          escalationId: escalation.id,
-          ...(escalation.workItemId ? { workItemId: escalation.workItemId } : {}),
-          ...(packetDraft.evidenceIndex.length > 0 ? { evidenceIndex: packetDraft.evidenceIndex } : {}),
-          ...(packetSourcePath ? { sourcePath: packetSourcePath } : {}),
-        };
-
-        const packetEvent: Record<string, unknown> = {
-          type: 'packet_emitted',
-          timestamp: createdAtIso,
-          ...(escalation.workItemId ? { work_item_id: escalation.workItemId } : {}),
-          data: {
-            packetId,
-            packetType: 'escalation',
-            source: 'observer',
-            escalationId: escalation.id,
-            requestedDecision: packetDraft.requestedDecision,
-            ...(packetSourcePath ? { sourcePath: packetSourcePath } : {}),
-          },
-        };
-
-        this.graphd?.sessionUpdateMetadata(sessionKey, {
-          escalations: [{
-            ...escalation,
-            trigger,
-            status: 'pending',
-            createdAt: now,
-            updatedAt: now,
-          }],
-          packets: [packetRecord],
-          agent_events: [packetEvent],
-        });
-
-        // Persist to durable storage (fire-and-forget)
-        if (this.memoryClient) {
-          this.memoryClient.escalations.create({
-            type: escalation.escalationType,
-            sessionKey: escalation.sessionKey,
-            workItemId: escalation.workItemId,
-            title: escalation.title,
-            context: escalation.context,
-            tradeoffs: escalation.tradeoffs,
-            options: escalation.options,
-            references: escalation.references as EscalationCreateInput['references'],
-          }).catch((err) => {
-            this.logger.warning('Failed to persist escalation to database', {
-              sessionKey,
-              escalationId: escalation.id,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          });
-        }
-
-        if (previousStatus !== 'blocked') {
-          this.graphd?.sessionUpdateStatus(sessionKey, 'blocked');
-          const statusEvent: InternalHookEvent = {
-            type: 'session_status_changed',
-            sessionKey,
-            previousStatus,
-            newStatus: 'blocked',
-            reason: `Escalation ${escalation.id} raised`,
-            triggeringEscalationId: escalation.id,
-          };
-          this.emitInternalHookAsync(statusEvent, internalContext);
-        }
-
-        await safeAppend('Work log write failed (escalation_raised)', () => workLog.append({
-          type: 'note',
-          timestamp: new Date(now).toISOString(),
-          workId: escalation.workItemId ?? hookContext.workId,
-          note: `[escalation] ${escalation.id} (${escalation.escalationType}) ${escalation.title}`,
-          source: 'observer',
-        }));
-      },
-    }, sessionKey);
-
-    const planningObjective = buildPlanningObjective(
-      goal, saliencePath, decisionLog.filePath(), workLog.filePath()
-    );
-
-    const hookRegistry = createHookRegistry();
-    hookRegistry.registerHooks({
-      source: `observer:${sessionKey}`,
-      protocolId: getProtocolId(),
-      hooks: watcherHooks,
-    });
-
-    return { hookRegistry, planningObjective };
-  }
-
-  // =========================================================================
-  // Decision Observer: Per-session database & engine
-  // =========================================================================
-
-  /**
-   * Get or create a per-session DecisionDatabase, seeded with DEFAULT_DECISIONS.
-   */
-  getOrCreateDecisionDatabase(sessionKey: string): DecisionDatabase {
-    const state = this.getOrCreateSessionState(sessionKey);
-    if (!state.decisionDatabase) {
-      state.decisionDatabase = new InMemoryDecisionDatabase(DEFAULT_DECISIONS);
-    }
-    return state.decisionDatabase;
-  }
-
-  /**
-   * Get or create a per-session DecisionEngine.
-   */
-  private getOrCreateWatcherEngine(sessionKey: string): DecisionEngine {
-    const state = this.getOrCreateSessionState(sessionKey);
-    if (!state.watcherEngine) {
-      const db = this.getOrCreateDecisionDatabase(sessionKey);
-      state.watcherEngine = createDecisionEngine(db, createWatcherConfig());
-    }
-    return state.watcherEngine;
-  }
-
-  // =========================================================================
-  // Observer CLI Commands
-  // =========================================================================
-
-  watcherStatus(sessionKey: string): Record<string, unknown> {
-    const engine = this.getOrCreateWatcherEngine(sessionKey);
-    const state = this.sessions.get(sessionKey);
-    const contextSnapshot = state?.store.getCachedContextSnapshot();
-
-    return {
-      enabled: true,
-      sessionKey,
-      focusTopic: engine.getFocus(),
-      salienceGoal: engine.getSalienceGoal(),
-      contextLoaded: !!contextSnapshot,
-      contextItems: contextSnapshot?.items.length ?? 0,
-    };
-  }
-
-  watcherContext(sessionKey: string): Record<string, unknown> {
-    const state = this.sessions.get(sessionKey);
-    if (!state) {
-      return { error: 'No session store found', sessionKey };
-    }
-
-    const context = state.store.getContext();
-
-    return {
-      sessionKey,
-      metrics: context.metrics,
-    };
-  }
-
-  async watcherSearch(sessionKey: string, query: string): Promise<Record<string, unknown>> {
-    const db = this.getOrCreateDecisionDatabase(sessionKey);
-    const results = await db.search(query, { limit: 10 });
-
-    return {
-      query,
-      count: results.length,
-      results: results.map(entry => ({
-        id: entry.id,
-        category: entry.category,
-        priority: entry.priority,
-        summary: 'decision' in entry ? entry.decision.slice(0, 120) : entry.preference.slice(0, 120),
-        keywords: entry.keywords,
-      })),
-    };
-  }
-
-  async watcherDecisions(sessionKey: string): Promise<Record<string, unknown>> {
-    const db = this.getOrCreateDecisionDatabase(sessionKey);
-    const all = await db.getAll();
-
-    return {
-      count: all.length,
-      decisions: all.map(entry => ({
-        id: entry.id,
-        category: entry.category,
-        priority: entry.priority,
-        type: 'decision' in entry ? 'decision' : 'preference',
-        summary: 'decision' in entry ? entry.decision.slice(0, 120) : entry.preference.slice(0, 120),
-      })),
-    };
-  }
-
-  async watcherInspect(sessionKey: string, id: string): Promise<Record<string, unknown>> {
-    const db = this.getOrCreateDecisionDatabase(sessionKey);
-    const entry = await db.get(id);
-
-    if (!entry) {
-      return { error: `Decision '${id}' not found` };
-    }
-
-    return { decision: entry };
-  }
-
-  watcherMemory(sessionKey: string): Record<string, unknown> {
-    const engine = this.getOrCreateWatcherEngine(sessionKey);
-    return {
-      sessionKey,
-      decisionsMade: engine.getDecisionCount(sessionKey),
-      focusTopic: engine.getFocus(),
-      salienceGoal: engine.getSalienceGoal(),
-    };
-  }
-
-  watcherFocus(sessionKey: string, topic: string): Record<string, unknown> {
-    const engine = this.getOrCreateWatcherEngine(sessionKey);
-    engine.setFocus(topic);
-    return { success: true, topic };
-  }
-
-  watcherDefocus(sessionKey: string): Record<string, unknown> {
-    const engine = this.getOrCreateWatcherEngine(sessionKey);
-    engine.clearFocus();
-    return { success: true };
-  }
-
-  watcherReanchor(sessionKey: string, goal: string): Record<string, unknown> {
-    const engine = this.getOrCreateWatcherEngine(sessionKey);
-    engine.setSalienceGoal(goal);
-    return { success: true, goal };
-  }
-
-  watcherSummarize(sessionKey: string): Record<string, unknown> {
-    const state = this.sessions.get(sessionKey);
-    if (!state) {
-      return { error: 'No session store found' };
-    }
-
-    const context = state.store.getContext();
-    const result = context.compact({
-      deduplicateByPath: true,
-      maxFileContentCount: 15,
-      truncateOutputsTo: 3000,
-    });
-
-    state.store.persistContext();
-
-    const engine = this.getOrCreateWatcherEngine(sessionKey);
-
-    return {
-      success: true,
-      compaction: {
-        itemsRemoved: result.itemsRemoved,
-        bytesRecovered: result.bytesRecovered,
-      },
-      ledger: {
-        focusTopic: engine.getFocus(),
-        salienceGoal: engine.getSalienceGoal(),
-        decisionsMade: engine.getDecisionCount(sessionKey),
-      },
-    };
   }
 
   /**

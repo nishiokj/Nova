@@ -10,12 +10,3 @@ export { DEFAULT_WORK_BOUNDS, createWorkItem, createWorkItemCriteria, cloneWorkI
 
 // Knowledge
 export { FactSource, type KnowledgeFact, createKnowledgeFact, KnowledgeStore } from './knowledge.js';
-
-// Work Ledger
-export {
-  EntryStatus,
-  PatchDecision,
-  type PatchRecord,
-  type LedgerEntry,
-  WorkLedger,
-} from './work-ledger.js';

@@ -34,8 +34,7 @@
   "scripts": {
     "build": "tsc",
     "lint": "tsc --noEmit",
-    "clean": "rm -rf dist",
-    "test": "bun test"
+    "clean": "rm -rf dist"
   },
   "dependencies": {
     "shared": "workspace:*",

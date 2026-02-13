@@ -30,7 +30,7 @@ export interface KnowledgeFact {
   source: FactSource;
   /** Timestamp when fact was created */
   timestamp: number;
-  /** LedgerEntry ID this was derived from */
+  /** Work entry ID this was derived from */
   derivedFromEntry?: string;
   /** Tool that produced this fact */
   toolName?: string;

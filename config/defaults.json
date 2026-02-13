@@ -24,21 +24,6 @@
       "output_schema": "routing"
     },
 
-    "simple": {
-      "$comment": "Simple tasks without tool use. Quick responses.",
-      "llm": {
-        "role": "fast",
-        "max_tokens": 4000,
-        "temperature": 0.5
-      },
-      "budget": {
-        "max_iterations": 1,
-        "max_tool_calls": 0,
-        "max_duration_ms": 8000
-      },
-      "output_schema": "agent_action"
-    },
-
     "explorer": {
       "$comment": "Code exploration and search. Read-only tools.",
       "llm": {
@@ -116,22 +101,6 @@
         "max_duration_ms": 180000
       },
       "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "PromptUser", "ExpandConversation"],
-      "output_schema": "agent_action"
-    },
-
-    "web_crawler": {
-      "$comment": "Web search and content fetching.",
-      "llm": {
-        "role": "fast",
-        "max_tokens": 8000,
-        "temperature": 0.5
-      },
-      "budget": {
-        "max_iterations": 15,
-        "max_tool_calls": 23,
-        "max_duration_ms": 180000
-      },
-      "tools": ["WebFetch", "WebSearch"],
       "output_schema": "agent_action"
     },
 

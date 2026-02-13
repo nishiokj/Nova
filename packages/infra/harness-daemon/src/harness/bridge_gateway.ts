@@ -58,8 +58,6 @@ interface HarnessLike {
     sessionKey: string;
     workingDir: string;
     context?: string;
-    handoffSpec?: Record<string, unknown>;
-    planMode?: boolean;
     hookRegistry?: HookRegistry;
   }): AgentRunHandle;
   createReadyEvent(sessionKey: string): BridgeEvent;
@@ -91,24 +89,6 @@ interface HarnessLike {
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
   compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
   getSessionPermissionChecker?(sessionKey: string): PermissionChecker | null;  // Per-session permission checker
-  resolveSessionEscalation?(
-    sessionKey: string,
-    escalationId: string,
-    resolution: {
-      optionId?: string;
-      freeformResponse?: string;
-      resolvedBy: 'user' | 'system' | 'timeout';
-    }
-  ): {
-    success: boolean;
-    escalationId: string;
-    pendingCount?: number;
-    sessionStatus?: string;
-    resumed?: boolean;
-    resumeRequestId?: string;
-    alreadyResolved?: boolean;
-    error?: string;
-  };
   getDebugMemoryInfo?(): {
     sessionCount: number;
     maxSessions: number;
@@ -116,8 +96,6 @@ interface HarnessLike {
       sessionKey: string;
       contextItemCount: number;
       contextEstimatedTokens: number;
-      watcherContextItemCount: number;
-      workItemLogCount: number;
       workItemsCreatedCount: number;
       lastAccessMs: number;
       isExecuting: boolean;
@@ -129,19 +107,6 @@ interface HarnessLike {
   getSessionAsyncRun?(sessionKey: string): { requestId: string; goal: string; cancelled: boolean; startedAt: number } | null;
   cancelSessionAsyncRun?(sessionKey: string): void;
   clearSessionAsyncRun?(sessionKey: string): void;
-  // Observer CLI methods
-  watcherStatus?(sessionKey: string): Record<string, unknown>;
-  watcherContext?(sessionKey: string): Record<string, unknown>;
-  watcherSearch?(sessionKey: string, query: string): Promise<Record<string, unknown>>;
-  watcherDecisions?(sessionKey: string): Promise<Record<string, unknown>>;
-  watcherInspect?(sessionKey: string, id: string): Promise<Record<string, unknown>>;
-  watcherMemory?(sessionKey: string): Record<string, unknown>;
-  watcherFocus?(sessionKey: string, topic: string): Record<string, unknown>;
-  watcherDefocus?(sessionKey: string): Record<string, unknown>;
-  watcherReanchor?(sessionKey: string, goal: string): Record<string, unknown>;
-  watcherSummarize?(sessionKey: string): Record<string, unknown>;
-  /** Create an LLM-backed observer hook registry + planning objective for a session. */
-  createWatcherHookRegistryForSession?(sessionKey: string, goal: string, workingDir: string, watcherDir?: string): Promise<{ hookRegistry: HookRegistry; planningObjective: string }>;
 }
 
 interface AsyncRunInfo {
@@ -157,7 +122,6 @@ interface ConnectionState {
   lastSessionKey: string | null;
   workingDir: string | null;
   activeRequestId: string | null;
-  planMode: boolean;
   asyncRun: AsyncRunInfo | null;
 }
 
@@ -341,28 +305,11 @@ export class BridgeGateway {
     });
     register('async_cancel', (data, ctx) => this.handleAsyncCancel(ctx.connectionId, data, ctx.state));
     register('async_status', (data, ctx) => this.handleAsyncStatus(ctx.connectionId, data, ctx.state));
-    register('watcher_status', (_data, ctx) => this.handleWatcherStatus(ctx.connectionId, ctx.state));
-    register('watcher_context', (_data, ctx) => this.handleWatcherContext(ctx.connectionId, ctx.state));
-    register('watcher_search', (data, ctx) => {
-      void this.handleWatcherSearch(ctx.connectionId, data, ctx.state);
-    });
-    register('watcher_decisions', (_data, ctx) => {
-      void this.handleWatcherDecisions(ctx.connectionId, ctx.state);
-    });
-    register('watcher_inspect', (data, ctx) => {
-      void this.handleWatcherInspect(ctx.connectionId, data, ctx.state);
-    });
-    register('watcher_memory', (_data, ctx) => this.handleWatcherMemory(ctx.connectionId, ctx.state));
-    register('watcher_focus', (data, ctx) => this.handleWatcherFocus(ctx.connectionId, data, ctx.state));
-    register('watcher_defocus', (_data, ctx) => this.handleWatcherDefocus(ctx.connectionId, ctx.state));
-    register('watcher_reanchor', (data, ctx) => this.handleWatcherReanchor(ctx.connectionId, data, ctx.state));
-    register('watcher_summarize', (_data, ctx) => this.handleWatcherSummarize(ctx.connectionId, ctx.state));
     register('control_plane_dispatch', (data, ctx) => this.handleControlPlaneDispatch(ctx.connectionId, data));
     register('control_plane_stop', (data, ctx) => this.handleControlPlaneStop(ctx.connectionId, data));
     register('control_plane_fork', (data, ctx) => this.handleControlPlaneFork(ctx.connectionId, data));
     register('control_plane_permissions_get', (data, ctx) => this.handleControlPlanePermissionsGet(ctx.connectionId, data));
     register('control_plane_permissions_update', (data, ctx) => this.handleControlPlanePermissionsUpdate(ctx.connectionId, data));
-    register('control_plane_resolve_escalation', (data, ctx) => this.handleControlPlaneResolveEscalation(ctx.connectionId, data));
     register('control_plane_memory_info', (_data, ctx) => this.handleControlPlaneMemoryInfo(ctx.connectionId));
     register('control_plane_model_get', (data, ctx) => this.handleControlPlaneModelGet(ctx.connectionId, data));
     register('control_plane_model_set', (data, ctx) => this.handleControlPlaneModelSet(ctx.connectionId, data));
@@ -568,10 +515,6 @@ export class BridgeGateway {
     const rawTier = typeof data?.tier === 'string' ? data.tier.trim() : '';
     const tier = rawTier && rawTier !== 'auto' ? (rawTier as AgentType) : undefined;
 
-    // Extract planMode from command data
-    const planMode = typeof data?.plan_mode === 'boolean' ? data.plan_mode : state.planMode;
-    state.planMode = planMode;
-
     state.activeRequestId = clientRequestId;
 
     profiler.instant('harness.run:start', 'harness', 'p', { requestId: clientRequestId, tier });
@@ -581,7 +524,6 @@ export class BridgeGateway {
       ...(tier ? { tier } : {}),
       sessionKey,
       workingDir,
-      planMode,
     });
 
     this.streamRunEvents(clientRequestId, handle, undefined, sessionKey);
@@ -1513,7 +1455,7 @@ export class BridgeGateway {
     sessionKey: string,
     fallbackSelection: PersistedModelSelection
   ): void {
-    for (const companionAgentType of ['planner', 'observer'] as const) {
+    for (const companionAgentType of ['planner'] as const) {
       const existingSelection = this.harness.getSessionSelectedModel?.(sessionKey, companionAgentType);
       if (!existingSelection?.model || !existingSelection?.provider) {
         this.harness.setSessionSelectedModel?.(sessionKey, companionAgentType, fallbackSelection);
@@ -1779,11 +1721,6 @@ export class BridgeGateway {
     const context = typeof input.context === 'string' && input.context.trim().length > 0
       ? input.context.trim()
       : undefined;
-    const metadata = isRecord(input.metadata) ? input.metadata : undefined;
-    const handoffSpec = metadata && isRecord(metadata.cockpit_handoff_spec)
-      ? metadata.cockpit_handoff_spec
-      : undefined;
-
     // Browser-originated sessions default to dangerous mode (no permission prompts).
     this.harness.ensureSessionHydrated?.(input.sessionKey, {
       workingDir,
@@ -1797,7 +1734,6 @@ export class BridgeGateway {
         requestId,
         inputText: trimmedMessage,
         ...(context ? { context } : {}),
-        ...(handoffSpec ? { handoffSpec } : {}),
         sessionKey: input.sessionKey,
         workingDir,
       });
@@ -1980,46 +1916,6 @@ export class BridgeGateway {
     });
   }
 
-  private handleControlPlaneResolveEscalation(
-    connectionId: string,
-    data: Record<string, unknown> | undefined
-  ): void {
-    const sessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
-    const escalationId = typeof data?.escalation_id === 'string' ? data.escalation_id.trim() : '';
-    const resolutionRaw = isRecord(data?.resolution) ? data.resolution : {};
-    const resolvedBy = resolutionRaw.resolvedBy === 'system' || resolutionRaw.resolvedBy === 'timeout'
-      ? resolutionRaw.resolvedBy
-      : 'user';
-    const resolution = {
-      ...(typeof resolutionRaw.optionId === 'string' && resolutionRaw.optionId.trim().length > 0
-        ? { optionId: resolutionRaw.optionId.trim() }
-        : {}),
-      ...(typeof resolutionRaw.freeformResponse === 'string' && resolutionRaw.freeformResponse.trim().length > 0
-        ? { freeformResponse: resolutionRaw.freeformResponse.trim() }
-        : {}),
-      resolvedBy,
-    } as const;
-
-    if (!sessionKey) {
-      this.sendAuthResponse(connectionId, 'control_plane_resolve_escalation', { success: false, error: 'Missing session_key' });
-      return;
-    }
-    if (!escalationId) {
-      this.sendAuthResponse(connectionId, 'control_plane_resolve_escalation', { success: false, error: 'Missing escalation_id' });
-      return;
-    }
-    if (!this.harness.resolveSessionEscalation) {
-      this.sendAuthResponse(connectionId, 'control_plane_resolve_escalation', {
-        success: false,
-        error: 'Escalation resolution not available',
-      });
-      return;
-    }
-
-    const result = this.harness.resolveSessionEscalation(sessionKey, escalationId, resolution);
-    this.sendAuthResponse(connectionId, 'control_plane_resolve_escalation', result as Record<string, unknown>);
-  }
-
   private handleControlPlaneMemoryInfo(connectionId: string): void {
     if (!this.harness.getDebugMemoryInfo) {
       this.sendAuthResponse(connectionId, 'control_plane_memory_info', {
@@ -2190,16 +2086,8 @@ export class BridgeGateway {
       graphd.sessionUpdateWorkflow(sessionKey, { goal });
     }
 
-    // Create observer hook registry for this session
-    if (!this.harness.createWatcherHookRegistryForSession) {
-      sendFailure('Async sessions are not supported by this harness.');
-      return;
-    }
-
     try {
       this.harness.setSessionAsyncModeEnabled?.(sessionKey, true);
-      // Pass daemon's root as watcherDir for .observer artifacts, session's workingDir for agent operations
-      const { hookRegistry, planningObjective } = await this.harness.createWatcherHookRegistryForSession(sessionKey, goal, workingDir, this.workingDir);
 
       const requestId = generateRequestId();
       state.activeRequestId = requestId;
@@ -2216,14 +2104,12 @@ export class BridgeGateway {
         state.asyncRun = asyncRunInfo;
       }
 
-      // Start the harness run with the observer hook registry and planning objective as input
       const handle = this.harness.run({
         requestId,
-        inputText: planningObjective,
+        inputText: goal,
         tier: 'planner',
         sessionKey,
         workingDir,
-        hookRegistry,
       });
 
       this.streamRunEvents(requestId, handle, (result) => {
@@ -2289,7 +2175,7 @@ export class BridgeGateway {
 
     const { requestId, goal } = sessionAsyncRun;
 
-    // Mark as cancelled at session level so the observer hook can detect it
+    // Mark as cancelled at session level
     this.harness.cancelSessionAsyncRun?.(sessionKey);
     this.harness.clearSessionAsyncRun?.(sessionKey);
 
@@ -2360,130 +2246,6 @@ export class BridgeGateway {
     });
   }
 
-  // =========================================================================
-  // Observer Command Handlers
-  // =========================================================================
-
-  private handleWatcherStatus(connectionId: string, state: ConnectionState): void {
-    const sessionKey = state.sessionKey;
-    if (!sessionKey) {
-      this.sendAuthResponse(connectionId, 'watcher_status', { success: false, error: 'No active session' });
-      return;
-    }
-    const result = this.harness.watcherStatus?.(sessionKey) ?? { error: 'Not supported' };
-    this.sendAuthResponse(connectionId, 'watcher_status', { success: true, ...result });
-  }
-
-  private handleWatcherContext(connectionId: string, state: ConnectionState): void {
-    const sessionKey = state.sessionKey;
-    if (!sessionKey) {
-      this.sendAuthResponse(connectionId, 'watcher_context', { success: false, error: 'No active session' });
-      return;
-    }
-    const result = this.harness.watcherContext?.(sessionKey) ?? { error: 'Not supported' };
-    this.sendAuthResponse(connectionId, 'watcher_context', { success: true, ...result });
-  }
-
-  private async handleWatcherSearch(connectionId: string, data: Record<string, unknown> | undefined, state: ConnectionState): Promise<void> {
-    const sessionKey = state.sessionKey;
-    if (!sessionKey) {
-      this.sendAuthResponse(connectionId, 'watcher_search', { success: false, error: 'No active session' });
-      return;
-    }
-    const query = typeof data?.query === 'string' ? data.query : '';
-    if (!query) {
-      this.sendAuthResponse(connectionId, 'watcher_search', { success: false, error: 'Missing query' });
-      return;
-    }
-    const result = await this.harness.watcherSearch?.(sessionKey, query) ?? { error: 'Not supported' };
-    this.sendAuthResponse(connectionId, 'watcher_search', { success: true, ...result });
-  }
-
-  private async handleWatcherDecisions(connectionId: string, state: ConnectionState): Promise<void> {
-    const sessionKey = state.sessionKey;
-    if (!sessionKey) {
-      this.sendAuthResponse(connectionId, 'watcher_decisions', { success: false, error: 'No active session' });
-      return;
-    }
-    const result = await this.harness.watcherDecisions?.(sessionKey) ?? { error: 'Not supported' };
-    this.sendAuthResponse(connectionId, 'watcher_decisions', { success: true, ...result });
-  }
-
-  private async handleWatcherInspect(connectionId: string, data: Record<string, unknown> | undefined, state: ConnectionState): Promise<void> {
-    const sessionKey = state.sessionKey;
-    if (!sessionKey) {
-      this.sendAuthResponse(connectionId, 'watcher_inspect', { success: false, error: 'No active session' });
-      return;
-    }
-    const id = typeof data?.id === 'string' ? data.id : '';
-    if (!id) {
-      this.sendAuthResponse(connectionId, 'watcher_inspect', { success: false, error: 'Missing decision id' });
-      return;
-    }
-    const result = await this.harness.watcherInspect?.(sessionKey, id) ?? { error: 'Not supported' };
-    this.sendAuthResponse(connectionId, 'watcher_inspect', { success: true, ...result });
-  }
-
-  private handleWatcherMemory(connectionId: string, state: ConnectionState): void {
-    const sessionKey = state.sessionKey;
-    if (!sessionKey) {
-      this.sendAuthResponse(connectionId, 'watcher_memory', { success: false, error: 'No active session' });
-      return;
-    }
-    const result = this.harness.watcherMemory?.(sessionKey) ?? { error: 'Not supported' };
-    this.sendAuthResponse(connectionId, 'watcher_memory', { success: true, ...result });
-  }
-
-  private handleWatcherFocus(connectionId: string, data: Record<string, unknown> | undefined, state: ConnectionState): void {
-    const sessionKey = state.sessionKey;
-    if (!sessionKey) {
-      this.sendAuthResponse(connectionId, 'watcher_focus', { success: false, error: 'No active session' });
-      return;
-    }
-    const topic = typeof data?.topic === 'string' ? data.topic : '';
-    if (!topic) {
-      this.sendAuthResponse(connectionId, 'watcher_focus', { success: false, error: 'Missing topic' });
-      return;
-    }
-    const result = this.harness.watcherFocus?.(sessionKey, topic) ?? { error: 'Not supported' };
-    this.sendAuthResponse(connectionId, 'watcher_focus', { success: true, ...result });
-  }
-
-  private handleWatcherDefocus(connectionId: string, state: ConnectionState): void {
-    const sessionKey = state.sessionKey;
-    if (!sessionKey) {
-      this.sendAuthResponse(connectionId, 'watcher_defocus', { success: false, error: 'No active session' });
-      return;
-    }
-    const result = this.harness.watcherDefocus?.(sessionKey) ?? { error: 'Not supported' };
-    this.sendAuthResponse(connectionId, 'watcher_defocus', { success: true, ...result });
-  }
-
-  private handleWatcherReanchor(connectionId: string, data: Record<string, unknown> | undefined, state: ConnectionState): void {
-    const sessionKey = state.sessionKey;
-    if (!sessionKey) {
-      this.sendAuthResponse(connectionId, 'watcher_reanchor', { success: false, error: 'No active session' });
-      return;
-    }
-    const goal = typeof data?.goal === 'string' ? data.goal : '';
-    if (!goal) {
-      this.sendAuthResponse(connectionId, 'watcher_reanchor', { success: false, error: 'Missing goal' });
-      return;
-    }
-    const result = this.harness.watcherReanchor?.(sessionKey, goal) ?? { error: 'Not supported' };
-    this.sendAuthResponse(connectionId, 'watcher_reanchor', { success: true, ...result });
-  }
-
-  private handleWatcherSummarize(connectionId: string, state: ConnectionState): void {
-    const sessionKey = state.sessionKey;
-    if (!sessionKey) {
-      this.sendAuthResponse(connectionId, 'watcher_summarize', { success: false, error: 'No active session' });
-      return;
-    }
-    const result = this.harness.watcherSummarize?.(sessionKey) ?? { error: 'Not supported' };
-    this.sendAuthResponse(connectionId, 'watcher_summarize', { success: true, ...result });
-  }
-
   private streamRunEvents(
     requestId: string,
     handle: AgentRunHandle,
@@ -2543,7 +2305,7 @@ export class BridgeGateway {
   private getOrCreateConnectionState(connectionId: string): ConnectionState {
     const existing = this.connections.get(connectionId);
     if (existing) return existing;
-    const state: ConnectionState = { sessionKey: null, lastSessionKey: null, workingDir: null, activeRequestId: null, planMode: false, asyncRun: null };
+    const state: ConnectionState = { sessionKey: null, lastSessionKey: null, workingDir: null, activeRequestId: null, asyncRun: null };
     this.connections.set(connectionId, state);
     return state;
   }
