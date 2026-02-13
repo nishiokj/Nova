@@ -3,6 +3,39 @@ import type { Session, FilterCounts, FilterType } from '../domain/models'
 import { fetchAPI, type ExportResponse, type GraphDSession, type GraphDMessage } from '../lib/api'
 import { mapGraphDSession, parseJSONL } from '../lib/mappers'
 
+/** Keep last occurrence per key (last row = most recently updated). */
+function dedup<T>(items: T[], key: (item: T) => string): T[] {
+  const seen = new Map<string, T>()
+  for (const item of items) seen.set(key(item), item)
+  return Array.from(seen.values())
+}
+
+interface ControlPlaneMessage {
+  id: number
+  role: string
+  content: string
+  requestId: string | null
+  createdAt: string | null
+  metadata: unknown
+}
+
+/** Fetch messages for a single session via the control-plane API. */
+async function fetchSessionMessages(sessionKey: string): Promise<GraphDMessage[]> {
+  const res = await fetchAPI<{ messages: ControlPlaneMessage[] }>(
+    `/control-plane/sessions/${encodeURIComponent(sessionKey)}/messages`
+  )
+  return (res.messages ?? []).map((m, i) => ({
+    id: m.id ?? i,
+    session_key: sessionKey,
+    message_index: i,
+    role: m.role,
+    content: m.content,
+    request_id: m.requestId,
+    created_at: m.createdAt ? Math.floor(new Date(m.createdAt).getTime() / 1000) : 0,
+    metadata_json: m.metadata ? JSON.stringify(m.metadata) : null,
+  }))
+}
+
 type FetchState = 'idle' | 'loading' | 'success' | 'error'
 
 interface UseSessionsResult {
@@ -20,11 +53,13 @@ export function useSessions(pollInterval = 2000): UseSessionsResult {
   const [state, setState] = useState<FetchState>('idle')
   const [error, setError] = useState<string | null>(null)
   const [loadedMessageSessions, setLoadedMessageSessions] = useState<Set<string>>(new Set())
+  const loadedRef = useRef<Set<string>>(new Set())
   const isFirstFetch = useRef(true)
   const rawSessionsRef = useRef<GraphDSession[]>([])
+  // Cache of already-fetched messages, keyed by session_key
+  const messagesCache = useRef<Map<string, GraphDMessage[]>>(new Map())
 
   const fetchSessions = useCallback(async () => {
-    // Only show loading on first fetch
     if (isFirstFetch.current) {
       setState('loading')
       isFirstFetch.current = false
@@ -32,53 +67,34 @@ export function useSessions(pollInterval = 2000): UseSessionsResult {
     setError(null)
 
     try {
-      // First, fetch only sessions (lightweight)
       const sessionsResponse = await fetchAPI<ExportResponse>('/export?table=sessions')
-      const rawSessions = parseJSONL<GraphDSession>(sessionsResponse.data)
+      const rawSessions = dedup(parseJSONL<GraphDSession>(sessionsResponse.data), s => s.session_key)
       rawSessionsRef.current = rawSessions
 
-      // Check if any sessions are active - if so, also fetch messages for them
-      const activeSessions = rawSessions.filter(s => s.status === 'active')
-      let messagesBySession = new Map<string, GraphDMessage[]>()
+      // For genuinely active sessions, refresh their messages in parallel
+      const now = Date.now() / 1000
+      const staleThreshold = 5 * 60
+      const activeSessions = rawSessions.filter(s =>
+        s.status === 'active' && (now - s.last_accessed_at) < staleThreshold
+      )
 
       if (activeSessions.length > 0) {
-        // Fetch messages only for active sessions via separate queries
-        // For now, we'll still fetch all messages but only map active ones initially
-        const messagesResponse = await fetchAPI<ExportResponse>('/export?table=conversation_messages').catch(() => ({ data: '' }))
-        const rawMessages = parseJSONL<GraphDMessage>(messagesResponse.data)
-
-        // Group messages by session_key
-        for (const msg of rawMessages) {
-          if (!messagesBySession.has(msg.session_key)) {
-            messagesBySession.set(msg.session_key, [])
-          }
-          messagesBySession.get(msg.session_key)!.push(msg)
-        }
-
-        // Sort messages within each session by message_index
-        for (const msgs of messagesBySession.values()) {
-          msgs.sort((a, b) => a.message_index - b.message_index)
-        }
-
-        // Mark active sessions as having loaded messages
-        setLoadedMessageSessions(prev => {
-          const next = new Set(prev)
-          for (const s of activeSessions) {
-            next.add(s.session_key)
-          }
-          return next
+        const fetches = activeSessions.map(async (s) => {
+          try {
+            const msgs = await fetchSessionMessages(s.session_key)
+            messagesCache.current.set(s.session_key, msgs)
+            loadedRef.current.add(s.session_key)
+          } catch { /* individual failures are fine */ }
         })
+        await Promise.all(fetches)
+        setLoadedMessageSessions(new Set(loadedRef.current))
       }
 
       const mappedSessions = rawSessions
         .map((raw) => {
-          // Only include messages for active sessions or previously loaded ones
-          const isActive = raw.status === 'active'
-          const wasLoaded = loadedMessageSessions.has(raw.session_key)
-          const msgs = (isActive || wasLoaded) ? messagesBySession.get(raw.session_key) ?? [] : []
+          const msgs = messagesCache.current.get(raw.session_key) ?? []
           return mapGraphDSession(raw, msgs)
         })
-        // Sort by createdAt descending (newest first)
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
 
       setSessions(mappedSessions)
@@ -87,43 +103,32 @@ export function useSessions(pollInterval = 2000): UseSessionsResult {
       setError(err instanceof Error ? err.message : 'Unknown error')
       setState('error')
     }
-  }, [loadedMessageSessions])
+  }, [])
 
   // Lazy load messages for a specific session when expanded
   const loadSessionMessages = useCallback(async (sessionId: string) => {
-    if (loadedMessageSessions.has(sessionId)) return
+    if (loadedRef.current.has(sessionId)) return
 
     try {
-      const messagesResponse = await fetchAPI<ExportResponse>('/export?table=conversation_messages')
-      const rawMessages = parseJSONL<GraphDMessage>(messagesResponse.data)
+      const msgs = await fetchSessionMessages(sessionId)
+      messagesCache.current.set(sessionId, msgs)
 
-      // Filter to just this session's messages
-      const sessionMessages = rawMessages
-        .filter(m => m.session_key === sessionId)
-        .sort((a, b) => a.message_index - b.message_index)
-
-      // Find the raw session data
       const rawSession = rawSessionsRef.current.find(s => s.session_key === sessionId)
       if (!rawSession) return
 
-      // Remap the session with messages
-      const updatedSession = mapGraphDSession(rawSession, sessionMessages)
+      const updatedSession = mapGraphDSession(rawSession, msgs)
 
       setSessions(prev =>
         prev.map(s => s.id === sessionId ? updatedSession : s)
       )
 
-      setLoadedMessageSessions(prev => {
-        const next = new Set(prev)
-        next.add(sessionId)
-        return next
-      })
+      loadedRef.current.add(sessionId)
+      setLoadedMessageSessions(new Set(loadedRef.current))
     } catch {
       // Silent fail - messages are optional enhancement
     }
-  }, [loadedMessageSessions])
+  }, [])
 
-  // Check if any session has running requests (for auto-polling)
   const hasRunningRequests = useMemo(() => {
     return sessions.some((s) => s.insights.requestsRunning > 0 || s.state === 'active')
   }, [sessions])
@@ -133,7 +138,7 @@ export function useSessions(pollInterval = 2000): UseSessionsResult {
     fetchSessions()
   }, [fetchSessions])
 
-  // Auto-poll ONLY when there are running requests
+  // Auto-poll when there are running requests
   useEffect(() => {
     if (pollInterval > 0 && hasRunningRequests) {
       const interval = setInterval(fetchSessions, pollInterval)

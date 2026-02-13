@@ -30,6 +30,31 @@ function loadJsonEnv(name, fallback) {
   }
 }
 
+function asNonEmptyString(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeModelBindings(bindings, label) {
+  if (!bindings || typeof bindings !== 'object' || Array.isArray(bindings)) {
+    throw new Error(`${label} must be an object with model_provider + model`);
+  }
+  const model = asNonEmptyString(bindings.model);
+  const provider =
+    asNonEmptyString(bindings.model_provider) ?? asNonEmptyString(bindings.provider);
+  if (!provider || !model) {
+    throw new Error(
+      `${label} must include non-empty model_provider (or provider) and model`,
+    );
+  }
+  return {
+    ...bindings,
+    model_provider: provider,
+    model,
+  };
+}
+
 async function loadSdk() {
   try {
     return await import('@agentlab/sdk');
@@ -53,7 +78,9 @@ function createExperimentBuilder(
     sandboxImage,
     baselineBindings,
     treatmentBindings,
-    providerEnvMap,
+    trialTimeoutMs,
+    providerDbPathFromHost,
+    providerMasterKeyPathFromHost,
   },
 ) {
   const { ExperimentBuilder, Metric } = sdk;
@@ -87,17 +114,45 @@ function createExperimentBuilder(
         '/workspace',
         '--config',
         '/harness/config/defaults.json',
-        '--provider-env',
-        providerEnvMap,
+        '--timeout-ms',
+        String(trialTimeoutMs),
       ],
       { integrationLevel: 'sdk_full' },
     )
-    .harnessEnvFromHost(['OPENAI_API_KEY'])
+    .harnessControlPlane('file', '/state/lab_control.json')
+    .harnessEnv({ HOME: '/state' })
     .benchmark({
       policy: {
         task_model: 'independent',
         scoring_lifecycle: 'predict_then_score',
         evaluator_mode: 'custom',
+        required_evidence_classes: ['trial_output_ref'],
+      },
+      adapter: {
+        command: ['bun', 'scripts/agentlab/run_cli.ts', 'benchmark-adapter'],
+        manifest: {
+          schema_version: 'benchmark_adapter_manifest_v1',
+          adapter_id: 'jesus_swebench_lite_adapter',
+          adapter_version: '1.0.0',
+          benchmark: {
+            name: 'swebench_lite_curated',
+            version: 'lite',
+            split: 'test',
+            source: 'SWE-bench Lite curated task set',
+            license: 'SWE-bench dataset terms',
+          },
+          execution_mode: 'predict_then_score',
+          record_schemas: {
+            prediction: 'benchmark_prediction_record_v1',
+            score: 'benchmark_score_record_v1',
+          },
+          evaluator: {
+            name: 'jesus_swebench_custom_eval',
+            version: '1.0.0',
+            mode: 'custom',
+            command: ['bun', 'scripts/agentlab/run_cli.ts', 'benchmark-adapter'],
+          },
+        },
       },
     })
     .sanitizationProfile('hermetic_functional_v2')
@@ -131,6 +186,29 @@ function createExperimentBuilder(
     .networkMode('full', ['api.openai.com'])
     .sandboxImage(sandboxImage);
 
+  builder.harnessHostFileStaging([
+    {
+      source_from_host: providerDbPathFromHost,
+      destination_path: '/state/.graphd/graphd.db',
+      required: true,
+    },
+    {
+      source_from_host: `${providerDbPathFromHost}-wal`,
+      destination_path: '/state/.graphd/graphd.db-wal',
+      required: false,
+    },
+    {
+      source_from_host: `${providerDbPathFromHost}-shm`,
+      destination_path: '/state/.graphd/graphd.db-shm',
+      required: false,
+    },
+    {
+      source_from_host: providerMasterKeyPathFromHost,
+      destination_path: '/state/.config/rex/master.key',
+      required: true,
+    },
+  ]);
+
   return builder;
 }
 
@@ -149,7 +227,18 @@ async function main() {
       image: { type: 'string', default: process.env.AGENTLAB_SANDBOX_IMAGE || 'rex-harness:swebench-lite-v1' },
       id: { type: 'string', default: 'swebench_lite_sdk_single_container' },
       name: { type: 'string', default: 'SWE-bench Lite SDK Single-Container' },
-      'provider-env': { type: 'string', default: 'openai=OPENAI_API_KEY' },
+      'provider-db-path': {
+        type: 'string',
+        default: process.env.AGENTLAB_PROVIDER_DB_PATH || '~/.graphd/graphd.db',
+      },
+      'provider-master-key-path': {
+        type: 'string',
+        default: process.env.AGENTLAB_PROVIDER_MASTER_KEY_PATH || '~/.config/rex/master.key',
+      },
+      'timeout-ms': {
+        type: 'string',
+        default: process.env.AGENTLAB_TRIAL_TIMEOUT_MS || '600000',
+      },
     },
     allowPositionals: false,
   });
@@ -163,16 +252,23 @@ async function main() {
   mkdirSync(dirname(experimentAbs), { recursive: true });
 
   const datasetLimit = parsePositiveInt(values.limit, '--limit');
+  const trialTimeoutMs = parsePositiveInt(values['timeout-ms'], '--timeout-ms');
   const sdk = await loadSdk();
 
-  const baselineBindings = loadJsonEnv('AGENTLAB_BASELINE_BINDINGS_JSON', {
-    model_provider: 'openai',
-    model: 'gpt-4o-mini',
-  });
-  const treatmentBindings = loadJsonEnv('AGENTLAB_TREATMENT_BINDINGS_JSON', {
-    model_provider: 'openai',
-    model: 'gpt-4.1-mini',
-  });
+  const baselineBindings = normalizeModelBindings(
+    loadJsonEnv('AGENTLAB_BASELINE_BINDINGS_JSON', {
+      model_provider: 'z.ai-coder',
+      model: 'glm-5',
+    }),
+    'AGENTLAB_BASELINE_BINDINGS_JSON',
+  );
+  const treatmentBindings = normalizeModelBindings(
+    loadJsonEnv('AGENTLAB_TREATMENT_BINDINGS_JSON', {
+      model_provider: 'z.ai-coder',
+      model: 'glm-5',
+    }),
+    'AGENTLAB_TREATMENT_BINDINGS_JSON',
+  );
 
   const datasetRelFromExperimentDir = relative(dirname(experimentAbs), datasetAbs);
   const builder = createExperimentBuilder(sdk, {
@@ -183,7 +279,9 @@ async function main() {
     sandboxImage: values.image,
     baselineBindings,
     treatmentBindings,
-    providerEnvMap: values['provider-env'],
+    trialTimeoutMs,
+    providerDbPathFromHost: values['provider-db-path'],
+    providerMasterKeyPathFromHost: values['provider-master-key-path'],
   });
 
   const spec = builder.build();
@@ -195,7 +293,14 @@ async function main() {
   console.log(`Wrote experiment: ${experimentAbs}`);
   console.log(`Dataset: ${datasetAbs}`);
   console.log(`Sandbox image: ${values.image}`);
+  console.log(`Per-trial timeout ms: ${trialTimeoutMs}`);
   console.log(`Harness command: ${JSON.stringify(spec.runtime.harness.command)}`);
+  console.log(
+    `Provider DB source: ${values['provider-db-path']}`,
+  );
+  console.log(
+    `Provider master key source: ${values['provider-master-key-path']}`,
+  );
 }
 
 main().catch((error) => {

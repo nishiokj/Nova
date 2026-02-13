@@ -35,13 +35,6 @@ const DoneOutputSchema = z.object({
   awaitingUserInput: z.literal(false),
 }).strict();
 
-const AwaitingUserInputOutputSchema = z.object({
-  action: z.literal('done'),
-  response: z.string(),
-  goalStateReached: z.literal(false),
-  awaitingUserInput: z.literal(true),
-}).strict();
-
 const ContinueOutputSchema = z.object({
   action: z.literal('continue'),
   response: z.string(),
@@ -55,7 +48,6 @@ const ContinueOutputSchema = z.object({
  */
 export const AgentActionOutputSchema = z.union([
   DoneOutputSchema,
-  AwaitingUserInputOutputSchema,
   ContinueOutputSchema,
 ]);
 
@@ -64,7 +56,6 @@ export const AgentActionOutputSchema = z.union([
  */
 export const GoalDrivenOutputSchema = z.union([
   DoneOutputSchema.extend({ work_done: z.string() }).strict(),
-  AwaitingUserInputOutputSchema.extend({ work_done: z.string() }).strict(),
   ContinueOutputSchema.extend({ work_done: z.string() }).strict(),
 ]);
 
@@ -114,13 +105,6 @@ export const ExplorerOutputSchema = z.union([
     os: z.string(),
     artifacts: z.array(ArtifactSchema).describe('Semantic code artifacts extracted from source files'),
   }).strict(),
-  AwaitingUserInputOutputSchema.extend({
-    packageManagers: z.array(z.string()),
-    frameworks: z.array(z.string()),
-    languages: z.array(z.string()),
-    os: z.string(),
-    artifacts: z.array(ArtifactSchema).describe('Semantic code artifacts extracted from source files'),
-  }).strict(),
   ContinueOutputSchema.extend({
     packageManagers: z.array(z.string()),
     frameworks: z.array(z.string()),
@@ -152,10 +136,6 @@ export const RuntimeScriptOutputSchema = z.union([
     goal: z.string(),
     workItems: z.array(WorkItemOutputSchema),
   }).strict(),
-  AwaitingUserInputOutputSchema.extend({
-    goal: z.string(),
-    workItems: z.array(WorkItemOutputSchema),
-  }).strict(),
   ContinueOutputSchema.extend({
     goal: z.string(),
     workItems: z.array(WorkItemOutputSchema),
@@ -167,7 +147,6 @@ export const RuntimeScriptOutputSchema = z.union([
  */
 export const PlannerOutputSchema = z.union([
   DoneOutputSchema,
-  AwaitingUserInputOutputSchema,
   ContinueOutputSchema,
 ]);
 
