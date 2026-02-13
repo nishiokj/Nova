@@ -370,13 +370,7 @@ describe('Workflow Handling - Frontend to Backend', () => {
         applied: true,
         templateId: 'template-auth',
         templateName: 'Authentication Workflow',
-        dispatchMetadata: {
-          cockpit_handoff_spec: {
-            goal: 'Setup auth',
-            context: 'Template: Authentication Workflow',
-            workItems: [],
-          },
-        },
+        dispatchMetadata: {},
         metadataPatch: {
           workflow_template_applied: true,
           workflow_template_id: 'template-auth',

@@ -28,14 +28,13 @@ import type { AgentRegistry } from 'agent';
 import { createWorkItem, cloneWorkItemWithDependencies, type WorkItem } from 'work';
 import { createEvent } from 'types';
 import type { LLMRequestConfig, MessageItem } from 'types';
-import { buildLLMRequestConfig, coerceStructuredOutput, profiler } from 'shared';
+import { buildLLMRequestConfig, profiler } from 'shared';
 import {
   assertNever,
   createAgentErrorEvent,
   createBoundsExceededEvent,
   createCadenceAuditEvent,
   createGoalReachedEvent,
-  createHandoffRequestedEvent,
   createWorkItemCompletedEvent,
   createUserInputRequiredEvent,
   type ControlEventType,
@@ -46,8 +45,6 @@ import {
   type ControlEvent,
   type EventFor,
   type ExecutionMetrics,
-  type HandoffSpec,
-  type HandoffDecision,
   type HookContext,
   type PromptAnswerDecision,
   type QualityGateDecision,
@@ -65,11 +62,9 @@ import {
   mapPromptDecisionToStopResult,
   mapCadenceDecisionToStopResult,
   mapAgentErrorDecisionToStopResult,
-  mapHandoffDecisionToStopResult,
   mapWorkItemDecisionToStopResult,
 } from './decision_mappers.js';
 import { createExecutionState, getElapsedMs, nextIteration, updateMetrics, type ExecutionState } from './execution_state.js';
-import { buildPlanContextFromHandoff, writePlanContext } from './plan-context.js';
 
 // --- Types ---
 
@@ -187,8 +182,6 @@ export interface OrchestratorResult {
   error?: string;
   paused: boolean;
   userPrompt?: UserPromptInfo;
-  /** Handoff spec for planning → execution transition */
-  handoffSpec?: HandoffSpec;
   terminationReason: TerminationReason;
   metrics: OrchestratorMetrics;
 }
@@ -203,14 +196,6 @@ export interface OrchestratorLogger {
   error(msg: string, meta?: Record<string, unknown>): void;
 }
 
-/**
- * Plan mode options for read-only exploration.
- */
-export interface PlanModeOptions {
-  enabled: boolean;
-  promptAddendum: string;
-  toolFilter: (tools: string[]) => string[];
-}
 
 /**
  * Result of a termination condition check.
@@ -276,7 +261,6 @@ export class Orchestrator {
   private logger?: OrchestratorLogger;
   private agentRegistry?: AgentRegistry;
   private hooks?: AgentHooks;
-  private planModeOptions?: PlanModeOptions;
   private getModelSelection?: (agentType: string) => ModelSelection | null;
   private hookQueue: InternalHookQueue;
   private activeSessionKey?: string;
@@ -286,8 +270,6 @@ export class Orchestrator {
   private completedWork: Map<string, AgentResult> = new Map();
   private initialWorkId: string = '';
   private workItemContexts: Map<string, ContextWindow> = new Map();
-  private useFreshWorkItemContexts: boolean = false;
-  private handoffBaseContext: ContextWindow | null = null;
 
   // Realign counter to prevent infinite loops when bounds are exceeded
   // After config.maxRealigns, we force termination instead of continuing
@@ -306,7 +288,6 @@ export class Orchestrator {
     logger?: OrchestratorLogger,
     agentRegistry?: AgentRegistry,
     hooks?: AgentHooks,
-    planModeOptions?: PlanModeOptions,
     getModelSelection?: (agentType: string) => ModelSelection | null
   ) {
     this.config = { ...DEFAULT_ORCHESTRATOR_CONFIG, ...config };
@@ -317,7 +298,6 @@ export class Orchestrator {
     this.logger = logger;
     this.agentRegistry = agentRegistry;
     this.hooks = hooks;
-    this.planModeOptions = planModeOptions;
     this.getModelSelection = getModelSelection;
     this.hookQueue = this.createHookQueue();
   }
@@ -333,12 +313,6 @@ export class Orchestrator {
   enqueue(item: WorkItem, semantic?: unknown): string {
     this.workQueue.push(item);
     const hookParams = item.params as { isInternalHook?: boolean } | undefined;
-    if (!hookParams?.isInternalHook && this.useFreshWorkItemContexts && !this.workItemContexts.has(item.workId)) {
-      const seededContext = this.createFreshWorkItemContext();
-      if (seededContext) {
-        this.workItemContexts.set(item.workId, seededContext);
-      }
-    }
     if (!hookParams?.isInternalHook && this.activeSessionKey) {
       this.hookQueue.enqueue({
         type: 'workitem_created',
@@ -524,7 +498,7 @@ export class Orchestrator {
     this.resetExecutionState(context);
 
     const workQueue = this.createWorkQueueAdapter();
-    const seedResult = await this.seedWorkQueueFromGoal({ context, goal, agentType, cwd, workQueue });
+    const seedResult = this.seedWorkQueueFromGoal({ goal, agentType, workQueue });
     const state = createExecutionState(seedResult.initialWorkId);
 
     this.log('info', 'Starting orchestration', { goal: seedResult.goal, agentType });
@@ -557,8 +531,6 @@ export class Orchestrator {
     this.workQueue = [];
     this.completedWork.clear();
     this.workItemContexts.clear();
-    this.useFreshWorkItemContexts = false;
-    this.handoffBaseContext = null;
     this.activeSessionKey = context.sessionKey;
   }
 
@@ -574,47 +546,16 @@ export class Orchestrator {
     };
   }
 
-  private async seedWorkQueueFromGoal(params: {
-    context: ContextWindow;
+  private seedWorkQueueFromGoal(params: {
     goal: string;
     agentType: string;
-    cwd: string;
     workQueue: WorkQueueAdapter;
-  }): Promise<{ goal: string; initialWorkId: string; seededFromHandoff: boolean }> {
-    const { context, agentType, cwd, workQueue } = params;
-    let resolvedGoal = params.goal;
-    let seededFromHandoff = false;
-
-    const goalSpec = this.coerceHandoffSpec(resolvedGoal);
-    if (goalSpec) {
-      const planGoal = goalSpec.goal.trim().length > 0 ? goalSpec.goal : 'Execute handoff';
-      resolvedGoal = planGoal;
-      const workItems = this.parseHandoffSpec(goalSpec, planGoal);
-      if (workItems.length > 0) {
-        await this.initHandoffContext({ context, goal: planGoal, handoffSpec: goalSpec, cwd });
-        this.log('info', 'Executing handoff spec payload', {
-          itemCount: workItems.length,
-          items: workItems.map(item => ({ id: item.workId, objective: item.objective.slice(0, 50) })),
-        });
-        if (this.planModeOptions?.enabled) {
-          this.log('info', 'Disabling plan mode after handoff payload', { workId: workItems[0].workId });
-          this.planModeOptions = undefined;
-        }
-        for (const item of workItems) {
-          workQueue.enqueue(item);
-        }
-        this.initialWorkId = workItems[0].workId;
-        seededFromHandoff = true;
-      }
-    }
-
-    if (!seededFromHandoff) {
-      const initialItem = this.createWorkItem(resolvedGoal, agentType);
-      this.initialWorkId = initialItem.workId;
-      workQueue.enqueue(initialItem);
-    }
-
-    return { goal: resolvedGoal, initialWorkId: this.initialWorkId, seededFromHandoff };
+  }): { goal: string; initialWorkId: string } {
+    const { goal, agentType, workQueue } = params;
+    const initialItem = this.createWorkItem(goal, agentType);
+    this.initialWorkId = initialItem.workId;
+    workQueue.enqueue(initialItem);
+    return { goal, initialWorkId: this.initialWorkId };
   }
 
   private createTerminationPolicy(): TerminationPolicy {
@@ -917,7 +858,6 @@ export class Orchestrator {
                 toolErrors: [],
                 terminationReason: 'goal_state_reached',
                 needsUserInput: false,
-                needsHandoff: false,
                 isRefusal: false,
                 localContext: context,
               } as AgentResult,
@@ -1300,21 +1240,7 @@ export class Orchestrator {
   ): Agent | null {
     // NO FALLBACK: If the requested agent type doesn't exist, fail explicitly
     if (!this.agentRegistry?.has(agentType)) return null;
-    let config = this.agentRegistry.getConfig(agentType);
-
-    // Apply plan mode modifications if enabled
-    if (this.planModeOptions?.enabled) {
-      const isPlanner = agentType === 'planner';
-      config = {
-        ...config,
-        systemPrompt: isPlanner
-          ? config.systemPrompt + this.planModeOptions.promptAddendum
-          : config.systemPrompt,
-        tools: isPlanner
-          ? this.planModeOptions.toolFilter(config.tools)
-          : config.tools,
-      };
-    }
+    const config = this.agentRegistry.getConfig(agentType);
 
     // Build LLM config from model selection (source of truth) + agent's llmParams
     const llmConfig = this.buildLlmConfig(config.llmParams, agentType);
@@ -1496,99 +1422,6 @@ export class Orchestrator {
     context.addAgentResultContext(result);
   }
 
-  private createFreshWorkItemContext(): ContextWindow | null {
-    if (!this.handoffBaseContext) return null;
-    return ContextWindow.deserialize(this.handoffBaseContext.serialize());
-  }
-
-  private extractHandoffSpecCandidate(value: unknown): Record<string, unknown> | null {
-    if (!value) return null;
-    if (typeof value === 'string') {
-      const parsed = coerceStructuredOutput(value);
-      if (!parsed) return null;
-      return this.extractHandoffSpecCandidate(parsed);
-    }
-    if (typeof value !== 'object' || Array.isArray(value)) return null;
-    const record = value as Record<string, unknown>;
-    const nested = record.handoffSpec ?? record.handoff_spec;
-    if (nested) {
-      return this.extractHandoffSpecCandidate(nested);
-    }
-    return record;
-  }
-
-  private extractHandoffWorkItems(record: Record<string, unknown>): unknown[] | null {
-    const direct = record.workItems;
-    if (Array.isArray(direct)) return direct;
-    const underscored = record.work_items;
-    if (Array.isArray(underscored)) return underscored;
-    const compact = record.workitems;
-    if (Array.isArray(compact)) return compact;
-    return null;
-  }
-
-  private coerceHandoffSpec(spec: HandoffSpec | string, fallbackGoal = ''): HandoffSpec | null {
-    const candidate = this.extractHandoffSpecCandidate(spec);
-    if (!candidate) return null;
-    const workItems = this.extractHandoffWorkItems(candidate);
-    if (!workItems || workItems.length === 0) return null;
-
-    const rawGoal = typeof candidate.goal === 'string' ? candidate.goal.trim() : '';
-    const goal = rawGoal.length > 0 ? rawGoal : fallbackGoal;
-    const context = typeof candidate.context === 'string' ? candidate.context : '';
-
-    return {
-      goal,
-      context,
-      workItems: workItems as HandoffSpec['workItems'],
-    };
-  }
-
-  private buildHandoffBaseContext(
-    context: ContextWindow,
-    planContextPath?: string,
-    handoffSpec?: HandoffSpec | null
-  ): ContextWindow {
-    const base = new ContextWindow(context.sessionKey, context.maxTokens);
-    const notes: string[] = [];
-    if (planContextPath) {
-      notes.push(`Plan context: ${planContextPath}. Read this before starting your work item.`);
-    }
-    if (handoffSpec?.context) {
-      notes.push(`Planning notes: ${handoffSpec.context}`);
-    }
-    if (notes.length > 0) {
-      base.addMessage('system', notes.join('\n'));
-    }
-    return base;
-  }
-
-  private async initHandoffContext(params: {
-    context: ContextWindow;
-    goal: string;
-    handoffSpec: HandoffSpec | string;
-    cwd: string;
-  }): Promise<void> {
-    const { context, goal, handoffSpec, cwd } = params;
-    const parsedSpec = this.coerceHandoffSpec(handoffSpec, goal);
-    let planContextPath: string | undefined;
-
-    if (parsedSpec) {
-      try {
-        const planContext = buildPlanContextFromHandoff(context.sessionKey, goal, parsedSpec);
-        planContextPath = await writePlanContext(cwd, planContext);
-        this.log('info', 'Plan context written', { path: planContextPath });
-      } catch (err) {
-        this.log('warning', 'Plan context write failed', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    this.handoffBaseContext = this.buildHandoffBaseContext(context, planContextPath, parsedSpec);
-    this.useFreshWorkItemContexts = true;
-  }
-
   private createResult(
     partial: Partial<OrchestratorResult> & { terminationReason: TerminationReason; metrics: OrchestratorMetrics }
   ): OrchestratorResult {
@@ -1598,7 +1431,6 @@ export class Orchestrator {
       error: partial.error,
       paused: partial.paused ?? false,
       userPrompt: partial.userPrompt,
-      handoffSpec: partial.handoffSpec,
       terminationReason: partial.terminationReason,
       metrics: partial.metrics,
     };
@@ -1665,7 +1497,6 @@ export class Orchestrator {
       toolErrors: [],
       terminationReason: 'agent_error',
       needsUserInput: false,
-      needsHandoff: false,
       isRefusal: false,
       localContext: context,
     };
@@ -1911,15 +1742,6 @@ export class Orchestrator {
           undefined
         );
       }
-      case 'handoff_requested': {
-        if (!agentResult?.handoffSpec) return null;
-        return createHandoffRequestedEvent(
-          context.sessionKey,
-          workId,
-          agentResult.handoffSpec,
-          response
-        );
-      }
       case 'user_stopped':
       case 'observer_stopped':
       case 'observer_work_item_stopped':
@@ -2034,10 +1856,6 @@ export class Orchestrator {
           const hookResult = await this.runControlHooks<'agent_error'>(event, hookContext, context, runtime);
           return this.resolveHookDecision(event.type, hookResult, mapAgentErrorDecisionToStopResult);
         }
-        case 'handoff_requested': {
-          const hookResult = await this.runControlHooks<'handoff_requested'>(event, hookContext, context, runtime);
-          return this.resolveHookDecision(event.type, hookResult, mapHandoffDecisionToStopResult);
-        }
         case 'work_item_completed': {
           const hookResult = await this.runControlHooks<'work_item_completed'>(event, hookContext, context, runtime);
           return this.resolveHookDecision(event.type, hookResult, mapWorkItemDecisionToStopResult);
@@ -2140,20 +1958,6 @@ export class Orchestrator {
       this.enqueue(newItem);
       this.completedWork.delete(this.initialWorkId);
       this.initialWorkId = newItem.workId;
-      return true;
-    }
-
-    // For handoff_requested: the observer rejected the plan.
-    // Inject the rejection message into context so the planner can revise.
-    // Re-enqueue the work item so it can execute again with fresh agent state.
-    if (terminationReason === 'handoff_requested') {
-      if (stopResult.systemMessage) {
-        context.addMessage('system', stopResult.systemMessage);
-      }
-      // The rejection goes as a user message
-      context.addMessage('user', reason);
-      // Re-enqueue the work item (do NOT create a new one or reset initialWorkId)
-      // The planner will revise the plan on the same work item
       return true;
     }
 
@@ -2348,84 +2152,7 @@ export class Orchestrator {
           response: result.response ?? '',
           paused: true,
           userPrompt: result.userPrompt,
-          handoffSpec: result.handoffSpec,
           terminationReason: 'user_input_required',
-          metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
-        }),
-        shouldContinue: false,
-      };
-    }
-
-    // ============================================================
-    // TERMINAL: Handoff requested
-    // ============================================================
-    if (result.needsHandoff && result.handoffSpec) {
-      // Check for interruption - user message takes precedence over handoff
-      if (runtime?.checkInterruption?.()) {
-        this.log('info', 'Interruption preempts handoff request', { iteration, workId });
-        this.mergeAgentResultContext(context, workId, result);
-        return this.createInterruptionResult(agentType);
-      }
-      const specLength = JSON.stringify(result.handoffSpec).length;
-      this.log('info', 'Handoff requested - checking approval', { workId, specLength });
-      this.mergeAgentResultContext(context, workId, result);
-
-      // Call stop hook for approval (observer in async mode, or no-op in sync mode)
-      const stopResult = await this.callStopHook(
-        context,
-        'handoff_requested',
-        result.response ?? '',
-        iteration,
-        agentType,
-        runtime,
-        undefined,
-        result,
-        workId,
-        item.objective,
-        totalLlmCalls,
-        totalToolCalls
-      );
-
-      // If stop hook blocks, the observer rejected the plan - planner should revise
-      if (this.handleStopHookBlock(stopResult, context, agentType, iteration, 'handoff_requested')) {
-        // Re-enqueue the same work item so the planner can revise
-        return { terminal: null, shouldContinue: true, itemToRequeue: item };
-      }
-
-      // Stop hook allowed - check if observer approved (has stop hook registered)
-      // If a stop hook is registered and returned 'allow', the observer approved the plan
-      // Parse the spec and enqueue work items
-      if (stopResult && stopResult.decision === 'allow') {
-        const workItems = this.parseHandoffSpec(result.handoffSpec, goal);
-        if (workItems.length > 0) {
-          await this.initHandoffContext({ context, goal, handoffSpec: result.handoffSpec, cwd });
-          this.log('info', 'Handoff approved - enqueueing work items', {
-            workId,
-            itemCount: workItems.length,
-            items: workItems.map(w => ({ id: w.workId, objective: w.objective.slice(0, 50) })),
-          });
-          if (this.planModeOptions?.enabled) {
-            this.log('info', 'Disabling plan mode after handoff approval', { workId });
-            this.planModeOptions = undefined;
-          }
-          for (const item of workItems) {
-            this.enqueue(item);
-          }
-          // Continue the loop to execute the queued work
-          return { terminal: null, shouldContinue: true };
-        }
-        // Empty spec or parse failed - log warning and pause for user
-        this.log('warning', 'Handoff spec parse returned no work items', { workId });
-      }
-
-      // No stop hook or parse failed - pause for user approval (sync mode)
-      return {
-        terminal: this.createResult({
-          success: true,
-          response: result.response ?? 'Planning complete. Ready to execute.',
-          paused: true,
-          handoffSpec: result.handoffSpec,
-          terminationReason: 'handoff_requested',
           metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
         }),
         shouldContinue: false,
@@ -2856,112 +2583,4 @@ export class Orchestrator {
     return { terminal: null, shouldContinue: false };
   }
 
-  /**
-   * Parse a handoffSpec into WorkItems.
-   * Returns empty array on parse failure.
-   *
-   * Uses two-pass approach to remap planner's semantic IDs to generated workIds:
-   * 1. Create all work items and build ID mapping (planner ID → workId)
-   * 2. Rewrite dependencies using the ID map
-   */
-  private parseHandoffSpec(spec: HandoffSpec | string, sessionGoal: string): WorkItem[] {
-    try {
-      const candidate = this.extractHandoffSpecCandidate(spec);
-      if (!candidate) {
-        this.log('warning', 'Handoff spec is not an object', { specPreview: typeof spec === 'string' ? spec.slice(0, 200) : undefined });
-        return [];
-      }
-
-      const workItemsRaw = this.extractHandoffWorkItems(candidate);
-      if (!workItemsRaw || workItemsRaw.length === 0) {
-        this.log('warning', 'Handoff spec missing workItems array', { specPreview: typeof spec === 'string' ? spec.slice(0, 200) : undefined });
-        return [];
-      }
-
-      const rawGoal = typeof candidate.goal === 'string' ? candidate.goal.trim() : '';
-      const planGoal = rawGoal.length > 0 ? rawGoal : sessionGoal;
-
-      // Phase 1: Create work items and build ID mapping
-      const idMap = new Map<string, string>();  // planner ID → generated workId
-      const normalizedItems: Array<{ spec: Record<string, unknown>; item: WorkItem }> = [];
-
-      for (let index = 0; index < workItemsRaw.length; index++) {
-        const raw = workItemsRaw[index];
-        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
-        const specItem = raw as Record<string, unknown>;
-
-        const objective = typeof specItem.objective === 'string' && specItem.objective.trim().length > 0
-          ? specItem.objective.trim()
-          : typeof specItem.delta === 'string' && specItem.delta.trim().length > 0
-            ? specItem.delta.trim()
-            : typeof specItem.id === 'string' && specItem.id.trim().length > 0
-              ? `Work item ${specItem.id.trim()}`
-              : `Work item ${index + 1}`;
-
-        const delta = typeof specItem.delta === 'string' && specItem.delta.trim().length > 0
-          ? specItem.delta.trim()
-          : undefined;
-
-        const agent = typeof specItem.agent === 'string' && specItem.agent.trim().length > 0
-          ? specItem.agent.trim()
-          : 'standard';
-
-        const domain = typeof specItem.domain === 'string' && specItem.domain.trim().length > 0
-          ? specItem.domain.trim()
-          : undefined;
-
-        const dependencies = Array.isArray(specItem.dependencies)
-          ? specItem.dependencies.filter((dep): dep is string => typeof dep === 'string' && dep.trim().length > 0)
-          : [];
-
-        const targetPaths = Array.isArray(specItem.targetPaths)
-          ? specItem.targetPaths.filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
-          : [];
-
-        const workItem = createWorkItem({
-          goal: planGoal,
-          objective,
-          delta,
-          agent,
-          domain,
-          dependencies: [],  // Resolved in phase 2
-          targetPaths,
-          stepNum: index + 1,
-        });
-
-        // Map planner's semantic ID to generated workId
-        if (typeof specItem.id === 'string' && specItem.id.trim().length > 0) {
-          idMap.set(specItem.id.trim(), workItem.workId);
-        }
-
-        normalizedItems.push({ spec: { ...specItem, dependencies }, item: workItem });
-      }
-
-      const items = normalizedItems.map(entry => entry.item);
-
-      // Phase 2: Resolve dependencies using ID map (WorkItem is immutable, so clone with new deps)
-      for (let i = 0; i < normalizedItems.length; i++) {
-        const originalDeps = normalizedItems[i].spec.dependencies as string[] | undefined;
-        if (originalDeps && originalDeps.length > 0) {
-          const resolvedDeps = this.resolveWorkItemDependencies(originalDeps, idMap, 'handoff_spec');
-          if (resolvedDeps.length > 0) {
-            items[i] = cloneWorkItemWithDependencies(items[i], resolvedDeps);
-          }
-        }
-      }
-
-      this.log('info', 'Parsed handoff spec with ID remapping', {
-        itemCount: items.length,
-        idMappings: Array.from(idMap.entries()).map(([k, v]) => `${k} → ${v}`),
-      });
-
-      return items;
-    } catch (err) {
-      this.log('error', 'Failed to parse handoff spec', {
-        error: err instanceof Error ? err.message : String(err),
-        specPreview: typeof spec === 'string' ? spec.slice(0, 200) : JSON.stringify(spec).slice(0, 200),
-      });
-      return [];
-    }
-  }
 }

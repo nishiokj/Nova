@@ -400,7 +400,6 @@ function parseItemBlocks(body: string): ContextItem[] {
 const STATIC_SYSTEM_SUFFIX = `RESPONSE ACTIONS:
 - action: "done" + goalStateReached: true → objective complete
 - action: "continue" → progress made, more work needed
-- action: "handoff" → transition to execution mode (planning agents only)
 - Use PromptUser tool when you need user input
 
 Do not repeat identical tool calls.`;

@@ -22,7 +22,6 @@ import {
   type InternalHookContext,
   getAgentPrompt,
   buildAgentConfig,
-  getPlanningPromptAddendum,
 } from 'agent';
 import os from 'os';
 import { execSync } from 'child_process';
@@ -1584,14 +1583,12 @@ export class AgentHarness {
       sessionKey,
       workingDir,
       context: supplementalContextRaw,
-      handoffSpec,
-      planMode,
       hookRegistry,
     } = params;
     const supplementalContext = typeof supplementalContextRaw === 'string'
       ? supplementalContextRaw.trim()
       : '';
-    profiler.instant('harness.run', 'harness', 'p', { requestId, tier: requestedTier, planMode });
+    profiler.instant('harness.run', 'harness', 'p', { requestId, tier: requestedTier });
     const runId = requestId;
     const eventQueue = new AsyncEventQueue();
     // Create emit early so harness-level events (status, response, error, user_prompt)
@@ -1672,94 +1669,20 @@ export class AgentHarness {
     // Determine execution parameters based on paused state
     let goal: string;
     let effectiveAgentType: AgentType;
-    let effectivePlanMode: boolean | undefined;
     let effectiveWorkingDir: string;
-    let contextWindow = store.getContext();
-    let clearContextForHandoff = false;
+    const contextWindow = store.getContext();
 
     if (isResume) {
       // This is a resume - inputText is the answer to a pending question
-      const normalizedAnswer = inputText.trim().toLowerCase();
-      const isSpecReview = paused.userPromptType === 'spec_review';
-      const isHandoffApproval = paused.userPromptType === 'handoff_approval';
-      const isPlanModeExit = paused.userPromptType === 'plan_mode_exit';
-
-      const userApproved = (
-        normalizedAnswer.startsWith('yes') ||
-        normalizedAnswer === '0' ||
-        normalizedAnswer === 'y' ||
-        normalizedAnswer === 'true'
-      );
-
-      const userHandoff = normalizedAnswer === 'handoff';
-
-      // Handle handoff from plan mode - user says "handoff" to approve spec
-      if (paused.handoffSpec && userHandoff) {
-        const handoffSpecText = JSON.stringify(paused.handoffSpec, null, 2);
-        // User approved spec - clear context and execute with handoffSpec
-        this.logger.info('User approved spec review, executing with spec', {
-          sessionKey,
-          specLength: handoffSpecText.length,
-        });
-        contextWindow = store.clearContext();
-        store.clearPausedState();
-        goal = handoffSpecText;
-        effectiveAgentType = 'standard';
-        effectivePlanMode = false;
-        effectiveWorkingDir = workingDir ?? paused.workingDir;
-        clearContextForHandoff = true;
-      }
-      // Handle legacy handoff_approval (orchestrator-level approval)
-      else if (isHandoffApproval && paused.handoffSpec && userApproved) {
-        const handoffSpecText = JSON.stringify(paused.handoffSpec, null, 2);
-        // User approved handoff - clear context and execute with handoffSpec
-        this.logger.info('User approved handoff, executing with spec', {
-          sessionKey,
-          specLength: handoffSpecText.length,
-        });
-        contextWindow = store.clearContext();
-        store.clearPausedState();
-        goal = handoffSpecText;
-        effectiveAgentType = 'standard';
-        effectivePlanMode = false;
-        effectiveWorkingDir = workingDir ?? paused.workingDir;
-        clearContextForHandoff = true;
-      } else {
-        // Normal resume or rejection - add answer to context and continue
-        contextWindow.addMessage('user', inputText);
-
-        if ((isSpecReview || isHandoffApproval) && !userApproved) {
-          contextWindow.addMessage(
-            'system',
-            'User rejected the plan. Revise based on their feedback and ask for approval again when ready.'
-          );
-        } else if (isPlanModeExit) {
-          if (userApproved) {
-            contextWindow.addMessage(
-              'system',
-              'User approved handoff. Set action: "handoff" with your complete implementation spec in handoffSpec (structured object). The system will automatically clear context and start execution with your spec.'
-            );
-          } else {
-            contextWindow.addMessage(
-              'system',
-              'User rejected the handoff and wants you to continue planning. Revise your plan based on their feedback and ask for approval again when ready.'
-            );
-          }
-        }
-
-        goal = paused.goal;
-        effectiveAgentType = paused.agentType as AgentType;
-        effectivePlanMode = isPlanModeExit && userApproved ? false : paused.planMode;
-        effectiveWorkingDir = workingDir ?? paused.workingDir;
-      }
+      contextWindow.addMessage('user', inputText);
+      goal = paused.goal;
+      effectiveAgentType = paused.agentType as AgentType;
+      effectiveWorkingDir = workingDir ?? paused.workingDir;
     } else {
       // Fresh run - inputText is the goal
       contextWindow.addMessage('user', inputText);
-      goal = (handoffSpec && typeof handoffSpec === 'object' && !Array.isArray(handoffSpec) && Object.keys(handoffSpec).length > 0)
-        ? JSON.stringify({ handoffSpec })
-        : inputText;
+      goal = inputText;
       effectiveAgentType = requestedTier || 'standard';
-      effectivePlanMode = planMode;
       effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
     }
 
@@ -1783,7 +1706,7 @@ export class AgentHarness {
       }
     }
 
-    const userMessagePersisted = clearContextForHandoff ? false : this.persistUserMessage(sessionKey, requestId, inputText);
+    const userMessagePersisted = this.persistUserMessage(sessionKey, requestId, inputText);
 
     // NOTE: Agent events (agent_message, tool_call, etc.) are forwarded directly
     // from EventBus to BusServer via BusServer's direct subscription. Harness-level
@@ -1865,7 +1788,6 @@ export class AgentHarness {
           llmAdapter,
           effectiveAgentType,
           effectiveWorkingDir,
-          effectivePlanMode,
           store,
           isResume ? undefined : hookRegistry
         );
@@ -2084,14 +2006,6 @@ export class AgentHarness {
       this.logger.warning('GraphD persist failed', { error: String(error) });
     }
   }
-  /**
-   * Filter tools for plan mode - removes write/edit capabilities.
-   */
-  private filterPlanModeTools(tools: string[]): string[] {
-    const writeTools = new Set(['Write', 'Edit', 'BatchEdit']);
-    return tools.filter(tool => !writeTools.has(tool));
-  }
-
   private isToolResult(value: unknown): value is ToolResult {
     if (!value || typeof value !== 'object') {
       return false;
@@ -2404,19 +2318,11 @@ export class AgentHarness {
     llm: ReturnType<typeof createAdapter>,
     agentType: AgentType = 'standard',
     workingDir?: string,
-    planMode?: boolean,
     store?: SessionStore,
     hookRegistry?: HookRegistry
   ): Promise<AgentRunResult> {
     const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
     const hooks = this.createAgentHooks(context.sessionKey, requestId, effectiveWorkingDir, emit);
-
-    // Build plan mode options if enabled
-    const planModeOptions = planMode ? {
-      enabled: true,
-      promptAddendum: getPlanningPromptAddendum(),
-      toolFilter: (tools: string[]) => this.filterPlanModeTools(tools),
-    } : undefined;
 
     // Create closure for per-agent-type model selection lookup
     // NO FALLBACK: Each agent type must have an explicit model selection
@@ -2480,7 +2386,6 @@ export class AgentHarness {
       logger: this.logger,
       agentRegistry: this.agentRegistry,
       hooks,
-      planModeOptions,
       getModelSelection,
       context,
       goal,
@@ -2490,24 +2395,13 @@ export class AgentHarness {
     });
     profiler.asyncEnd(`orchestrator:${agentType}`, asyncId, 'orchestrator', { toolCalls: result.metrics.totalToolCalls, paused: result.paused });
 
-    // Handle handoff: store handoffSpec for approval in paused state
-    if (result.handoffSpec && store) {
-      const handoffSpecText = JSON.stringify(result.handoffSpec);
-      this.logger.info('Handoff requested, pausing for user approval', {
-        sessionKey: context.sessionKey,
-        specLength: handoffSpecText.length,
-      });
-    }
-
     // Store paused state for resume, or clear it on completion
     if (result.paused) {
       store?.setPausedState({
         goal,
         agentType,
         workingDir: effectiveWorkingDir,
-        planMode,
         userPromptType: result.userPrompt?.questionType,
-        handoffSpec: result.handoffSpec,
       });
     } else {
       store?.clearPausedState();

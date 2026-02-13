@@ -23,7 +23,6 @@ import type {
   BoundsDecision,
   PromptAnswerDecision,
   CadenceDecision,
-  HandoffDecision,
   Hook,
   HookContext,
   HookOutcome,
@@ -132,7 +131,6 @@ function createMockAgentRegistry(
     outputSchema: getOutputSchemaJson('agent_action'),
   };
 
-  // Planner uses planner_output schema which supports handoff action
   const plannerConfig: AgentConfig = {
     ...defaultConfig,
     type: 'planner',
@@ -165,7 +163,6 @@ interface LLMResponseBuilder {
   goalReached(response?: string): LLMResponse;
   continueWork(response?: string): LLMResponse;
   awaitingUserInput(question: string): LLMResponse;
-  handoff(workItems: WorkItemSpec[]): LLMResponse;
   observerAnswer(text: string): LLMResponse;
   observerRealign(systemMessage: string, newGoal?: string): LLMResponse;
   observerSplit(workItems: WorkItemSpec[]): LLMResponse;
@@ -190,7 +187,6 @@ function createLLMResponseBuilder(): LLMResponseBuilder {
         action: 'done',
         response,
         goalStateReached: true,
-        handoffSpec: null,
         awaitingUserInput: false,
       }));
     },
@@ -200,7 +196,6 @@ function createLLMResponseBuilder(): LLMResponseBuilder {
         action: 'continue',
         response,
         goalStateReached: false,
-        handoffSpec: null,
         awaitingUserInput: false,
       }));
     },
@@ -210,33 +205,7 @@ function createLLMResponseBuilder(): LLMResponseBuilder {
         action: 'done',
         response: question,
         goalStateReached: false,
-        handoffSpec: null,
         awaitingUserInput: true,
-      }));
-    },
-
-    handoff(workItems: WorkItemSpec[]): LLMResponse {
-      // Ensure work items have required 'delta' field for schema validation
-      const normalizedWorkItems = workItems.map(item => ({
-        id: item.id,
-        objective: item.objective ?? item.goal,
-        delta: (item as Record<string, unknown>).delta ?? item.objective ?? item.goal,
-        agent: item.agent ?? 'standard',
-        domain: (item as Record<string, unknown>).domain,
-        dependencies: item.dependencies,
-        targetPaths: (item as Record<string, unknown>).targetPaths as string[] | undefined,
-      }));
-
-      return base(JSON.stringify({
-        action: 'handoff',
-        response: 'Plan created, ready for handoff.',
-        goalStateReached: true,
-        handoffSpec: {
-          goal: 'Execute the planned work',
-          context: 'This plan addresses the user request.',
-          workItems: normalizedWorkItems,
-        },
-        awaitingUserInput: false,
       }));
     },
 
@@ -469,7 +438,6 @@ function createTestOrchestrator(params: {
     undefined, // logger
     agentRegistry,
     undefined, // hooks
-    undefined, // planModeOptions
     getModelSelection
   );
 
@@ -754,103 +722,6 @@ describe('Orchestrator', () => {
       // Should still pause for user
       expect(result.terminationReason).toBe('user_input_required');
       expect(result.paused).toBe(true);
-    });
-  });
-
-  describe('Handoff Flow', () => {
-    it('should return handoff spec when planner completes', async () => {
-      const responseBuilder = createLLMResponseBuilder();
-      const { orchestrator, context, runtime } = createTestOrchestrator({
-        llmResponses: [
-          responseBuilder.handoff([
-            {
-              id: 'work-1',
-              goal: 'Implement feature',
-              objective: 'Add the new feature to src/feature.ts',
-              agent: 'standard',
-            },
-          ]),
-        ],
-      });
-
-      const result = await orchestrator.execute(context, 'Plan feature', 'planner', TEST_CWD, runtime);
-
-      expect(result.terminationReason).toBe('handoff_requested');
-      expect(result.handoffSpec).toBeDefined();
-      expect(result.handoffSpec?.workItems).toHaveLength(1);
-    });
-
-    // TODO: Test needs investigation - handoff rejection flow
-    it.skip('should allow observer to reject handoff', async () => {
-      const hookRegistry = createHookRegistry();
-
-      hookRegistry.register(
-        createTestHook<ControlEvent & { type: 'handoff_requested' }, HandoffDecision>(
-          'test-handoff-reject',
-          'handoff_requested',
-          () => ({
-            action: 'reject',
-            feedback: 'Missing error handling in the plan.',
-          })
-        ),
-        { source: 'test', protocolId: getTestProtocolId() }
-      );
-
-      const responseBuilder = createLLMResponseBuilder();
-      const { orchestrator, context, runtime } = createTestOrchestrator({
-        llmResponses: [
-          responseBuilder.handoff([
-            { id: 'work-1', goal: 'Bad plan', objective: 'Incomplete work', agent: 'standard' },
-          ]),
-          responseBuilder.handoff([
-            {
-              id: 'work-2',
-              goal: 'Better plan',
-              objective: 'Complete work with error handling',
-              agent: 'standard',
-            },
-          ]),
-        ],
-        hookRegistry,
-      });
-
-      const result = await orchestrator.execute(context, 'Create plan', 'planner', TEST_CWD, runtime);
-
-      // Observer rejected first plan, should continue to revised plan
-      // Note: The exact behavior depends on implementation details
-      expect(result.handoffSpec).toBeDefined();
-    });
-
-    // TODO: Test needs investigation - handoff modification flow
-    it.skip('should allow observer to modify handoff', async () => {
-      const hookRegistry = createHookRegistry();
-
-      hookRegistry.register(
-        createTestHook<ControlEvent & { type: 'handoff_requested' }, HandoffDecision>(
-          'test-handoff-modify',
-          'handoff_requested',
-          () => ({
-            action: 'modify',
-            changes: 'Add logging to each work item.',
-          })
-        ),
-        { source: 'test', protocolId: getTestProtocolId() }
-      );
-
-      const responseBuilder = createLLMResponseBuilder();
-      const { orchestrator, context, runtime } = createTestOrchestrator({
-        llmResponses: [
-          responseBuilder.handoff([
-            { id: 'work-1', goal: 'Original', objective: 'Do work', agent: 'standard' },
-          ]),
-        ],
-        hookRegistry,
-      });
-
-      const result = await orchestrator.execute(context, 'Create plan', 'planner', TEST_CWD, runtime);
-
-      // Should have modification feedback in context
-      expect(result.handoffSpec).toBeDefined();
     });
   });
 
@@ -1470,7 +1341,6 @@ describe('Orchestrator', () => {
             action: 'invalid_action',
             response: 'test',
             goalStateReached: true,
-            handoffSpec: null,
             awaitingUserInput: false,
           }),
           stopReason: 'end_turn',
@@ -1507,7 +1377,6 @@ describe('Orchestrator', () => {
         TEST_REQUEST_ID,
         undefined,
         agentRegistry,
-        undefined,
         undefined,
         () => ({ provider: 'test', model: 'test-model' })
       );

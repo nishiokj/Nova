@@ -7,8 +7,6 @@
 
 import fs from 'fs/promises';
 import path from 'path';
-import type { HandoffSpec } from 'protocol';
-
 export interface PlanContextData {
   /** Plan ID for correlation */
   planId: string;
@@ -170,38 +168,3 @@ export async function writePlanContext(
   return filePath;
 }
 
-/**
- * Build a minimal plan context from a handoff spec.
- */
-export function buildPlanContextFromHandoff(
-  sessionId: string,
-  goal: string,
-  handoffSpec: HandoffSpec
-): PlanContextData {
-  const planId = `plan-${Date.now().toString(36)}`;
-  const workItems = handoffSpec.workItems ?? [];
-  const keyFiles: KeyFile[] = [];
-
-  for (const item of workItems) {
-    if (!item.targetPaths) continue;
-    for (const filePath of item.targetPaths) {
-      if (!keyFiles.find(f => f.path === filePath)) {
-        keyFiles.push({
-          path: filePath,
-          purpose: `Target for: ${item.objective ?? 'unknown'}`,
-        });
-      }
-    }
-  }
-
-  return {
-    planId,
-    sessionId,
-    goal: handoffSpec.goal ?? goal,
-    keyFiles,
-    constraints: [],
-    qaDecisions: [],
-    notes: handoffSpec.context || undefined,
-    createdAt: new Date().toISOString(),
-  };
-}

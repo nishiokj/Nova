@@ -3,7 +3,7 @@ import type { AgentEvent, StructuredOutputSchema, ToolResult, ArtifactItem, LLMR
 import type { ContextWindow } from 'context';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
-import type { HandoffSpec, TerminationReason } from 'protocol';
+import type { TerminationReason } from 'protocol';
 
 // Re-export stop hook types from protocol (moved there to avoid circular deps)
 export type {
@@ -167,17 +167,6 @@ export type AgentResult =
       terminationReason: 'user_input_required';
       needsUserInput: true;
       userPrompt: UserPromptInfo;
-      needsHandoff?: false;
-      handoffSpec?: undefined;
-      isRefusal: false;
-      rateLimitInfo?: undefined;
-    })
-  | (AgentResultBase & {
-      terminationReason: 'handoff_requested';
-      needsUserInput: false;
-      userPrompt?: undefined;
-      needsHandoff: true;
-      handoffSpec: HandoffSpec;
       isRefusal: false;
       rateLimitInfo?: undefined;
     })
@@ -185,8 +174,6 @@ export type AgentResult =
       terminationReason: 'refusal';
       needsUserInput: false;
       userPrompt?: undefined;
-      needsHandoff?: false;
-      handoffSpec?: undefined;
       isRefusal: true;
       rateLimitInfo?: undefined;
     })
@@ -194,17 +181,13 @@ export type AgentResult =
       terminationReason: 'rate_limit';
       needsUserInput: false;
       userPrompt?: undefined;
-      needsHandoff?: false;
-      handoffSpec?: undefined;
       isRefusal: false;
       rateLimitInfo: AgentRateLimitInfo;
     })
   | (AgentResultBase & {
-      terminationReason: Exclude<TerminationReason, 'user_input_required' | 'handoff_requested' | 'refusal' | 'rate_limit'>;
+      terminationReason: Exclude<TerminationReason, 'user_input_required' | 'refusal' | 'rate_limit'>;
       needsUserInput: false;
       userPrompt?: undefined;
-      needsHandoff?: false;
-      handoffSpec?: undefined;
       isRefusal: false;
       rateLimitInfo?: undefined;
     });
@@ -216,10 +199,6 @@ export type MutableAgentResult = AgentResultBase & {
   needsUserInput: boolean;
   /** User prompt info (if needsUserInput) */
   userPrompt?: UserPromptInfo;
-  /** Whether handoff is requested (planning → execution transition) */
-  needsHandoff?: boolean;
-  /** Handoff spec (if needsHandoff) */
-  handoffSpec?: HandoffSpec;
   /** Whether LLM refused to complete */
   isRefusal: boolean;
   /** Rate limit info (if terminationReason is 'rate_limit') */

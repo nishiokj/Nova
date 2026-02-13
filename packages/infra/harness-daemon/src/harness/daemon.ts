@@ -9,7 +9,7 @@ import { pathToFileURL } from 'url';
 import path from 'path';
 import { existsSync } from 'fs';
 import { createHarnessFromEnv, type AgentHarness } from './harness.js';
-import { BusServer, WsBridgeServer } from 'comms-bus';
+import { BusServer } from 'comms-bus';
 import { BridgeGateway } from './bridge_gateway.js';
 import { createAuthServiceFromConfig, type AuthService } from './auth_service.js';
 import { translateAgentEvent } from './event_translator.js';
@@ -17,10 +17,6 @@ import { translateAgentEvent } from './event_translator.js';
 export interface HarnessDaemonOptions {
   host?: string;
   port?: number;
-  /** WebSocket port for browser dashboard access (default: port + 1, e.g., 9556) */
-  wsPort?: number;
-  /** Enable WebSocket bridge (default: true). Disable for TCP-only deployments. */
-  enableWsBridge?: boolean;
   workingDir?: string;
   configPath?: string;
   /** Idle timeout in ms before daemon shuts down when no clients connected. Set to 0 to disable. */
@@ -50,15 +46,12 @@ function detectProjectRoot(startDir: string): string {
 export class HarnessDaemon {
   private readonly host: string;
   private readonly port: number;
-  private readonly wsPort: number;
-  private readonly enableWsBridge: boolean;
   private readonly workingDir: string;
   private readonly configPath?: string;
   private readonly idleTimeoutMs: number;
   private readonly dangerousMode: boolean;
   private harness: AgentHarness | null = null;
   private bus: BusServer | null = null;
-  private wsBridge: WsBridgeServer | null = null;
   private gateway: BridgeGateway | null = null;
   private authService: AuthService | null = null;
   private authConfig: { enabled: boolean; host: string; port: number; google_client_id?: string; google_redirect_uri?: string; master_key_path?: string; graphd_db_path?: string } | null = null;
@@ -69,8 +62,6 @@ export class HarnessDaemon {
     this.host = options.host ?? '127.0.0.1';
     const rawPort = options.port ?? 9555;
     this.port = Number.isFinite(rawPort) ? rawPort : 9555;
-    this.wsPort = options.wsPort ?? this.port + 1; // Default: 9556
-    this.enableWsBridge = options.enableWsBridge ?? true;
     this.workingDir = options.workingDir ?? detectProjectRoot(process.cwd());
     this.configPath = options.configPath;
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
@@ -149,40 +140,12 @@ export class HarnessDaemon {
       this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir, this.authService);
     }
 
-    // Start WebSocket bridge for browser dashboard access
-    if (this.enableWsBridge && !this.wsBridge) {
-      this.wsBridge = new WsBridgeServer({
-        host: this.host,
-        port: this.wsPort,
-        busHost: this.host,
-        busPort: this.port,
-        eventBus: this.harness.getEventBus(),
-        eventTranslator: translateAgentEvent,
-      });
-    }
-
-    const [tcpAddress, wsAddress] = await Promise.all([
-      this.bus.start(),
-      this.wsBridge ? this.wsBridge.start() : Promise.resolve(null),
-    ]);
-
-    if (wsAddress) {
-      console.log(`[harness-daemon] WebSocket bridge listening on ws://${wsAddress.host}:${wsAddress.port}`);
-    } else {
-      console.log('[harness-daemon] WebSocket bridge disabled');
-    }
-
-    return tcpAddress;
+    return this.bus.start();
   }
 
   async stop(): Promise<void> {
     this.cancelIdleTimer();
     this.shutdownRequested = true;
-
-    if (this.wsBridge) {
-      await this.wsBridge.stop();
-      this.wsBridge = null;
-    }
 
     if (this.bus) {
       await this.bus.stop();
@@ -237,10 +200,6 @@ function parseDaemonArgs(): HarnessDaemonOptions {
       console.log('[harness-daemon] WARNING: Running in dangerous mode - all permission checks disabled');
     } else if (arg === '--port' && i + 1 < args.length) {
       options.port = parseInt(args[++i], 10);
-    } else if (arg === '--ws-port' && i + 1 < args.length) {
-      options.wsPort = parseInt(args[++i], 10);
-    } else if (arg === '--no-ws') {
-      options.enableWsBridge = false;
     } else if (arg === '--host' && i + 1 < args.length) {
       options.host = args[++i];
     } else if (arg === '--config' && i + 1 < args.length) {

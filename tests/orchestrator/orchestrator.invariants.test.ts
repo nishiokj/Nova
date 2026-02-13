@@ -190,7 +190,6 @@ describe('Invariant: Work Item Lifecycle', () => {
       undefined,
       createAgentRegistry(),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -248,7 +247,6 @@ describe('Invariant: Work Item Lifecycle', () => {
       undefined,
       createAgentRegistry(),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -291,7 +289,6 @@ describe('Invariant: Metric Monotonicity', () => {
       undefined,
       createAgentRegistry({ budget: { maxIterations: 3, maxToolCalls: 50, maxDurationMs: 30_000 } }),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -325,7 +322,6 @@ describe('Invariant: Metric Monotonicity', () => {
       undefined,
       createAgentRegistry({ budget: { maxIterations: 2, maxToolCalls: 50, maxDurationMs: 30_000 } }),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -340,116 +336,7 @@ describe('Invariant: Metric Monotonicity', () => {
 });
 
 // ============================================
-// INVARIANT 3: DEPENDENCY ORDERING
-// ============================================
-
-describe('Invariant: Dependency Ordering', () => {
-  beforeEach(() => resetProviderCircuit());
-
-  it('work item with dependency waits for dependency to complete', async () => {
-    // This is a metamorphic test: reordering work items shouldn't change final result
-    // if dependencies are respected
-
-    // Create orchestrator with handoff that creates dependent work items
-    const handoffResponse: LLMResponse = {
-      content: JSON.stringify({
-        action: 'handoff',
-        response: 'Handing off to workers',
-        goalStateReached: true,
-        handoffSpec: {
-          goal: 'Execute plan',
-          context: 'Test context',
-          workItems: [
-            { id: 'A', objective: 'Do A first', delta: 'Do A first', agent: 'standard', dependencies: [] },
-            { id: 'B', objective: 'Do B after A', delta: 'Do B after A', agent: 'standard', dependencies: ['A'] },
-          ],
-        },
-        awaitingUserInput: false,
-      }),
-      stopReason: 'end_turn',
-      usage: { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
-      toolCalls: [],
-    };
-
-    let callCount = 0;
-    const completionOrder: string[] = [];
-    const llm = {
-      respond: async () => {
-        callCount++;
-        if (callCount === 1) return handoffResponse;
-        // Worker responses
-        const workerId = callCount === 2 ? 'A' : 'B';
-        completionOrder.push(workerId);
-        return {
-          content: JSON.stringify({
-            action: 'done',
-            response: `Completed ${workerId}`,
-            goalStateReached: true,
-            awaitingUserInput: false,
-          }),
-          stopReason: 'end_turn',
-          usage: { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
-          toolCalls: [],
-        };
-      },
-      stream: async function* () {
-        const resp = await (this as LLMAdapter).respond([], {});
-        yield resp.content;
-        return resp;
-      },
-      getConfig: () => ({ provider: 'test', model: 'test' }),
-      capabilities: () => ({ supportsStreaming: true, supportsToolUse: true, supportsStructuredOutput: true }),
-    } as unknown as LLMAdapter;
-
-    // Create hook that approves handoff
-    const registry = createHookRegistry();
-    registry.register({
-      id: 'approve-handoff',
-      event: 'handoff_requested',
-      policy: { kind: 'fire_and_forget' },
-      criticality: 'non_critical',
-      idempotency: 'idempotent',
-      priority: 100,
-      timeoutMs: 5000,
-      run: async () => ({
-        kind: 'success',
-        decision: { action: 'approve' } as const,
-        patches: [],
-      }),
-    }, HOOK_META);
-
-    const plannerRegistry = createAgentRegistry({
-      type: 'planner',
-      outputSchema: getOutputSchemaJson('planner_output'),
-    });
-
-    const orch = new Orchestrator(
-      { maxIterations: 20 },
-      createToolRegistry(),
-      llm,
-      () => {},
-      REQUEST_ID,
-      undefined,
-      plannerRegistry,
-      undefined,
-      undefined,
-      () => getModelSelection()
-    );
-
-    const runtime: OrchestratorRuntime = { hookRegistry: registry };
-    await orch.execute(createContext(), 'Plan with deps', 'planner', CWD, runtime);
-
-    // Invariant: A must complete before B starts
-    const aIndex = completionOrder.indexOf('A');
-    const bIndex = completionOrder.indexOf('B');
-    if (aIndex !== -1 && bIndex !== -1) {
-      expect(aIndex).toBeLessThan(bIndex);
-    }
-  });
-});
-
-// ============================================
-// INVARIANT 4: HOOK INVOCATION
+// INVARIANT 3: HOOK INVOCATION
 // ============================================
 
 describe('Invariant: Hook Invocation', () => {
@@ -488,7 +375,6 @@ describe('Invariant: Hook Invocation', () => {
       undefined,
       createAgentRegistry(),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -498,86 +384,6 @@ describe('Invariant: Hook Invocation', () => {
     // Invariant: hook must be called when goal reached
     expect(hookCalled).toBe(true);
     expect(result.terminationReason).toBe('goal_state_reached');
-  });
-
-  it('work_item_completed hook called for non-terminal completed work items', async () => {
-    const handoffPayload = JSON.stringify({
-      goal: 'Execute plan',
-      context: 'Test context',
-      workItems: [
-        { id: 'A', objective: 'Do A', delta: 'Do A', agent: 'standard', dependencies: [] },
-        { id: 'B', objective: 'Do B', delta: 'Do B', agent: 'standard', dependencies: [] },
-      ],
-    });
-
-    let callCount = 0;
-    const completedResponses: string[] = [];
-    const llm = {
-      respond: async () => {
-        callCount++;
-        return {
-          content: JSON.stringify({
-            action: 'done',
-            response: callCount === 1 ? 'Completed A' : 'Completed B',
-            goalStateReached: true,
-            awaitingUserInput: false,
-          }),
-          stopReason: 'end_turn',
-          usage: { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
-          toolCalls: [],
-        };
-      },
-      stream: async function* () {
-        const resp = await (this as LLMAdapter).respond({
-          messages: [],
-          llm: { provider: 'test', model: 'test' },
-        });
-        yield resp.content;
-        return resp;
-      },
-      getConfig: () => ({ provider: 'test', model: 'test' }),
-      capabilities: () => ({ supportsStreaming: true, supportsToolUse: true, supportsStructuredOutput: true }),
-    } as unknown as LLMAdapter;
-
-    const registry = createHookRegistry();
-    registry.register({
-      id: 'workitem-completed-observer',
-      event: 'work_item_completed',
-      policy: { kind: 'fire_and_forget' },
-      criticality: 'non_critical',
-      idempotency: 'idempotent',
-      priority: 100,
-      timeoutMs: 5000,
-      run: async (event) => {
-        completedResponses.push(event.response);
-        return {
-          kind: 'success',
-          decision: { action: 'accept' } as const,
-          patches: [],
-        };
-      },
-    }, HOOK_META);
-
-    const orch = new Orchestrator(
-      { maxIterations: 20 },
-      createToolRegistry(),
-      llm,
-      () => {},
-      REQUEST_ID,
-      undefined,
-      createAgentRegistry(),
-      undefined,
-      undefined,
-      () => getModelSelection()
-    );
-
-    const runtime: OrchestratorRuntime = { hookRegistry: registry };
-    const result = await orch.execute(createContext(), handoffPayload, 'standard', CWD, runtime);
-
-    expect(result.success).toBe(true);
-    expect(completedResponses.length).toBe(2);
-    expect(completedResponses).toContain('Completed A');
-    expect(completedResponses).toContain('Completed B');
   });
 
   it('hook block decision prevents termination and continues loop', async () => {
@@ -645,7 +451,6 @@ describe('Invariant: Hook Invocation', () => {
       undefined,
       createAgentRegistry(),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -705,7 +510,6 @@ describe('Invariant: Realign Limit', () => {
       undefined,
       // Agent with very low budget to force bounds exceeded
       createAgentRegistry({ budget: { maxIterations: 1, maxToolCalls: 1, maxDurationMs: 100 } }),
-      undefined,
       undefined,
       () => getModelSelection()
     );
@@ -801,7 +605,6 @@ describe('Invariant: Deferred Work', () => {
       // Agent with very low budget to trigger bounds_exceeded
       createAgentRegistry({ budget: { maxIterations: 1, maxToolCalls: 1, maxDurationMs: 1000 } }),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -841,7 +644,6 @@ describe('Invariant: Interruption Priority', () => {
       REQUEST_ID,
       undefined,
       createAgentRegistry(),
-      undefined,
       undefined,
       () => getModelSelection()
     );
@@ -891,7 +693,6 @@ describe('Metamorphic Properties', () => {
       undefined,
       createAgentRegistry(),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -915,7 +716,6 @@ describe('Metamorphic Properties', () => {
       undefined,
       createAgentRegistry(),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -927,7 +727,6 @@ describe('Metamorphic Properties', () => {
       REQUEST_ID,
       undefined,
       createAgentRegistry(),
-      undefined,
       undefined,
       () => getModelSelection()
     );
@@ -977,7 +776,6 @@ describe('Bug Hypothesis: Edge Cases', () => {
       undefined,
       createAgentRegistry({ budget: { maxIterations: 2, maxToolCalls: 10, maxDurationMs: 5000 } }),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -1019,7 +817,6 @@ describe('Bug Hypothesis: Edge Cases', () => {
       undefined,
       createAgentRegistry({ budget: { maxIterations: 2, maxToolCalls: 10, maxDurationMs: 5000 } }),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -1056,7 +853,6 @@ describe('Bug Hypothesis: Edge Cases', () => {
       undefined,
       createAgentRegistry(),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -1081,7 +877,6 @@ describe('Bug Hypothesis: Edge Cases', () => {
       REQUEST_ID,
       undefined,
       createAgentRegistry(),
-      undefined,
       undefined,
       () => getModelSelection()
     );
@@ -1116,7 +911,6 @@ describe('Bug Hypothesis: Edge Cases', () => {
       REQUEST_ID,
       undefined,
       createAgentRegistry({ budget: { maxIterations: 2, maxToolCalls: 10, maxDurationMs: 5000 } }),
-      undefined,
       undefined,
       () => getModelSelection()
     );
@@ -1164,7 +958,6 @@ describe('Differential: With vs Without Hooks', () => {
       undefined,
       createAgentRegistry(),
       undefined,
-      undefined,
       () => getModelSelection()
     );
     const result1 = await orch1.execute(createContext(), 'Differential test', 'standard', CWD);
@@ -1178,7 +971,6 @@ describe('Differential: With vs Without Hooks', () => {
       REQUEST_ID,
       undefined,
       createAgentRegistry(),
-      undefined,
       undefined,
       () => getModelSelection()
     );

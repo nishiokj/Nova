@@ -9,7 +9,6 @@ describe('structured_output baseline parsing', () => {
         response: 'done',
         goalStateReached: true,
         awaitingUserInput: false,
-        handoffSpec: null,
       })
     );
 

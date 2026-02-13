@@ -5,26 +5,21 @@
  * Each test targets a named code path or subtle interaction with a clear bug hypothesis.
  *
  * GAP ANALYSIS:
- * 1. Work queue deadlock (unsatisfiable deps -> break at line 880)
- * 2. totalToolCalls bound (per-result check at line 2882, separate from iteration bounds)
- * 3. Deferred work on 'allow' forcing continuation (line 2144: deferredWorkAdded)
- * 4. Handoff rejection -> re-queue same item (itemToRequeue at line 2453)
- * 5. observer_work_item_stopped (line 2586: item marked complete, loop continues)
- * 6. Continuable errors + hook retry (no_action/stagnation at line 2618)
- * 7. Refusal + hook override attempt (line 2499 -- refusal maps to null event, hook can't override)
- * 8. Hard error catch-all vs actionIsContinue bypass (line 2846)
- * 9. Initial work complete + deferred work in queue (line 1162-1172)
- * 10. Block decision without reason (decision='block', reason=undefined -> no-op)
- * 11. Cleanup function runs on error (execute() finally block)
- * 12. Multiple hooks same priority (first decision wins, line 134 in runHooksForEvent)
- * 13. Hook patches mutate state via applyPatches
- * 14. checkStopRequest propagation to agent
- * 15. Handoff spec as string goal (resume scenario)
- * 16. work_item_completed vs goal_state_reached hook events
- * 17. onIteration callback fired each loop
- * 18. Interruption preempts user input / handoff
- * 19. Realign counter reset on split
- * 20. Work item retry via work_item_completed hook
+ * 1. totalToolCalls bound (per-result check at line 2882, separate from iteration bounds)
+ * 2. Deferred work on 'allow' forcing continuation (line 2144: deferredWorkAdded)
+ * 3. observer_work_item_stopped (line 2586: item marked complete, loop continues)
+ * 4. Continuable errors + hook retry (no_action/stagnation at line 2618)
+ * 5. Refusal + hook override attempt (line 2499 -- refusal maps to null event, hook can't override)
+ * 6. Hard error catch-all vs actionIsContinue bypass (line 2846)
+ * 7. Initial work complete + deferred work in queue (line 1162-1172)
+ * 8. Block decision without reason (decision='block', reason=undefined -> no-op)
+ * 9. Cleanup function runs on error (execute() finally block)
+ * 10. Multiple hooks same priority (first decision wins, line 134 in runHooksForEvent)
+ * 11. Hook patches mutate state via applyPatches
+ * 12. checkStopRequest propagation to agent
+ * 13. onIteration callback fired each loop
+ * 14. Interruption preempts user input
+ * 15. Realign counter reset on split
  */
 
 import { ContextWindow } from 'context';
@@ -42,14 +37,10 @@ import type {
   QualityGateDecision,
   BoundsDecision,
   PromptAnswerDecision,
-  HandoffDecision,
   AgentErrorDecision,
   CadenceDecision,
-  WorkItemCompletedDecision,
   Hook,
-  HookContext,
   HookOutcome,
-  WorkItemSpec,
   StatePatch,
 } from 'protocol';
 import { getProtocolId } from 'protocol';
@@ -156,36 +147,19 @@ function baseResponse(content: string): LLMResponse {
 
 function goalReachedResponse(response = 'Done'): LLMResponse {
   return baseResponse(JSON.stringify({
-    action: 'done', response, goalStateReached: true, handoffSpec: null, awaitingUserInput: false,
+    action: 'done', response, goalStateReached: true, awaitingUserInput: false,
   }));
 }
 
 function continueResponse(response = 'Working...'): LLMResponse {
   return baseResponse(JSON.stringify({
-    action: 'continue', response, goalStateReached: false, handoffSpec: null, awaitingUserInput: false,
+    action: 'continue', response, goalStateReached: false, awaitingUserInput: false,
   }));
 }
 
 function userInputResponse(question: string): LLMResponse {
   return baseResponse(JSON.stringify({
-    action: 'done', response: question, goalStateReached: false, handoffSpec: null, awaitingUserInput: true,
-  }));
-}
-
-function handoffResponse(workItems: Array<{ id: string; objective: string; agent?: string; dependencies?: string[] }>): LLMResponse {
-  return baseResponse(JSON.stringify({
-    action: 'handoff',
-    response: 'Plan ready',
-    goalStateReached: true,
-    handoffSpec: {
-      goal: 'Execute plan',
-      context: 'Test context',
-      workItems: workItems.map(w => ({
-        id: w.id, objective: w.objective, delta: w.objective,
-        agent: w.agent ?? 'standard', dependencies: w.dependencies ?? [],
-      })),
-    },
-    awaitingUserInput: false,
+    action: 'done', response: question, goalStateReached: false, awaitingUserInput: true,
   }));
 }
 
@@ -274,7 +248,6 @@ function createOrchestrator(
     undefined,
     createAgentRegistry(agentOverrides),
     undefined,
-    undefined,
     () => getModelSelection(),
   );
 }
@@ -291,34 +264,6 @@ function createRuntime(overrides?: Partial<OrchestratorRuntime>): OrchestratorRu
 // ============================================
 // EDGE CASE TESTS
 // ============================================
-
-describe('Edge Case: Work Queue Deadlock', () => {
-  beforeEach(() => { resetProviderCircuit('test'); resetProviderCircuit('openai-compat'); });
-
-  it('breaks out of loop when all work items have unsatisfiable dependencies', async () => {
-    // Path: line 879-883 -- inProgress.size === 0 && workQueue.hasPending() -> break
-    // Handoff creates item B depending on non-existent "X".
-    // Dep resolution drops unknown deps, so B runs (deps resolved to []).
-    // Test: orchestrator doesn't hang.
-
-    const llm = createStatefulLLM((idx) => {
-      if (idx === 0) return handoffResponse([{ id: 'B', objective: 'Do B', dependencies: ['X'] }]);
-      return goalReachedResponse();
-    });
-
-    const registry = createHookRegistry();
-    registry.register(
-      createHook('approve-handoff', 'handoff_requested', () => ({ action: 'approve' } as HandoffDecision)),
-      HOOK_META,
-    );
-
-    const orch = createOrchestrator({ maxIterations: 10 }, llm);
-    const result = await orch.execute(createContext(), 'Plan', 'planner', CWD, createRuntime({ hookRegistry: registry }));
-
-    expect(result).toBeDefined();
-    expect(result.terminationReason).toBeDefined();
-  });
-});
 
 describe('Edge Case: Deferred Work on Allow Forces Continuation', () => {
   beforeEach(() => { resetProviderCircuit('test'); resetProviderCircuit('openai-compat'); });
@@ -360,39 +305,6 @@ describe('Edge Case: Deferred Work on Allow Forces Continuation', () => {
     if (hookCalls > 0) {
       expect(callCount).toBeGreaterThan(1);
     }
-  });
-});
-
-describe('Edge Case: Handoff Rejection Re-queues Same Item', () => {
-  beforeEach(() => { resetProviderCircuit('test'); resetProviderCircuit('openai-compat'); });
-
-  it('re-enqueues work item when handoff is rejected', async () => {
-    // At line 2453, handleStopHookBlock returns { itemToRequeue: item }.
-    // At line 1057, this is enqueued. The planner gets another chance.
-
-    let planAttempts = 0;
-    const llm = createStatefulLLM((idx) => {
-      planAttempts++;
-      if (planAttempts <= 2) {
-        return handoffResponse([{ id: `w-${planAttempts}`, objective: `Plan v${planAttempts}` }]);
-      }
-      return goalReachedResponse('Revised plan complete');
-    });
-
-    let hookCalls = 0;
-    const registry = createHookRegistry();
-    registry.register(createHook('reject-first', 'handoff_requested', () => {
-      hookCalls++;
-      if (hookCalls === 1) return { action: 'reject', feedback: 'Missing error handling' } as HandoffDecision;
-      return { action: 'approve' } as HandoffDecision;
-    }), HOOK_META);
-
-    const orch = createOrchestrator({ maxIterations: 10 }, llm);
-    const result = await orch.execute(createContext(), 'Plan task', 'planner', CWD, createRuntime({ hookRegistry: registry }));
-
-    expect(hookCalls).toBeGreaterThanOrEqual(1);
-    expect(planAttempts).toBeGreaterThanOrEqual(2);
-    expect(result).toBeDefined();
   });
 });
 
@@ -709,82 +621,6 @@ describe('Edge Case: Stop Request Propagation', () => {
   });
 });
 
-describe('Edge Case: Handoff Spec as String Goal (Resume)', () => {
-  beforeEach(() => { resetProviderCircuit('test'); resetProviderCircuit('openai-compat'); });
-
-  it('seeds work queue from handoff spec passed as goal string', async () => {
-    // At line 636, coerceHandoffSpec tries to parse the goal as a handoff spec.
-    // For resuming execution, the goal IS a JSON handoff spec string.
-
-    let llmCalls = 0;
-    const llm = createStatefulLLM(() => {
-      llmCalls++;
-      return goalReachedResponse(`Worker ${llmCalls} done`);
-    });
-
-    const handoffGoal = JSON.stringify({
-      goal: 'Resume execution',
-      context: 'Resuming from checkpoint',
-      workItems: [
-        { id: 'w1', objective: 'First task', delta: 'First task', agent: 'standard' },
-        { id: 'w2', objective: 'Second task', delta: 'Second task', agent: 'standard', dependencies: ['w1'] },
-      ],
-    });
-
-    const orch = createOrchestrator({ maxIterations: 20 }, llm);
-    const result = await orch.execute(createContext(), handoffGoal, 'standard', CWD, createRuntime());
-
-    expect(result).toBeDefined();
-    expect(llmCalls).toBeGreaterThanOrEqual(2); // Two work items
-    expect(result.terminationReason).toBeDefined();
-  });
-});
-
-describe('Edge Case: Work Item Completed vs Goal Reached Hook Events', () => {
-  beforeEach(() => { resetProviderCircuit('test'); resetProviderCircuit('openai-compat'); });
-
-  it('fires work_item_completed for non-initial items, goal_state_reached for last', async () => {
-    // At line 1075-1116, shouldRunWorkItemHook is true when:
-    //   workId !== state.initialWorkId || workQueue.hasPending() || inProgress.size > 0
-    // Non-initial work items -> work_item_completed event.
-    // Initial work item (when last) -> goal_state_reached event.
-
-    let llmCalls = 0;
-    const llm = createStatefulLLM((idx) => {
-      llmCalls++;
-      if (idx === 0) {
-        return handoffResponse([
-          { id: 'a', objective: 'Task A' },
-          { id: 'b', objective: 'Task B' },
-        ]);
-      }
-      return goalReachedResponse(`Worker ${llmCalls} done`);
-    });
-
-    const hookEvents: string[] = [];
-    const registry = createHookRegistry();
-
-    registry.register(
-      createHook('approve-handoff', 'handoff_requested', () => ({ action: 'approve' } as HandoffDecision)),
-      HOOK_META,
-    );
-    registry.register(createHook('track-work-completed', 'work_item_completed', () => {
-      hookEvents.push('work_item_completed');
-      return { action: 'accept' } as WorkItemCompletedDecision;
-    }), HOOK_META);
-    registry.register(createHook('track-goal-reached', 'goal_state_reached', () => {
-      hookEvents.push('goal_state_reached');
-      return { verdict: 'passed' } as QualityGateDecision;
-    }), HOOK_META);
-
-    const orch = createOrchestrator({ maxIterations: 20 }, llm);
-    const result = await orch.execute(createContext(), 'Plan', 'planner', CWD, createRuntime({ hookRegistry: registry }));
-
-    expect(result).toBeDefined();
-    expect(hookEvents.length).toBeGreaterThan(0);
-  });
-});
-
 describe('Edge Case: onIteration Callback', () => {
   beforeEach(() => { resetProviderCircuit('test'); resetProviderCircuit('openai-compat'); });
 
@@ -856,45 +692,6 @@ describe('Edge Case: Harvest Completed Work on Bounds', () => {
 
     expect(result).toBeDefined();
     expect(result.terminationReason).toBe('max_iterations_exceeded');
-  });
-});
-
-describe('BUG: Empty Handoff Spec Silently Becomes goal_state_reached', () => {
-  beforeEach(() => { resetProviderCircuit('test'); resetProviderCircuit('openai-compat'); });
-
-  it('should recognize handoff action even when workItems is empty', async () => {
-    // BUG: Planner returns action='handoff' with empty workItems[].
-    // Schema validation fails for empty workItems -> lenient parse kicks in ->
-    // sees goalStateReached: true -> terminates as goal_state_reached.
-    // The handoff_requested hook never fires. The planner thinks it delegated work,
-    // but the orchestrator thinks the goal was reached.
-    //
-    // CORRECT behavior: action='handoff' should always be treated as a handoff,
-    // even with empty workItems (should pause or warn, not silently succeed).
-
-    const llm = createStatefulLLM((idx) => {
-      if (idx === 0) {
-        return baseResponse(JSON.stringify({
-          action: 'handoff', response: 'Empty plan', goalStateReached: true,
-          handoffSpec: { goal: 'Nothing', context: 'Empty', workItems: [] },
-          awaitingUserInput: false,
-        }));
-      }
-      return goalReachedResponse('Done');
-    });
-
-    const registry = createHookRegistry();
-    registry.register(
-      createHook('approve-empty', 'handoff_requested', () => ({ action: 'approve' } as HandoffDecision)),
-      HOOK_META,
-    );
-
-    const orch = createOrchestrator({ maxIterations: 10 }, llm);
-    const result = await orch.execute(createContext(), 'Empty handoff', 'planner', CWD, createRuntime({ hookRegistry: registry }));
-
-    expect(result).toBeDefined();
-    // Planner said action='handoff' -- should be treated as handoff, not goal_state_reached
-    expect(result.terminationReason).toBe('handoff_requested');
   });
 });
 
@@ -979,33 +776,6 @@ describe('Edge Case: Interruption Preempts User Input', () => {
   });
 });
 
-describe('Edge Case: Interruption Preempts Handoff', () => {
-  beforeEach(() => { resetProviderCircuit('test'); resetProviderCircuit('openai-compat'); });
-
-  it('user interruption takes priority over handoff_requested', async () => {
-    // At line 2425, if agent requests handoff but there's a pending interruption,
-    // the interruption wins.
-
-    let interruptionChecks = 0;
-    const llm = createStatefulLLM((idx) => {
-      if (idx === 0) return handoffResponse([{ id: 'w1', objective: 'Task 1' }]);
-      return goalReachedResponse('After interruption');
-    });
-
-    const orch = createOrchestrator({ maxIterations: 10 }, llm);
-    const runtime = createRuntime({
-      checkInterruption: () => {
-        interruptionChecks++;
-        return interruptionChecks === 1;
-      },
-    });
-
-    const result = await orch.execute(createContext(), 'Interrupt handoff', 'planner', CWD, runtime);
-
-    expect(result).toBeDefined();
-  });
-});
-
 describe('Edge Case: Observer Defer on User Input', () => {
   beforeEach(() => { resetProviderCircuit('test'); resetProviderCircuit('openai-compat'); });
 
@@ -1032,55 +802,6 @@ describe('Edge Case: Observer Defer on User Input', () => {
   });
 });
 
-describe('Edge Case: Work Item Retry via work_item_completed Hook', () => {
-  beforeEach(() => { resetProviderCircuit('test'); resetProviderCircuit('openai-compat'); });
-
-  it('work_item_completed retry creates new retry work item', async () => {
-    // At line 1102-1114, if work_item_completed hook returns block (retry),
-    // a new retry work item is created with the hook's guidance.
-
-    let llmCalls = 0;
-    const llm = createStatefulLLM((idx) => {
-      llmCalls++;
-      if (idx === 0) {
-        return handoffResponse([
-          { id: 'a', objective: 'Task A' },
-          { id: 'b', objective: 'Task B', dependencies: ['a'] },
-        ]);
-      }
-      return goalReachedResponse(`Worker ${llmCalls}`);
-    });
-
-    let retryCount = 0;
-    const registry = createHookRegistry();
-
-    registry.register(
-      createHook('approve-handoff', 'handoff_requested', () => ({ action: 'approve' } as HandoffDecision)),
-      HOOK_META,
-    );
-
-    registry.register(createHook('retry-first-item', 'work_item_completed', () => {
-      retryCount++;
-      if (retryCount === 1) {
-        return { action: 'retry', guidance: 'Redo with better tests' } as WorkItemCompletedDecision;
-      }
-      return { action: 'accept' } as WorkItemCompletedDecision;
-    }), HOOK_META);
-
-    registry.register(
-      createHook('pass-quality', 'goal_state_reached', () => ({ verdict: 'passed' } as QualityGateDecision)),
-      HOOK_META,
-    );
-
-    const orch = createOrchestrator({ maxIterations: 20 }, llm);
-    const result = await orch.execute(createContext(), 'Retry work items', 'planner', CWD, createRuntime({ hookRegistry: registry }));
-
-    expect(result).toBeDefined();
-    expect(retryCount).toBeGreaterThanOrEqual(1);
-    expect(llmCalls).toBeGreaterThan(2);
-  });
-});
-
 describe('Edge Case: Async Mode Clears Output Schema', () => {
   beforeEach(() => { resetProviderCircuit('test'); resetProviderCircuit('openai-compat'); });
 
@@ -1098,7 +819,6 @@ describe('Edge Case: Async Mode Clears Output Schema', () => {
       REQUEST_ID,
       undefined,
       createAgentRegistry(),
-      undefined,
       undefined,
       () => getModelSelection(),
     );

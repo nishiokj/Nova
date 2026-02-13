@@ -17,7 +17,6 @@ export type TerminationReason =
 
   // User interaction
   | 'user_input_required'
-  | 'handoff_requested'
   | 'user_stopped'
 
   // Bounds exceeded
@@ -63,7 +62,6 @@ export function getTerminationCategory(reason: TerminationReason): TerminationCa
       return 'success';
 
     case 'user_input_required':
-    case 'handoff_requested':
     case 'user_stopped':
       return 'user_interaction';
 
@@ -106,7 +104,6 @@ export function isBlockable(reason: TerminationReason): boolean {
     case 'max_tool_calls_exceeded':
     case 'max_duration_exceeded':
     case 'user_input_required':
-    case 'handoff_requested':
     case 'agent_error':
     case 'cadence_audit':
     case 'stagnation':
@@ -143,7 +140,6 @@ export function isRetryable(reason: TerminationReason): boolean {
 
     case 'goal_state_reached':
     case 'user_input_required':
-    case 'handoff_requested':
     case 'user_stopped':
     case 'max_iterations_exceeded':
     case 'max_tool_calls_exceeded':
@@ -167,7 +163,6 @@ export function isRetryable(reason: TerminationReason): boolean {
 export const ALL_TERMINATION_REASONS: readonly TerminationReason[] = [
   'goal_state_reached',
   'user_input_required',
-  'handoff_requested',
   'user_stopped',
   'max_iterations_exceeded',
   'max_tool_calls_exceeded',

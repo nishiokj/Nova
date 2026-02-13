@@ -18,7 +18,6 @@
  * agent_done + goal_reached -> executing -> terminated(goal_state_reached)
  * agent_done + bounds_exceeded -> executing -> hook_decision -> terminated | executing
  * agent_done + user_input -> executing -> paused(user_input_required)
- * agent_done + handoff -> executing -> paused(handoff_requested) | executing(approved)
  * hook_block -> executing (continue with new work)
  * hook_split -> executing (enqueue deferred work)
  * max_realigns -> executing -> terminated(bounds)
@@ -47,8 +46,6 @@ import type {
   QualityGateDecision,
   BoundsDecision,
   PromptAnswerDecision,
-  HandoffDecision,
-  HookContext,
   WorkItemSpec,
 } from 'protocol';
 import { getProtocolId } from 'protocol';
@@ -73,7 +70,6 @@ type AgentOutcome =
   | { type: 'goal_reached'; response: string }
   | { type: 'continue'; response: string }
   | { type: 'user_input'; question: string }
-  | { type: 'handoff'; workItems: WorkItemSpec[] }
   | { type: 'bounds_exceeded'; reason: 'iterations' | 'tool_calls' | 'duration' }
   | { type: 'error'; message: string }
   | { type: 'refusal'; message: string };
@@ -202,27 +198,6 @@ function createScriptedLLM(script: AgentOutcome[]): LLMAdapter {
             awaitingUserInput: true,
           }),
         };
-      case 'handoff':
-        return {
-          ...base,
-          content: JSON.stringify({
-            action: 'handoff',
-            response: 'Handing off work',
-            goalStateReached: true,
-            handoffSpec: {
-              goal: 'Execute plan',
-              context: 'Test context',
-              workItems: outcome.workItems.map(w => ({
-                id: w.id,
-                objective: w.objective ?? w.goal,
-                delta: w.objective ?? w.goal,
-                agent: w.agent ?? 'standard',
-                dependencies: w.dependencies ?? [],
-              })),
-            },
-            awaitingUserInput: false,
-          }),
-        };
       case 'bounds_exceeded':
         // Return continue to let agent hit its internal bounds
         return {
@@ -292,7 +267,6 @@ describe('State Machine: Basic Transitions', () => {
       undefined,
       createAgentRegistry(),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -328,7 +302,6 @@ describe('State Machine: Basic Transitions', () => {
       // Agent with higher limit so orchestrator bounds hit first
       createAgentRegistry({ maxIterations: 1, maxToolCalls: 50, maxDurationMs: 30_000 }),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -350,7 +323,6 @@ describe('State Machine: Basic Transitions', () => {
       undefined,
       createAgentRegistry(),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -361,34 +333,6 @@ describe('State Machine: Basic Transitions', () => {
     expect(result.userPrompt).toBeDefined();
   });
 
-  it('idle -> executing -> paused(handoff_requested) without approval hook', async () => {
-    // Handoff only works with planner agent type which uses planner_output schema
-    const llm = createScriptedLLM([{
-      type: 'handoff',
-      workItems: [{ id: 'w1', goal: 'Task 1', objective: 'Do task 1', agent: 'standard' }],
-    }]);
-
-    const orch = new Orchestrator(
-      { maxIterations: 10 },
-      createToolRegistry(),
-      llm,
-      () => {},
-      REQUEST_ID,
-      undefined,
-      createAgentRegistry(),
-      undefined,
-      undefined,
-      () => getModelSelection()
-    );
-
-    // Use 'planner' agent type for handoff
-    const result = await orch.execute(createContext(), 'Plan work', 'planner', CWD);
-
-    // Without approval hook, should pause for user
-    expect(result.terminationReason).toBe('handoff_requested');
-    expect(result.paused).toBe(true);
-    expect(result.handoffSpec).toBeDefined();
-  });
 });
 
 describe('State Machine: Hook-Driven Transitions', () => {
@@ -436,7 +380,6 @@ describe('State Machine: Hook-Driven Transitions', () => {
       undefined,
       createAgentRegistry(),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -446,193 +389,6 @@ describe('State Machine: Hook-Driven Transitions', () => {
     expect(callCount).toBe(2);
     expect(result.terminationReason).toBe('goal_state_reached');
     expect(result.success).toBe(true);
-  });
-
-  it('handoff + hook_approve -> execute work items', async () => {
-    let llmCalls = 0;
-    const llm = {
-      respond: async () => {
-        llmCalls++;
-        if (llmCalls === 1) {
-          // First call: planner returns handoff
-          return {
-            content: JSON.stringify({
-              action: 'handoff',
-              response: 'Plan ready',
-              goalStateReached: true,
-              handoffSpec: {
-                goal: 'Execute',
-                context: 'Test',
-                workItems: [
-                  { id: 'w1', objective: 'Task 1', delta: 'Task 1', agent: 'standard' },
-                ],
-              },
-              awaitingUserInput: false,
-            }),
-            stopReason: 'end_turn',
-            usage: { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
-            toolCalls: [],
-          };
-        }
-        // Subsequent calls: workers complete
-        return {
-          content: JSON.stringify({
-            action: 'done',
-            response: `Worker ${llmCalls} done`,
-            goalStateReached: true,
-            awaitingUserInput: false,
-          }),
-          stopReason: 'end_turn',
-          usage: { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
-          toolCalls: [],
-        };
-      },
-      stream: async function* () {
-        const resp = await (this as LLMAdapter).respond([], {});
-        yield resp.content;
-        return resp;
-      },
-      getConfig: () => ({ provider: 'test', model: 'test' }),
-      capabilities: () => ({ supportsStreaming: true, supportsToolUse: true, supportsStructuredOutput: true }),
-    } as unknown as LLMAdapter;
-
-    const registry = createHookRegistry();
-    registry.register({
-      id: 'approve-handoff',
-      event: 'handoff_requested',
-      policy: { kind: 'fire_and_forget' },
-      criticality: 'non_critical',
-      idempotency: 'idempotent',
-      priority: 100,
-      timeoutMs: 5000,
-      run: async () => ({
-        kind: 'success',
-        decision: { action: 'approve' } as HandoffDecision,
-        patches: [],
-      }),
-    }, HOOK_META);
-
-    const orch = new Orchestrator(
-      { maxIterations: 10 },
-      createToolRegistry(),
-      llm,
-      () => {},
-      REQUEST_ID,
-      undefined,
-      createAgentRegistry(),
-      undefined,
-      undefined,
-      () => getModelSelection()
-    );
-
-    // Use 'planner' agent type for handoff
-    const result = await orch.execute(createContext(), 'Plan', 'planner', CWD, { hookRegistry: registry });
-
-    // Handoff approved, work items executed
-    // After handoff approval, workers should run and complete
-    // The result may be from the last worker, not the planner
-    expect(llmCalls).toBeGreaterThan(1); // Planner + at least one worker
-    // Result success depends on whether workers completed successfully
-    // If handoff was approved and workers ran, that's the main invariant
-    expect(result.terminationReason).toBeDefined();
-    // Check it didn't pause (handoff was approved, not waiting for user)
-    expect(result.paused).toBe(false);
-  });
-
-  it('handoff + hook_reject -> continue with feedback', async () => {
-    let llmCalls = 0;
-    const llm = {
-      respond: async () => {
-        llmCalls++;
-        if (llmCalls <= 2) {
-          // First two calls: planner returns handoff
-          return {
-            content: JSON.stringify({
-              action: 'handoff',
-              response: `Plan attempt ${llmCalls}`,
-              goalStateReached: true,
-              handoffSpec: {
-                goal: 'Execute',
-                context: 'Test',
-                workItems: [
-                  { id: 'w1', objective: 'Task 1', delta: 'Task 1', agent: 'standard' },
-                ],
-              },
-              awaitingUserInput: false,
-            }),
-            stopReason: 'end_turn',
-            usage: { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
-            toolCalls: [],
-          };
-        }
-        // After rejection feedback, return goal_reached
-        return {
-          content: JSON.stringify({
-            action: 'done',
-            response: 'Revised plan complete',
-            goalStateReached: true,
-            awaitingUserInput: false,
-          }),
-          stopReason: 'end_turn',
-          usage: { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
-          toolCalls: [],
-        };
-      },
-      stream: async function* () {
-        const resp = await (this as LLMAdapter).respond([], {});
-        yield resp.content;
-        return resp;
-      },
-      getConfig: () => ({ provider: 'test', model: 'test' }),
-      capabilities: () => ({ supportsStreaming: true, supportsToolUse: true, supportsStructuredOutput: true }),
-    } as unknown as LLMAdapter;
-
-    let hookCalls = 0;
-    const registry = createHookRegistry();
-    registry.register({
-      id: 'reject-then-approve',
-      event: 'handoff_requested',
-      policy: { kind: 'fire_and_forget' },
-      criticality: 'non_critical',
-      idempotency: 'idempotent',
-      priority: 100,
-      timeoutMs: 5000,
-      run: async () => {
-        hookCalls++;
-        if (hookCalls === 1) {
-          return {
-            kind: 'success',
-            decision: { action: 'reject', feedback: 'Plan is incomplete' } as HandoffDecision,
-            patches: [],
-          };
-        }
-        return {
-          kind: 'success',
-          decision: { action: 'approve' } as HandoffDecision,
-          patches: [],
-        };
-      },
-    }, HOOK_META);
-
-    const orch = new Orchestrator(
-      { maxIterations: 10 },
-      createToolRegistry(),
-      llm,
-      () => {},
-      REQUEST_ID,
-      undefined,
-      createAgentRegistry(),
-      undefined,
-      undefined,
-      () => getModelSelection()
-    );
-
-    // Use 'planner' agent type for handoff
-    const result = await orch.execute(createContext(), 'Plan', 'planner', CWD, { hookRegistry: registry });
-
-    // First handoff rejected, planner continued
-    expect(hookCalls).toBeGreaterThanOrEqual(1);
-    expect(result).toBeDefined();
   });
 
   it('user_input + hook_answer -> continue without pausing', async () => {
@@ -701,7 +457,6 @@ describe('State Machine: Hook-Driven Transitions', () => {
       undefined,
       createAgentRegistry(),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -756,7 +511,6 @@ describe('State Machine: Realign Counter', () => {
       undefined,
       // Very low agent budget to trigger bounds quickly
       createAgentRegistry({ maxIterations: 1, maxToolCalls: 1, maxDurationMs: 100 }),
-      undefined,
       undefined,
       () => getModelSelection()
     );
@@ -814,7 +568,6 @@ describe('State Machine: Realign Counter', () => {
       undefined,
       createAgentRegistry({ maxIterations: 1, maxToolCalls: 1, maxDurationMs: 100 }),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -840,7 +593,6 @@ describe('State Machine: Invariant Assertions', () => {
       REQUEST_ID,
       undefined,
       createAgentRegistry(),
-      undefined,
       undefined,
       () => getModelSelection()
     );
@@ -874,7 +626,6 @@ describe('State Machine: Invariant Assertions', () => {
       REQUEST_ID,
       undefined,
       createAgentRegistry({ maxIterations: 3, maxToolCalls: 50, maxDurationMs: 30_000 }),
-      undefined,
       undefined,
       () => getModelSelection()
     );
@@ -913,7 +664,6 @@ describe('State Machine: Invariant Assertions', () => {
       undefined,
       createAgentRegistry(),
       undefined,
-      undefined,
       () => getModelSelection()
     );
 
@@ -941,7 +691,6 @@ describe('State Machine: Error States', () => {
       REQUEST_ID,
       undefined,
       createAgentRegistry(),
-      undefined,
       undefined,
       () => getModelSelection()
     );
@@ -972,7 +721,6 @@ describe('State Machine: Error States', () => {
       REQUEST_ID,
       undefined,
       createAgentRegistry(),
-      undefined,
       undefined,
       () => getModelSelection()
     );
@@ -1022,7 +770,6 @@ describe('State Machine: Interruption Handling', () => {
       REQUEST_ID,
       undefined,
       createAgentRegistry(),
-      undefined,
       undefined,
       () => getModelSelection()
     );

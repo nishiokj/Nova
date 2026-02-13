@@ -12,7 +12,6 @@ export {
   type OrchestratorResult,
   type OrchestratorMetrics,
   type OrchestratorLogger,
-  type PlanModeOptions,
 } from './orchestrator.js';
 
 export {

@@ -58,8 +58,6 @@ interface HarnessLike {
     sessionKey: string;
     workingDir: string;
     context?: string;
-    handoffSpec?: Record<string, unknown>;
-    planMode?: boolean;
     hookRegistry?: HookRegistry;
   }): AgentRunHandle;
   createReadyEvent(sessionKey: string): BridgeEvent;
@@ -124,7 +122,6 @@ interface ConnectionState {
   lastSessionKey: string | null;
   workingDir: string | null;
   activeRequestId: string | null;
-  planMode: boolean;
   asyncRun: AsyncRunInfo | null;
 }
 
@@ -518,10 +515,6 @@ export class BridgeGateway {
     const rawTier = typeof data?.tier === 'string' ? data.tier.trim() : '';
     const tier = rawTier && rawTier !== 'auto' ? (rawTier as AgentType) : undefined;
 
-    // Extract planMode from command data
-    const planMode = typeof data?.plan_mode === 'boolean' ? data.plan_mode : state.planMode;
-    state.planMode = planMode;
-
     state.activeRequestId = clientRequestId;
 
     profiler.instant('harness.run:start', 'harness', 'p', { requestId: clientRequestId, tier });
@@ -531,7 +524,6 @@ export class BridgeGateway {
       ...(tier ? { tier } : {}),
       sessionKey,
       workingDir,
-      planMode,
     });
 
     this.streamRunEvents(clientRequestId, handle, undefined, sessionKey);
@@ -1729,11 +1721,6 @@ export class BridgeGateway {
     const context = typeof input.context === 'string' && input.context.trim().length > 0
       ? input.context.trim()
       : undefined;
-    const metadata = isRecord(input.metadata) ? input.metadata : undefined;
-    const handoffSpec = metadata && isRecord(metadata.cockpit_handoff_spec)
-      ? metadata.cockpit_handoff_spec
-      : undefined;
-
     // Browser-originated sessions default to dangerous mode (no permission prompts).
     this.harness.ensureSessionHydrated?.(input.sessionKey, {
       workingDir,
@@ -1747,7 +1734,6 @@ export class BridgeGateway {
         requestId,
         inputText: trimmedMessage,
         ...(context ? { context } : {}),
-        ...(handoffSpec ? { handoffSpec } : {}),
         sessionKey: input.sessionKey,
         workingDir,
       });
@@ -2319,7 +2305,7 @@ export class BridgeGateway {
   private getOrCreateConnectionState(connectionId: string): ConnectionState {
     const existing = this.connections.get(connectionId);
     if (existing) return existing;
-    const state: ConnectionState = { sessionKey: null, lastSessionKey: null, workingDir: null, activeRequestId: null, planMode: false, asyncRun: null };
+    const state: ConnectionState = { sessionKey: null, lastSessionKey: null, workingDir: null, activeRequestId: null, asyncRun: null };
     this.connections.set(connectionId, state);
     return state;
   }

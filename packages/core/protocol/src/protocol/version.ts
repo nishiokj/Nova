@@ -12,7 +12,6 @@ import {
   PromptAnswerDecisionSchema,
   CadenceDecisionSchema,
   AgentErrorDecisionSchema,
-  HandoffDecisionSchema,
   WorkItemCompletedDecisionSchema,
   StatePatchSchema,
 } from './schemas.js';
@@ -37,7 +36,6 @@ export function computeSchemaHash(): string {
     PromptAnswerDecisionSchema,
     CadenceDecisionSchema,
     AgentErrorDecisionSchema,
-    HandoffDecisionSchema,
     WorkItemCompletedDecisionSchema,
     StatePatchSchema,
   ];

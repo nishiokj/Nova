@@ -322,7 +322,6 @@ async function runSingleBenchmark(params: {
     new BenchmarkLogger(),
     undefined, // agentRegistry - will register below
     undefined, // hooks
-    undefined, // planModeOptions
     undefined, // eventBus
     undefined  // getModelSelection
   );
@@ -402,7 +401,6 @@ async function runSingleBenchmark(params: {
         error,
         paused: false,
         userPrompt: undefined,
-        handoffSpec: undefined,
         terminationReason: 'error',
         metrics: {
           iterations: 0,

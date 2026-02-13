@@ -80,7 +80,6 @@ export interface SendTextCommandData extends CommandDataBase {
   text: string;
   client_request_id?: string;
   tier?: string;
-  plan_mode?: boolean;
   working_dir?: string;
   attachments?: Attachment[];
 }
@@ -89,7 +88,6 @@ export interface SendMediaCommandData extends CommandDataBase {
   text?: string;
   client_request_id?: string;
   tier?: string;
-  plan_mode?: boolean;
   working_dir?: string;
   attachments: Attachment[];
 }

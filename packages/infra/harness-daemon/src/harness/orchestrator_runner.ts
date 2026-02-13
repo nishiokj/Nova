@@ -7,7 +7,6 @@ import {
   type OrchestratorLogger,
   type OrchestratorResult,
   type OrchestratorRuntime,
-  type PlanModeOptions,
 } from 'orchestrator';
 import type { ToolRegistry } from 'tools';
 
@@ -20,7 +19,6 @@ export interface OrchestratorRunParams {
   logger?: OrchestratorLogger;
   agentRegistry?: AgentRegistry;
   hooks?: AgentHooks;
-  planModeOptions?: PlanModeOptions;
   getModelSelection?: (agentType: string) => ModelSelection | null;
   context: ContextWindow;
   goal: string;
@@ -44,7 +42,6 @@ export class DefaultOrchestratorRunner implements OrchestratorRunner {
       params.logger,
       params.agentRegistry,
       params.hooks,
-      params.planModeOptions,
       params.getModelSelection
     );
 

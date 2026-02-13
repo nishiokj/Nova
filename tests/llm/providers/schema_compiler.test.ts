@@ -114,7 +114,6 @@ describe('schema_compiler', () => {
     expect((properties.action as Record<string, unknown>)?.type).toBe('string');
     expect((properties.response as Record<string, unknown>)?.type).toBe('string');
     expect((properties.goalStateReached as Record<string, unknown>)?.type).toBe('boolean');
-    expect((properties.handoffSpec as Record<string, unknown>)?.type).toBe('null');
     expect((properties.awaitingUserInput as Record<string, unknown>)?.type).toBe('boolean');
     expect((properties.work_done as Record<string, unknown>)?.type).toBe('string');
 
@@ -129,14 +128,9 @@ describe('schema_compiler', () => {
 
     const compiled = compileSchemaForCodex(canonical!.schema, 'explorer');
     const properties = compiled.properties as Record<string, unknown>;
-    const handoffSpec = properties.handoffSpec as Record<string, unknown>;
     const artifacts = properties.artifacts as Record<string, unknown>;
     const artifactItems = artifacts.items as Record<string, unknown>;
     const artifactProps = artifactItems.properties as Record<string, unknown>;
-
-    const handoffSpecTypes = Array.isArray(handoffSpec.type) ? handoffSpec.type : [handoffSpec.type];
-    expect(handoffSpecTypes).toContain('object');
-    expect(handoffSpecTypes).toContain('null');
 
     const lineSchema = artifactProps.line as Record<string, unknown>;
     const lineTypes = Array.isArray(lineSchema.type) ? lineSchema.type : [lineSchema.type];

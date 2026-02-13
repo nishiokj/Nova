@@ -143,26 +143,6 @@ export function isErrorRetry(d: AgentErrorDecision): d is { action: 'retry'; gui
 }
 
 // ============================================
-// HANDOFF APPROVAL (planner handoff)
-// ============================================
-
-/**
- * Decision for handoff approval.
- * Determines whether to accept a planner's handoff.
- */
-export type HandoffDecision =
-  | { action: 'approve' }
-  | { action: 'reject'; feedback: string }
-  | { action: 'modify'; changes: string };
-
-/**
- * Type guard for approve action.
- */
-export function isHandoffApproved(d: HandoffDecision): d is { action: 'approve' } {
-  return d.action === 'approve';
-}
-
-// ============================================
 // WORK ITEM COMPLETED
 // ============================================
 
@@ -197,7 +177,6 @@ export type AnyDecision =
   | PromptAnswerDecision
   | CadenceDecision
   | AgentErrorDecision
-  | HandoffDecision
   | WorkItemCompletedDecision;
 
 // ============================================
@@ -238,9 +217,6 @@ export function summarizeDecision(decision: AnyDecision): string {
       case 'stop': return `Stopping: ${(decision as { reason: string }).reason}`;
       case 'stop_work_item': return `Stopping work item: ${(decision as { reason: string }).reason}`;
       case 'retry': return `Retrying with guidance`;
-      case 'approve': return 'Handoff approved';
-      case 'reject': return `Handoff rejected: ${(decision as { feedback: string }).feedback}`;
-      case 'modify': return 'Handoff modified';
       case 'accept': return 'Work item accepted';
     }
   }

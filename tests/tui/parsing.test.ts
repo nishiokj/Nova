@@ -22,7 +22,6 @@ type QuestionType =
   | "fill_in_blank"
   | "yes_no"
   | "free_text"
-  | "plan_mode_exit"
   | "spec_review";
 
 interface QuestionOption {
@@ -271,7 +270,6 @@ const inferQuestionType = (
   multiSelect?: boolean,
   questionType?: string
 ): QuestionType => {
-  if (questionType === "plan_mode_exit") return "plan_mode_exit";
   if (questionType === "spec_review") return "spec_review";
   if (!opts || opts.length === 0) return "free_text";
   if (multiSelect) return "multi_select";
@@ -286,17 +284,13 @@ const inferQuestionType = (
 
 describe("inferQuestionType", () => {
   describe("explicit question types", () => {
-    it("returns plan_mode_exit when specified", () => {
-      expect(inferQuestionType(["a", "b"], false, "plan_mode_exit")).toBe("plan_mode_exit");
-    });
-
     it("returns spec_review when specified", () => {
       expect(inferQuestionType(["a", "b"], false, "spec_review")).toBe("spec_review");
     });
 
     it("explicit type overrides option inference", () => {
       // Even with yes/no options, explicit type wins
-      expect(inferQuestionType(["Yes", "No"], false, "plan_mode_exit")).toBe("plan_mode_exit");
+      expect(inferQuestionType(["Yes", "No"], false, "spec_review")).toBe("spec_review");
     });
   });
 
@@ -603,32 +597,6 @@ describe("toAgentQuestion", () => {
       0
     );
     expect(result.type).toBe("multi_select");
-  });
-
-  it("supports snake_case question_type", () => {
-    const result = toAgentQuestion(
-      {
-        question: "Exit plan?",
-        options: ["Yes", "No"],
-        question_type: "plan_mode_exit",
-      },
-      "req-1",
-      0
-    );
-    expect(result.type).toBe("plan_mode_exit");
-  });
-
-  it("supports camelCase questionType (legacy)", () => {
-    const result = toAgentQuestion(
-      {
-        question: "Exit plan?",
-        options: ["Yes", "No"],
-        questionType: "plan_mode_exit",
-      } as any,
-      "req-1",
-      0
-    );
-    expect(result.type).toBe("plan_mode_exit");
   });
 
   it("provides fallback for missing or empty question text", () => {

@@ -14,7 +14,6 @@ import { z } from 'zod';
 export const TerminationReasonSchema = z.enum([
   'goal_state_reached',
   'user_input_required',
-  'handoff_requested',
   'user_stopped',
   'max_iterations_exceeded',
   'max_tool_calls_exceeded',
@@ -102,12 +101,6 @@ export const AgentErrorDecisionSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('retry'), guidance: z.string() }),
   z.object({ action: z.literal('abort'), reason: z.string() }),
   z.object({ action: z.literal('escalate'), to: z.enum(['user', 'ops']) }),
-]);
-
-export const HandoffDecisionSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('approve') }),
-  z.object({ action: z.literal('reject'), feedback: z.string() }),
-  z.object({ action: z.literal('modify'), changes: z.string() }),
 ]);
 
 export const WorkItemCompletedDecisionSchema = z.discriminatedUnion('action', [
@@ -221,6 +214,5 @@ export type BoundsDecisionSchemaType = z.infer<typeof BoundsDecisionSchema>;
 export type PromptAnswerDecisionSchemaType = z.infer<typeof PromptAnswerDecisionSchema>;
 export type CadenceDecisionSchemaType = z.infer<typeof CadenceDecisionSchema>;
 export type AgentErrorDecisionSchemaType = z.infer<typeof AgentErrorDecisionSchema>;
-export type HandoffDecisionSchemaType = z.infer<typeof HandoffDecisionSchema>;
 export type WorkItemCompletedDecisionSchemaType = z.infer<typeof WorkItemCompletedDecisionSchema>;
 export type StatePatchSchemaType = z.infer<typeof StatePatchSchema>;

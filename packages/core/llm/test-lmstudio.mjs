@@ -7,7 +7,7 @@
  * 1. Imports the LLM adapter
  * 2. Uses system prompts for standard and agent types
  * 3. Uses actual response schemas from packages/core/shared/src/output_schemas.ts:
- *    - AgentActionOutputSchema: { action, response, goalStateReached, handoffSpec }
+ *    - AgentActionOutputSchema: { action, response, goalStateReached }
  *    - GoalDrivenOutputSchema: extends AgentActionOutput with { work_done }
  *    - ExplorerOutputSchema: extends AgentActionOutput with { packageManagers, frameworks, languages, os, artifacts }
  *    - RuntimeScriptOutputSchema: extends AgentActionOutput with { goal, workItems }
@@ -117,11 +117,10 @@ async function testSimpleQuery() {
         properties: {
           action: {
             type: 'string',
-            enum: ['done', 'continue', 'handoff']
+            enum: ['done', 'continue']
           },
           response: { type: 'string', nullable: true },
           goalStateReached: { type: 'boolean', nullable: true },
-          handoffSpec: { type: 'object', nullable: true },
           work_done: { type: 'string', nullable: true }
         }
       },
@@ -200,11 +199,10 @@ async function testStandardAgentPrompt() {
         properties: {
           action: {
             type: 'string',
-            enum: ['done', 'continue', 'handoff']
+            enum: ['done', 'continue']
           },
           response: { type: 'string', nullable: true },
           goalStateReached: { type: 'boolean', nullable: true },
-          handoffSpec: { type: 'object', nullable: true },
           work_done: { type: 'string', nullable: true }
         }
       },
@@ -281,11 +279,10 @@ async function testMultiTurnConversation() {
         properties: {
           action: {
             type: 'string',
-            enum: ['done', 'continue', 'handoff']
+            enum: ['done', 'continue']
           },
           response: { type: 'string', nullable: true },
           goalStateReached: { type: 'boolean', nullable: true },
-          handoffSpec: { type: 'object', nullable: true },
           work_done: { type: 'string', nullable: true }
         }
       },
@@ -355,11 +352,10 @@ async function testExplorerSchema() {
         properties: {
           action: {
             type: 'string',
-            enum: ['done', 'continue', 'handoff']
+            enum: ['done', 'continue']
           },
           response: { type: 'string', nullable: true },
           goalStateReached: { type: 'boolean', nullable: true },
-          handoffSpec: { type: 'object', nullable: true },
           packageManagers: { type: 'array', items: { type: 'string' } },
           frameworks: { type: 'array', items: { type: 'string' } },
           languages: { type: 'array', items: { type: 'string' } },
@@ -605,11 +601,10 @@ async function testWithTools() {
         properties: {
           action: {
             type: 'string',
-            enum: ['done', 'continue', 'handoff']
+            enum: ['done', 'continue']
           },
           response: { type: 'string', nullable: true },
           goalStateReached: { type: 'boolean', nullable: true },
-          handoffSpec: { type: 'object', nullable: true },
           work_done: { type: 'string', nullable: true }
         }
       },

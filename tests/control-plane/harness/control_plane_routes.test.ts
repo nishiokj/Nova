@@ -305,7 +305,6 @@ describe('control-plane cockpit session message routes', () => {
     expect(typeof harness.dispatchCalls[0].options?.context).toBe('string');
     expect(harness.dispatchCalls[0].options?.context).toContain('Control-plane active markdown context:');
     expect(harness.dispatchCalls[0].options?.context).toContain('scopeMode: global');
-    expect(harness.dispatchCalls[0].options?.metadata?.cockpit_handoff_spec).toBeUndefined();
 
     expect(harness.permissionUpdates).toHaveLength(1);
     expect(harness.permissionUpdates[0].sessionKey).toBe('sess-1');
@@ -480,69 +479,6 @@ describe('control-plane cockpit session message routes', () => {
     }
   });
 
-  it('loads template and injects cockpit_handoff_spec for first workflow message', async () => {
-    postgresMockState.templates = [
-      {
-        id: 'tpl-alpha',
-        name: 'Ship API',
-        description: 'Roll out API changes',
-        specs: JSON.stringify([
-          {
-            id: 'design',
-            objective: 'Design endpoint changes',
-            agent: 'standard',
-            dependencies: [],
-            domain: 'backend',
-            targetPaths: ['src/api/routes.ts'],
-          },
-          {
-            id: 'tests',
-            objective: 'Add coverage',
-            agent: 'standard',
-            dependencies: ['design'],
-            targetPaths: ['src/api/routes.test.ts'],
-          },
-        ]),
-      },
-    ];
-
-    const harness = createHarness();
-    const result = await invokeRoute({
-      method: 'POST',
-      url: '/control-plane/cockpit/session/sess-1/message',
-      ctx: harness.ctx,
-      body: {
-        message: 'Implement this workflow now',
-        markdownContext: {
-          path: 'plans/ship-api.md',
-          content: '# Workflow',
-          metadata: { template: 'Ship API' },
-        },
-      },
-    });
-
-    expect(result.handled).toBe(true);
-    expect(result.statusCode).toBe(200);
-    expect(result.json?.success).toBe(true);
-    expect(result.json?.workflowTemplateApplied).toBe(true);
-    expect(result.json?.workflowTemplate).toEqual({ id: 'tpl-alpha', name: 'Ship API' });
-
-    expect(harness.dispatchCalls).toHaveLength(1);
-    const metadata = harness.dispatchCalls[0].options?.metadata ?? {};
-    expect(isRecord(metadata.cockpit_handoff_spec)).toBe(true);
-    const handoffSpec = metadata.cockpit_handoff_spec as Record<string, unknown>;
-    expect(handoffSpec.goal).toBe('Implement this workflow now');
-    expect(Array.isArray(handoffSpec.workItems)).toBe(true);
-    expect((handoffSpec.workItems as unknown[]).length).toBe(2);
-
-    expect(harness.metadataUpdates).toHaveLength(2);
-    expect(isRecord(harness.metadataUpdates[0].cockpit_active_markdown)).toBe(true);
-    expect(harness.metadataUpdates[1].workflow_template_applied).toBe(true);
-    expect(harness.metadataUpdates[1].workflow_template_id).toBe('tpl-alpha');
-
-    expect(postgresMockState.queries.some((query) => query.text.toLowerCase().includes('from workitem_templates'))).toBe(true);
-  });
-
   it('does not apply a workflow template when session already has message history', async () => {
     postgresMockState.templates = [
       {
@@ -572,7 +508,6 @@ describe('control-plane cockpit session message routes', () => {
     expect(result.json?.workflowTemplateApplied).toBe(false);
 
     expect(harness.dispatchCalls).toHaveLength(1);
-    expect(harness.dispatchCalls[0].options?.metadata?.cockpit_handoff_spec).toBeUndefined();
 
     expect(postgresMockState.queries).toHaveLength(0);
     expect(harness.metadataUpdates).toHaveLength(1);
@@ -632,7 +567,6 @@ describe('control-plane cockpit session message routes', () => {
     expect(result.json?.success).toBe(true);
     expect(result.json?.workflowTemplateApplied).toBe(false);
     expect(harness.dispatchCalls).toHaveLength(1);
-    expect(harness.dispatchCalls[0].options?.metadata?.cockpit_handoff_spec).toBeUndefined();
     expect(postgresMockState.queries).toHaveLength(0);
   });
 });

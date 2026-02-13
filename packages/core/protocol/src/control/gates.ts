@@ -12,7 +12,6 @@ import type {
   PromptAnswerDecision,
   CadenceDecision,
   AgentErrorDecision,
-  HandoffDecision,
   WorkItemCompletedDecision,
 } from './decisions.js';
 import type {
@@ -21,7 +20,6 @@ import type {
   PromptAnswerDecisionSchemaType,
   CadenceDecisionSchemaType,
   AgentErrorDecisionSchemaType,
-  HandoffDecisionSchemaType,
   WorkItemCompletedDecisionSchemaType,
 } from '../protocol/schemas.js';
 import type { Hook } from '../hooks/types.js';
@@ -42,7 +40,6 @@ export interface EventDecisionMap {
   'user_input_required': PromptAnswerDecision;
   'cadence_audit': CadenceDecision;
   'agent_error': AgentErrorDecision;
-  'handoff_requested': HandoffDecision;
   'work_item_completed': WorkItemCompletedDecision;
   'user_stopped': never;  // No decision, always allow
   'transient_error': never;  // No decision, always allow
@@ -98,7 +95,6 @@ export function requiresDecision(eventType: ControlEventType): eventType is Deci
     case 'user_input_required':
     case 'cadence_audit':
     case 'agent_error':
-    case 'handoff_requested':
     case 'work_item_completed':
       return true;
     case 'user_stopped':
@@ -123,7 +119,6 @@ export type DecisionActionByEvent = {
   user_input_required: PromptAnswerDecisionSchemaType['action'];
   cadence_audit: CadenceDecisionSchemaType['action'];
   agent_error: AgentErrorDecisionSchemaType['action'];
-  handoff_requested: HandoffDecisionSchemaType['action'];
   work_item_completed: WorkItemCompletedDecisionSchemaType['action'];
 };
 
@@ -133,7 +128,6 @@ export const VALID_DECISIONS_BY_EVENT = {
   'user_input_required': ['answer', 'escalate', 'defer'],
   'cadence_audit': ['continue', 'inject_guidance', 'realign', 'split', 'stop', 'stop_work_item'],
   'agent_error': ['retry', 'abort', 'escalate'],
-  'handoff_requested': ['approve', 'reject', 'modify'],
   'work_item_completed': ['accept', 'retry', 'split', 'escalate'],
 } as const satisfies {
   [E in keyof DecisionActionByEvent]: readonly DecisionActionByEvent[E][];
@@ -152,7 +146,6 @@ export const DECISION_CONTROL_BY_EVENT = {
   'user_input_required': controlField('action', VALID_DECISIONS_BY_EVENT.user_input_required),
   'cadence_audit': controlField('action', VALID_DECISIONS_BY_EVENT.cadence_audit),
   'agent_error': controlField('action', VALID_DECISIONS_BY_EVENT.agent_error),
-  'handoff_requested': controlField('action', VALID_DECISIONS_BY_EVENT.handoff_requested),
   'work_item_completed': controlField('action', VALID_DECISIONS_BY_EVENT.work_item_completed),
 } as const satisfies Record<DecisionRequiredEvent, ControlField<'action' | 'verdict', readonly string[]>>;
 
