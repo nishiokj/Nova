@@ -501,14 +501,17 @@ export function mapGraphDSession(raw: GraphDSession, messages: GraphDMessage[] =
   const requests: AgentRequest[] = parseRequestsFromMetadata(meta, raw.session_key, createdAt, messages)
   const watcherDecisions: WatcherDecision[] = extractWatcherDecisions(meta, createdAt)
 
-  // Infer session state from requests if we have them
-  const hasRunningRequests = requests.some(r => r.state === 'running')
-  const hasErrorRequests = requests.some(r => r.state === 'error')
-  const inferredState = hasRunningRequests
-    ? 'active'
-    : hasErrorRequests
-      ? 'error'
-      : mapStatus(raw.status, raw.last_accessed_at)
+  // Staleness takes priority — a session with no recent activity is idle/ended
+  // regardless of orphaned running requests in its metadata
+  const baseStatus = mapStatus(raw.status, raw.last_accessed_at)
+  let inferredState: SessionState = baseStatus
+  if (baseStatus === 'active') {
+    const hasRunningRequests = requests.some(r => r.state === 'running')
+    const hasErrorRequests = requests.some(r => r.state === 'error')
+    if (hasErrorRequests && !hasRunningRequests) {
+      inferredState = 'error'
+    }
+  }
 
   // Extract description from metadata or first request
   const description = meta.description as string | undefined

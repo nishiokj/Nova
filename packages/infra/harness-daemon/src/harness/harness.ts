@@ -1002,10 +1002,10 @@ export class AgentHarness {
   async start(): Promise<boolean> {
     if (this.graphd && !this.graphdStarted) {
       try {
-        const connected = await this.graphd.connect();
-        this.graphdStarted = connected;
-        if (connected) {
-          this.logger.info('GraphD connected (external owner)', {
+        const started = await this.graphd.start();
+        this.graphdStarted = started;
+        if (started) {
+          this.logger.info('GraphD started', {
             port: this.config.graphd.port,
             dbPath: this.config.graphd.dbPath,
             reusing: this.graphd.isReusing(),
@@ -1015,7 +1015,7 @@ export class AgentHarness {
             this.logger.debug('GraphDSubscriber created');
           }
         } else {
-          this.logger.warning('GraphD not reachable; starting harness without GraphD features', {
+          this.logger.warning('GraphD failed to start; starting harness without GraphD features', {
             host: this.config.graphd.host,
             port: this.config.graphd.port,
             dbPath: this.config.graphd.dbPath,

@@ -233,6 +233,12 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
         context_window: 256_000,
         reasoning: ['low', 'medium', 'high'],
       },
+      {
+        id: 'gpt-5.3-codex-spark',
+        name: 'GPT-5.3 Codex Spark',
+        context_window: 128_000,
+        reasoning: ['low', 'medium', 'high', 'xhigh'],
+      },
     ],
     // No envVar - uses OAuth tokens, not API keys
     authRequired: true,

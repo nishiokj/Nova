@@ -88,6 +88,51 @@ function inferUserPromptFromResponse(responseText?: string): UserPromptInfo | nu
   };
 }
 
+/** Shape of a raw artifact from LLM structured output. */
+interface RawArtifact {
+  sourcePath: string;
+  line?: number | null;
+  kind: string;
+  name: string;
+  signature?: string | null;
+  modifies?: string[] | null;
+  calls?: string[] | null;
+  insight?: string | null;
+  reduces?: string | null;
+}
+
+function isValidRawArtifact(a: unknown): a is RawArtifact {
+  return (
+    typeof a === 'object' &&
+    a !== null &&
+    typeof (a as Record<string, unknown>).sourcePath === 'string' &&
+    typeof (a as Record<string, unknown>).kind === 'string' &&
+    typeof (a as Record<string, unknown>).name === 'string'
+  );
+}
+
+function mapRawArtifact(a: RawArtifact, discoveredBy: string, workItemId?: string): {
+  sourcePath: string; line?: number; kind: ArtifactKind; name: string;
+  signature?: string; modifies?: string[]; calls?: string[]; insight?: string;
+  reduces?: 'structural' | 'relational' | 'behavioral' | 'contractual';
+  relevance: number; discoveredBy: string; workItemId?: string;
+} {
+  return {
+    sourcePath: a.sourcePath,
+    line: typeof a.line === 'number' ? a.line : undefined,
+    kind: a.kind as ArtifactKind,
+    name: a.name,
+    signature: typeof a.signature === 'string' ? a.signature : undefined,
+    modifies: Array.isArray(a.modifies) ? a.modifies : undefined,
+    calls: Array.isArray(a.calls) ? a.calls : undefined,
+    insight: typeof a.insight === 'string' ? a.insight : undefined,
+    reduces: typeof a.reduces === 'string' ? a.reduces as 'structural' | 'relational' | 'behavioral' | 'contractual' : undefined,
+    relevance: 1.0,
+    discoveredBy,
+    workItemId,
+  };
+}
+
 /**
  * Model selection override for per-agent-type model configuration.
  */
@@ -208,6 +253,32 @@ export class Agent {
       requestId: this.requestId,
       objective: workItem.objective,
     };
+  }
+
+  /**
+   * Emit memory_injected event via both internal hook queue and event emitter.
+   */
+  private emitMemoryInjected(workItem: WorkItem, data: {
+    query: string;
+    resultPreview?: string;
+    memoryContent?: string;
+    contextWithMemory?: string;
+    itemCount: number;
+    success: boolean;
+    iteration: number;
+    version: 'v1' | 'v2';
+    latencyMs?: number;
+    coverage?: Record<string, number>;
+    discriminatorsIncluded?: number;
+    totalTokens?: number;
+    fallbackToV1?: boolean;
+    trainingSignal?: Record<string, unknown>;
+  }): void {
+    this.internalHookQueue.enqueue({
+      type: 'memory_injected',
+      ...data,
+    }, this.buildHookContext(workItem));
+    this.emit(createEvent('memory_injected', data, workItem.workId));
   }
 
   private normalizeMemoryQueryKey(value: string): string {
@@ -387,13 +458,11 @@ export class Agent {
 
         if (canReuseCached) {
           memoryContent = cached.content;
-          const contextWithMemory = memoryContent ? `${taskContext}\n\n${memoryContent}` : undefined;
-          this.internalHookQueue.enqueue({
-            type: 'memory_injected',
+          this.emitMemoryInjected(workItem, {
             query: eventQuery,
             resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
             memoryContent: memoryContent ?? undefined,
-            contextWithMemory,
+            contextWithMemory: memoryContent ? `${taskContext}\n\n${memoryContent}` : undefined,
             itemCount: cached.itemCount,
             success: memoryContent !== null,
             iteration,
@@ -404,23 +473,7 @@ export class Agent {
             totalTokens: cached.totalTokens,
             fallbackToV1: cached.fallbackToV1,
             trainingSignal: cached.trainingSignal,
-          }, this.buildHookContext(workItem));
-          this.emit(createEvent('memory_injected', {
-            query: eventQuery,
-            resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
-            memoryContent: memoryContent ?? undefined,
-            contextWithMemory,
-            itemCount: cached.itemCount,
-            success: memoryContent !== null,
-            iteration,
-            version: cached.version,
-            latencyMs: cached.latencyMs,
-            coverage: cached.coverage,
-            discriminatorsIncluded: cached.discriminatorsIncluded,
-            totalTokens: cached.totalTokens,
-            fallbackToV1: cached.fallbackToV1,
-            trainingSignal: cached.trainingSignal,
-          }, workItem.workId));
+          });
         } else if (shouldUseV2 && this.memoryInjector.injectV2) {
           const recentMessages = recentMessageItems
             .filter(item => item.role === 'user')
@@ -482,8 +535,7 @@ export class Agent {
             totalTokens: v2Result.metrics?.totalTokens,
             trainingSignal: v2Result.trainingSignal,
           });
-          this.internalHookQueue.enqueue({
-            type: 'memory_injected',
+          this.emitMemoryInjected(workItem, {
             query: eventQuery,
             resultPreview: memoryContent.slice(0, 500),
             memoryContent,
@@ -498,23 +550,7 @@ export class Agent {
             totalTokens: v2Result.metrics?.totalTokens,
             fallbackToV1: false,
             trainingSignal: v2Result.trainingSignal,
-          }, this.buildHookContext(workItem));
-          this.emit(createEvent('memory_injected', {
-            query: eventQuery,
-            resultPreview: memoryContent.slice(0, 500),
-            memoryContent,
-            contextWithMemory,
-            itemCount: v2Result.atoms?.length ?? 0,
-            success: true,
-            iteration,
-            version: 'v2',
-            latencyMs: v2Result.metrics?.latencyMs,
-            coverage: v2Result.metrics?.coverage,
-            discriminatorsIncluded: v2Result.metrics?.discriminatorsIncluded,
-            totalTokens: v2Result.metrics?.totalTokens,
-            fallbackToV1: false,
-            trainingSignal: v2Result.trainingSignal,
-          }, workItem.workId));
+          });
         } else {
           fallbackToV1 = shouldUseV2;
           memoryContent = await this.memoryInjector.inject({ query, maxTokens: 1000 });
@@ -528,8 +564,7 @@ export class Agent {
             version: 'v1',
             fallbackToV1,
           });
-          this.internalHookQueue.enqueue({
-            type: 'memory_injected',
+          this.emitMemoryInjected(workItem, {
             query: eventQuery,
             resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
             memoryContent: memoryContent ?? undefined,
@@ -539,41 +574,19 @@ export class Agent {
             iteration,
             version: 'v1',
             fallbackToV1,
-          }, this.buildHookContext(workItem));
-          this.emit(createEvent('memory_injected', {
-            query: eventQuery,
-            resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
-            memoryContent: memoryContent ?? undefined,
-            contextWithMemory,
-            itemCount,
-            success: memoryContent !== null,
-            iteration,
-            version: 'v1',
-            fallbackToV1,
-          }, workItem.workId));
+          });
         }
       } catch {
         // Silent fallback - continue without memory
         // Fire memory_injected hook even on failure for observability
-        this.internalHookQueue.enqueue({
-          type: 'memory_injected',
+        this.emitMemoryInjected(workItem, {
           query: this.memoryInjector.summarizeQueryPlan?.(this.buildMemoryQuery(workItem, globalContext))
             || this.buildMemoryQuery(workItem, globalContext),
-          resultPreview: undefined,
           itemCount: 0,
           success: false,
           iteration,
           version: 'v1',
-        }, this.buildHookContext(workItem));
-        this.emit(createEvent('memory_injected', {
-          query: this.memoryInjector.summarizeQueryPlan?.(this.buildMemoryQuery(workItem, globalContext))
-            || this.buildMemoryQuery(workItem, globalContext),
-          resultPreview: undefined,
-          itemCount: 0,
-          success: false,
-          iteration,
-          version: 'v1',
-        }, workItem.workId));
+        });
       }
     }
 
@@ -699,39 +712,10 @@ export class Agent {
       return 0;
     }
 
-    const validArtifacts = (structuredOutput.artifacts as unknown[]).filter((a): a is {
-      sourcePath: string;
-      line?: number | null;
-      kind: string;
-      name: string;
-      signature?: string | null;
-      modifies?: string[] | null;
-      calls?: string[] | null;
-      insight?: string | null;
-      reduces?: string | null;
-    } => (
-      typeof a === 'object' &&
-      a !== null &&
-      typeof (a as Record<string, unknown>).sourcePath === 'string' &&
-      typeof (a as Record<string, unknown>).kind === 'string' &&
-      typeof (a as Record<string, unknown>).name === 'string'
-    ));
+    const validArtifacts = (structuredOutput.artifacts as unknown[]).filter(isValidRawArtifact);
 
     for (const a of validArtifacts) {
-      localContext.addArtifact({
-        sourcePath: a.sourcePath,
-        line: typeof a.line === 'number' ? a.line : undefined,
-        kind: a.kind as ArtifactKind,
-        name: a.name,
-        signature: typeof a.signature === 'string' ? a.signature : undefined,
-        modifies: Array.isArray(a.modifies) ? a.modifies : undefined,
-        calls: Array.isArray(a.calls) ? a.calls : undefined,
-        insight: typeof a.insight === 'string' ? a.insight : undefined,
-        reduces: typeof a.reduces === 'string' ? a.reduces as 'structural' | 'relational' | 'behavioral' | 'contractual' : undefined,
-        relevance: 1.0,
-        discoveredBy: this.config.type,
-        workItemId,
-      }, workItemId);
+      localContext.addArtifact(mapRawArtifact(a, this.config.type, workItemId), workItemId);
     }
 
     return validArtifacts.length;
@@ -1829,6 +1813,42 @@ export class Agent {
   }
 
   /**
+   * Apply preToolUse hook, returning effective args or block info.
+   */
+  private async applyPreToolUseHook(
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ action: 'proceed'; effectiveArgs: Record<string, unknown> } | { action: 'block'; errorMessage: string }> {
+    if (!this.hooks?.preToolUse) {
+      return { action: 'proceed', effectiveArgs: args };
+    }
+    const hookResult = await this.hooks.preToolUse(name, args);
+    if (hookResult.action === 'block') {
+      return { action: 'block', errorMessage: hookResult.message ?? 'Blocked by hook' };
+    }
+    if (hookResult.action === 'modify' && hookResult.modifiedArgs) {
+      return { action: 'proceed', effectiveArgs: hookResult.modifiedArgs };
+    }
+    return { action: 'proceed', effectiveArgs: args };
+  }
+
+  /**
+   * Apply postToolUse hook, returning the (possibly modified) result.
+   */
+  private async applyPostToolUseHook(
+    name: string,
+    args: Record<string, unknown>,
+    toolResult: ToolResult,
+  ): Promise<ToolResult> {
+    if (!this.hooks?.postToolUse) return toolResult;
+    const hookResult = await this.hooks.postToolUse(name, args, toolResult);
+    if (hookResult.action === 'modify' && hookResult.modifiedResult) {
+      return hookResult.modifiedResult;
+    }
+    return toolResult;
+  }
+
+  /**
    * Process tool calls.
    */
   private async processToolCalls(
@@ -2066,21 +2086,14 @@ export class Agent {
       const isParallelSafe = !isAgentTool && this.toolRegistry.isParallelSafe(canonicalName);
 
       if (isParallelSafe) {
-        // PreToolUse hook
-        let effectiveArgs = call.arguments;
-        if (this.hooks?.preToolUse) {
-          const hookResult = await this.hooks.preToolUse(canonicalName, call.arguments);
-          if (hookResult.action === 'block') {
-            const toolResult = errorResult(canonicalName, hookResult.message ?? 'Blocked by hook', 0);
-            const toolDurationMs = 0;
-            const stop = handleToolResult(call, toolResult, toolDurationMs, false);
-            if (stop) return;
-            continue;
-          }
-          if (hookResult.action === 'modify' && hookResult.modifiedArgs) {
-            effectiveArgs = hookResult.modifiedArgs;
-          }
+        const preHook = await this.applyPreToolUseHook(canonicalName, call.arguments);
+        if (preHook.action === 'block') {
+          const toolResult = errorResult(canonicalName, preHook.errorMessage, 0);
+          const stop = handleToolResult(call, toolResult, 0, false);
+          if (stop) return;
+          continue;
         }
+        const effectiveArgs = preHook.effectiveArgs;
 
         this.emit(createEvent('tool_call', {
           toolName: canonicalName,
@@ -2092,15 +2105,10 @@ export class Agent {
         const capturedArgs = effectiveArgs;
         const promise = (async () => {
           try {
-            let toolResult = await this.toolRegistry.execute(canonicalName, capturedArgs, { cwd });
-
-            // PostToolUse hook
-            if (this.hooks?.postToolUse) {
-              const hookResult = await this.hooks.postToolUse(canonicalName, capturedArgs, toolResult);
-              if (hookResult.action === 'modify' && hookResult.modifiedResult) {
-                toolResult = hookResult.modifiedResult;
-              }
-            }
+            const toolResult = await this.applyPostToolUseHook(
+              canonicalName, capturedArgs,
+              await this.toolRegistry.execute(canonicalName, capturedArgs, { cwd }),
+            );
 
             return { toolResult, toolDurationMs: Date.now() - toolStartTime };
           } catch (error) {
@@ -2118,20 +2126,14 @@ export class Agent {
       const shouldStop = await flushParallel();
       if (shouldStop) return;
 
-      // PreToolUse hook for sequential execution
-      let effectiveArgs = call.arguments;
-      if (this.hooks?.preToolUse) {
-        const hookResult = await this.hooks.preToolUse(canonicalName, call.arguments);
-        if (hookResult.action === 'block') {
-          const toolResult = errorResult(canonicalName, hookResult.message ?? 'Blocked by hook', 0);
-          const stop = handleToolResult(call, toolResult, 0, isAgentTool);
-          if (stop) return;
-          continue;
-        }
-        if (hookResult.action === 'modify' && hookResult.modifiedArgs) {
-          effectiveArgs = hookResult.modifiedArgs;
-        }
+      const seqPreHook = await this.applyPreToolUseHook(canonicalName, call.arguments);
+      if (seqPreHook.action === 'block') {
+        const toolResult = errorResult(canonicalName, seqPreHook.errorMessage, 0);
+        const stop = handleToolResult(call, toolResult, 0, isAgentTool);
+        if (stop) return;
+        continue;
       }
+      const effectiveArgs = seqPreHook.effectiveArgs;
 
       this.emit(createEvent('tool_call', {
         toolName: canonicalName,
@@ -2144,18 +2146,11 @@ export class Agent {
       try {
         // Use canonical name for execution, but pass original call for agent tools (which need call.id)
         const normalizedCall = { ...call, name: canonicalName, arguments: effectiveArgs };
-        let toolResult = isAgentTool
+        const rawResult = isAgentTool
           ? await this.executeAgentToolCall(normalizedCall, workItem, globalContext, localContext, cwd)
           : await this.toolRegistry.execute(canonicalName, effectiveArgs, { cwd });
         const toolDurationMs = Date.now() - toolStartTime;
-
-        // PostToolUse hook
-        if (this.hooks?.postToolUse) {
-          const hookResult = await this.hooks.postToolUse(canonicalName, effectiveArgs, toolResult);
-          if (hookResult.action === 'modify' && hookResult.modifiedResult) {
-            toolResult = hookResult.modifiedResult;
-          }
-        }
+        const toolResult = await this.applyPostToolUseHook(canonicalName, effectiveArgs, rawResult);
 
         const stop = handleToolResult(call, toolResult, toolDurationMs, isAgentTool);
         if (stop) return;
@@ -2487,46 +2482,14 @@ export class Agent {
     // Extract artifacts from structured output and add to parent's local context
     // Wrapped in try-catch to preserve sub-agent results even if merging fails
     const artifacts = subResult.structuredOutput?.artifacts;
-    // Declare outside try-catch for validation access
-    let extractedArtifacts: Array<{
-      sourcePath: string;
-      line?: number | null;
-      kind: string;
-      name: string;
-      signature?: string | null;
-      modifies?: string[] | null;
-      calls?: string[] | null;
-      insight?: string | null;
-      reduces?: string | null;
-    }> = [];
+    let extractedArtifacts: RawArtifact[] = [];
 
     try {
-
-      // Try to extract artifacts from structured output first
       if (Array.isArray(artifacts) && artifacts.length > 0) {
-        const validArtifacts = artifacts.filter((a): a is {
-          sourcePath: string;
-          line?: number | null;
-          kind: string;
-          name: string;
-          signature?: string | null;
-          modifies?: string[] | null;
-          calls?: string[] | null;
-          insight?: string | null;
-          reduces?: string | null;
-        } => (
-          typeof a === 'object' &&
-          a !== null &&
-          typeof a.sourcePath === 'string' &&
-          typeof a.kind === 'string' &&
-          typeof a.name === 'string'
-        ));
-        extractedArtifacts.push(...validArtifacts);
+        extractedArtifacts.push(...artifacts.filter(isValidRawArtifact));
       }
 
       // FALLBACK: If structured output parsing failed, extract directly from sub-agent's local context.
-      // This handles cases where tool call exceptions caused JSON parsing to fail.
-      // The sub-agent may have discovered artifacts but structuredOutput is null.
       if (extractedArtifacts.length === 0 && subResult.localContext) {
         const contextArtifacts = subResult.localContext.getArtifacts();
         if (contextArtifacts.length > 0) {
@@ -2539,20 +2502,9 @@ export class Agent {
       }
 
       if (extractedArtifacts.length > 0) {
-        parentLocalContext.addArtifacts(extractedArtifacts.map(a => ({
-          sourcePath: a.sourcePath,
-          line: typeof a.line === 'number' ? a.line : undefined,
-          kind: a.kind as ArtifactKind,
-          name: a.name,
-          signature: typeof a.signature === 'string' ? a.signature : undefined,
-          modifies: Array.isArray(a.modifies) ? a.modifies : undefined,
-          calls: Array.isArray(a.calls) ? a.calls : undefined,
-          insight: typeof a.insight === 'string' ? a.insight : undefined,
-          reduces: typeof a.reduces === 'string' ? a.reduces as 'structural' | 'relational' | 'behavioral' | 'contractual' : undefined,
-          relevance: 1.0, // Default: explorer returns what's relevant
-          discoveredBy: agentConfig.type,
-          workItemId: (a as { workItemId?: string }).workItemId ?? subWorkItem.workId,
-        })), subWorkItem.workId);
+        parentLocalContext.addArtifacts(extractedArtifacts.map(a =>
+          mapRawArtifact(a, agentConfig.type, (a as { workItemId?: string }).workItemId ?? subWorkItem.workId)
+        ), subWorkItem.workId);
       }
 
       // Merge sub-agent's discoveries back into parent's local context
@@ -2611,46 +2563,52 @@ export class Agent {
       return successResult(call.name, JSON.stringify(payload), 0);
     }
 
-    // Build human-readable error message for failed sub-agents
-    // Include key details without requiring JSON parsing
-    const friendlyAgentName = agentConfig.type
+    return errorResult(call.name, this.formatSubAgentError(agentConfig.type, subResult, enhancedResponse, postProcessingError), 0);
+  }
+
+  /**
+   * Build human-readable error message for failed sub-agents.
+   */
+  private formatSubAgentError(
+    agentType: string,
+    subResult: AgentResult,
+    enhancedResponse: string,
+    postProcessingError: string | null,
+  ): string {
+    const friendlyName = agentType
       .split(/[_-]/g)
       .filter((part) => part.length > 0)
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
       .join(' ');
-    const errorParts = [
-      `${friendlyAgentName || 'Sub-agent'} failed`,
-    ];
-    // Always include termination reason if we have one
+    const parts = [`${friendlyName || 'Sub-agent'} failed`];
+
     if (subResult.terminationReason) {
-      errorParts.push(` (reason: ${subResult.terminationReason})`);
+      parts.push(` (reason: ${subResult.terminationReason})`);
     }
-    // Include error details - if missing, note that
     if (subResult.error) {
-      errorParts.push(`: ${subResult.error}`);
+      parts.push(`: ${subResult.error}`);
     } else if (subResult.terminationReason === 'agent_error') {
-      errorParts.push(` - no error message captured, check agent logs`);
+      parts.push(` - no error message captured, check agent logs`);
     }
+
     const toolsUsed = subResult.metrics?.toolCallsMade ?? 0;
     if (toolsUsed > 0) {
-      errorParts.push(`\nTools called: ${toolsUsed} (${subResult.metrics?.toolCallsSucceeded ?? 0} succeeded, ${subResult.metrics?.toolCallsFailed ?? 0} failed)`);
+      parts.push(`\nTools called: ${toolsUsed} (${subResult.metrics?.toolCallsSucceeded ?? 0} succeeded, ${subResult.metrics?.toolCallsFailed ?? 0} failed)`);
     }
     if (subResult.toolErrors && subResult.toolErrors.length > 0) {
-      errorParts.push(`\nTool errors: ${subResult.toolErrors.slice(0, 3).join('; ')}${subResult.toolErrors.length > 3 ? '...' : ''}`);
+      parts.push(`\nTool errors: ${subResult.toolErrors.slice(0, 3).join('; ')}${subResult.toolErrors.length > 3 ? '...' : ''}`);
     }
-    // Include partial response if available
     if (enhancedResponse && enhancedResponse.trim().length > 0) {
       const preview = enhancedResponse.length > 500
         ? enhancedResponse.slice(0, 500) + '... [truncated]'
         : enhancedResponse;
-      errorParts.push(`\nPartial output:\n${preview}`);
+      parts.push(`\nPartial output:\n${preview}`);
     }
-    // Include post-processing error if artifact merging failed
     if (postProcessingError) {
-      errorParts.push(`\nPost-processing warning: ${postProcessingError}`);
+      parts.push(`\nPost-processing warning: ${postProcessingError}`);
     }
 
-    return errorResult(call.name, errorParts.join(''), 0);
+    return parts.join('');
   }
 
   /**
