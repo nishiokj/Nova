@@ -74,7 +74,7 @@ if (args.values['connector-config']) {
   }
 }
 
-await loadEnvFile(join(import.meta.dir, '../../../.env'))
+await loadEnvFile(join(import.meta.dir, '../../../../.env'))
 
 const databaseUrl = process.env.DATABASE_URL
 const encryptionKey = process.env.CREDENTIAL_ENCRYPTION_KEY

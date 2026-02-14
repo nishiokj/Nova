@@ -60,6 +60,15 @@ export { resetProviderCircuit, getCircuitStatus };
 type AgentAction = 'done' | 'continue';
 
 const QUESTION_CLEANUP_REGEX = /```[\s\S]*?```|`[^`]*`/g;
+const BOUNDS_TERMINATION_REASONS = new Set([
+  'max_iterations_exceeded',
+  'max_tool_calls_exceeded',
+  'max_duration_exceeded',
+]);
+
+function isBoundsTerminationReason(reason: string | undefined): boolean {
+  return typeof reason === 'string' && BOUNDS_TERMINATION_REASONS.has(reason);
+}
 
 function inferUserPromptFromResponse(responseText?: string): UserPromptInfo | null {
   if (!responseText) return null;
@@ -214,6 +223,22 @@ export class Agent {
     totalTokens?: number;
     trainingSignal?: Record<string, unknown>;
   }>();
+
+  private sanitizeContextPathSegment(value: string): string {
+    return value.replace(/[^A-Za-z0-9._-]/g, '_');
+  }
+
+  private resolveLocalContextFilePath(globalContext: ContextWindow, workItemId: string): string | undefined {
+    if (!globalContext.filePath) {
+      return undefined;
+    }
+    const sessionDir = path.dirname(globalContext.filePath);
+    const localDir = path.join(sessionDir, 'work-contexts');
+    const safeRequestId = this.sanitizeContextPathSegment(this.requestId || 'request');
+    const safeAgentType = this.sanitizeContextPathSegment(this.config.type || 'agent');
+    const safeWorkId = this.sanitizeContextPathSegment(workItemId || 'work');
+    return path.join(localDir, `${safeRequestId}__${safeAgentType}__${safeWorkId}.md`);
+  }
 
   constructor(config: AgentConfig, runtime: {
     llm: LLMAdapter;
@@ -892,9 +917,11 @@ export class Agent {
     const runAsyncId = profiler.asyncBegin(`agent.run:${this.config.type}`, 'agent');
 
     // Create fresh local context for this agent's work
+    const localContextFilePath = this.resolveLocalContextFilePath(globalContext, workItem.workId);
     const localContext = new ContextWindow(
       `${globalContext.sessionKey}:${this.config.type}:${workItem.workId}`,
-      globalContext.maxTokens
+      globalContext.maxTokens,
+      localContextFilePath
     );
 
     const startTime = Date.now();
@@ -989,16 +1016,22 @@ export class Agent {
     // Bundle artifacts explicitly in result for clear contract
     result.artifacts = localContext.getArtifacts();
 
-    // HARD VALIDATION: Explorer agents MUST produce artifacts when reading files
-    // Reading files without extracting artifacts is unacceptable - it wastes context
-    // and provides zero value to downstream agents.
+    // Explorer validation: reading files should produce artifacts.
+    // Keep this strict for normal completions, but allow partial bound exits.
     if (this.config.type === 'explorer' && result.filesRead.length > 0 && result.artifacts!.length === 0) {
-      result.success = false;
-      result.terminationReason = 'invalid_action';
-      result.error = `Explorer read ${result.filesRead.length} files but extracted 0 artifacts. ` +
-        `This is a hard failure. Every file read MUST produce artifacts. ` +
-        `Files read: ${result.filesRead.slice(0, 5).join(', ')}${result.filesRead.length > 5 ? '...' : ''}`;
-      console.error(`[AGENT:explorer] VALIDATION FAILURE: ${result.filesRead.length} files read, 0 artifacts produced`);
+      if (isBoundsTerminationReason(result.terminationReason)) {
+        console.warn(
+          `[AGENT:explorer] BOUNDS EXIT WITH ZERO ARTIFACTS: ${result.filesRead.length} files read, ` +
+          `termination=${result.terminationReason}`
+        );
+      } else {
+        result.success = false;
+        result.terminationReason = 'invalid_action';
+        result.error = `Explorer read ${result.filesRead.length} files but extracted 0 artifacts. ` +
+          `This is a hard failure. Every file read MUST produce artifacts. ` +
+          `Files read: ${result.filesRead.slice(0, 5).join(', ')}${result.filesRead.length > 5 ? '...' : ''}`;
+        console.error(`[AGENT:explorer] VALIDATION FAILURE: ${result.filesRead.length} files read, 0 artifacts produced`);
+      }
     }
 
     // HARD VALIDATION: Detect and reject planning-speak responses
@@ -2524,18 +2557,25 @@ export class Agent {
     // CRITICAL: Include actual artifact content, not just count. The calling agent
     // needs to see the rich semantic extractions (signatures, side effects, call graphs)
     // to act without re-reading files.
-    // HARD VALIDATION: Explorer must produce artifacts when reading files
-    // This catches cases where the validation in run() didn't fire (e.g., structured output issues)
+    // Explorer validation mirror for sub-agent calls.
+    // Keep strict behavior except for bounds exits where partial output is acceptable.
     const filesReadCount = (subResult.filesRead ?? []).length;
     const artifactCount = extractedArtifacts.length;
     let explorerValidationFailed = false;
     let explorerValidationError = '';
 
     if (agentConfig.type === 'explorer' && filesReadCount > 0 && artifactCount === 0) {
-      explorerValidationFailed = true;
-      explorerValidationError = `Explorer read ${filesReadCount} files but extracted 0 artifacts. ` +
-        `This is unacceptable - every file read MUST produce artifacts.`;
-      console.error(`[AGENT:explorer] SUB-AGENT VALIDATION FAILURE: ${filesReadCount} files, 0 artifacts`);
+      if (isBoundsTerminationReason(subResult.terminationReason)) {
+        console.warn(
+          `[AGENT:explorer] SUB-AGENT BOUNDS EXIT WITH ZERO ARTIFACTS: ${filesReadCount} files, ` +
+          `termination=${subResult.terminationReason}`
+        );
+      } else {
+        explorerValidationFailed = true;
+        explorerValidationError = `Explorer read ${filesReadCount} files but extracted 0 artifacts. ` +
+          `This is unacceptable - every file read MUST produce artifacts.`;
+        console.error(`[AGENT:explorer] SUB-AGENT VALIDATION FAILURE: ${filesReadCount} files, 0 artifacts`);
+      }
     }
 
     // Sub-agents with structured output stream their response field directly to TUI
@@ -2682,7 +2722,7 @@ export class Agent {
     }
 
     void schemaId;
-    return `[SCHEMA REMINDER] You must set action, goalStateReached, and awaitingUserInput every turn. Valid actions: "done", "continue". If you need user input, call PromptUser then action="done", goalStateReached=false, awaitingUserInput=true.`;
+    return `[SCHEMA REMINDER] You must set action, goalStateReached, and awaitingUserInput every turn. action is loop control ("done"|"continue"). goalStateReached is objective completion (true only when objective is complete). awaitingUserInput is blocking state (true only when you called PromptUser). Valid combos: continue/false/false; done/true/false; done/false/true.`;
   }
 
   private parseBoolean(
@@ -2711,6 +2751,7 @@ export class Agent {
     const goalStateReachedValue = candidate.goalStateReached ?? candidate.goal_state_reached;
     const awaitingUserInputValue = candidate.awaitingUserInput ?? candidate.awaiting_user_input;
 
+    const response = typeof candidate.response === 'string' ? candidate.response : '';
     const awaitingUserInput = this.parseBoolean(awaitingUserInputValue, false);
 
     let action: 'done' | 'continue';
@@ -2723,10 +2764,14 @@ export class Agent {
       action = inferredGoal ? 'done' : 'continue';
     }
 
-    const response = typeof candidate.response === 'string' ? candidate.response : '';
+    // Clamp to valid state combinations.
+    if (awaitingUserInput) {
+      action = 'done';
+    }
+
     const goalStateReached = action === 'continue'
       ? false
-      : this.parseBoolean(goalStateReachedValue, true);
+      : (awaitingUserInput ? false : this.parseBoolean(goalStateReachedValue, true));
 
     const normalized: Record<string, unknown> = {
       action,
@@ -2864,9 +2909,10 @@ export class Agent {
 
     const schemaId = this.resolveOutputSchemaId();
     if (!schemaId) {
-      result.terminationReason = 'invalid_action';
-      result.error = `Unknown output schema for ${this.config.type} (schemaId missing or unrecognized).`;
-      return null;
+      // Allow plugin-owned/unknown schemas to pass through without Zod validation.
+      // Loop control still comes from `action` parsing, and invalid combinations
+      // are rejected later (e.g., done requires goalStateReached unless awaitingUserInput).
+      return parsed;
     }
 
     const schema = getOutputSchema(schemaId as keyof typeof OUTPUT_SCHEMAS);

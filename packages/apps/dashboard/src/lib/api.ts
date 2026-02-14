@@ -46,9 +46,9 @@ export interface ExportResponse {
 export interface GraphDSession {
   session_key: string
   client_type: string
-  created_at: number // Unix timestamp
-  last_accessed_at: number
-  expires_at: number | null
+  created_at: number | string // Unix timestamp (seconds or milliseconds) or ISO string
+  last_accessed_at: number | string
+  expires_at: number | string | null
   working_dir: string | null
   status: string
   metadata_json: string | null

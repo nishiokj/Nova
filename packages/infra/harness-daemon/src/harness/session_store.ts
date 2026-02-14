@@ -4,6 +4,7 @@ import type { ContextWindowSnapshot, SessionPermissionState } from 'types';
 import type { ModelSelection } from 'agent';
 import { PermissionChecker } from './permissions.js';
 import path from 'path';
+import { existsSync, readdirSync } from 'fs';
 
 interface SessionStoreOptions {
   sessionKey: string;
@@ -119,6 +120,38 @@ Consider if the user is:
 Acknowledge the interruption and adjust your approach accordingly.`;
 }
 
+function resolveContextFilePath(workingDir: string, sessionKey: string): string {
+  const date = new Date().toISOString().split('T')[0];
+  const sessionsRoot = path.join(workingDir, '.haiku', 'sessions');
+  const todayPath = path.join(sessionsRoot, date, sessionKey, 'context.md');
+
+  if (existsSync(todayPath)) {
+    return todayPath;
+  }
+
+  if (!existsSync(sessionsRoot)) {
+    return todayPath;
+  }
+
+  try {
+    const dateDirs = readdirSync(sessionsRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((a, b) => b.localeCompare(a));
+
+    for (const dateDir of dateDirs) {
+      const candidate = path.join(sessionsRoot, dateDir, sessionKey, 'context.md');
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  } catch {
+    // Fall back to today's path on any filesystem error.
+  }
+
+  return todayPath;
+}
+
 /** Info about an active async run for a session */
 export interface AsyncRunInfo {
   requestId: string;
@@ -156,8 +189,7 @@ export class SessionStore {
     this.isGraphDReady = options.isGraphDReady;
     this.logger = options.logger;
     this.workingDir = options.workingDir ?? process.cwd();
-    const date = new Date().toISOString().split('T')[0];
-    this.contextFilePath = path.join(this.workingDir, '.haiku', 'sessions', date, options.sessionKey, 'context.md');
+    this.contextFilePath = resolveContextFilePath(this.workingDir, options.sessionKey);
 
     // Per-session permission checker - each session has its own dangerous mode and grants
     this.permissionChecker = new PermissionChecker(
@@ -223,7 +255,19 @@ export class SessionStore {
     // First, recover paused state from GraphD metadata if it exists
     this.recoverPausedState();
 
-    // Try to hydrate from GraphD
+    const hadLocalContextFile = existsSync(this.contextFilePath);
+    if (hadLocalContextFile) {
+      this.context = new ContextWindow(this.sessionKey, this.maxTokens, this.contextFilePath);
+      this.logger.debug('Hydrated context from disk', {
+        sessionKey: this.sessionKey,
+        itemCount: this.context.items.length,
+        version: this.context.version,
+        path: this.contextFilePath,
+      });
+      return this.context;
+    }
+
+    // Fall back to GraphD only when no disk context exists yet.
     if (this.isGraphDReady() && this.graphd) {
       try {
         const result = this.graphd.contextGet(this.sessionKey) as {
@@ -232,15 +276,16 @@ export class SessionStore {
         };
         if (result.snapshot?.context) {
           this.context = ContextWindow.deserialize(result.snapshot.context, this.contextFilePath);
-          this.logger.debug('Hydrated context from GraphD', {
+          this.logger.debug('Seeded disk context from GraphD snapshot', {
             sessionKey: this.sessionKey,
             itemCount: this.context.items.length,
             version: this.context.version,
+            path: this.contextFilePath,
           });
           return this.context;
         }
       } catch (error) {
-        this.logger.warning('Failed to hydrate context from GraphD', {
+        this.logger.warning('Failed to seed context from GraphD snapshot', {
           sessionKey: this.sessionKey,
           error: String(error),
         });

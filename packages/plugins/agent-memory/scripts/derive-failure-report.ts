@@ -116,7 +116,7 @@ interface ReportConfig {
 }
 
 function loadConfig(metadata: Record<string, unknown> | undefined): ReportConfig {
-  const projectRoot = path.join(import.meta.dir, '../../../')
+  const projectRoot = path.join(import.meta.dir, '../../../../')
 
   // Resolve Telegram chat ID: explicit metadata > first allowed user from env
   let telegramChatId = (metadata?.telegramChatId as number) ?? null

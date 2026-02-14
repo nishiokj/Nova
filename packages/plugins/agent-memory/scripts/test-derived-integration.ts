@@ -56,7 +56,7 @@ async function main() {
   console.log('Testing derived task integration...\n')
 
   // Load environment
-  await loadEnvFile(join(import.meta.dir, '../../../.env'))
+  await loadEnvFile(join(import.meta.dir, '../../../../.env'))
 
   const databaseUrl = process.env.DATABASE_URL
   if (!databaseUrl) {

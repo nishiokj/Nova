@@ -61,6 +61,8 @@ import {
   SCROLL_AMOUNT,
   STATUS_TICK_INTERVAL,
   SESSION_STALE_THRESHOLD,
+  BUSY_STALL_CHECK_INTERVAL,
+  BUSY_STALL_TIMEOUT,
   FILE_CACHE_REFRESH_INTERVAL,
   CLEANUP_DELAY,
   GRACEFUL_SHUTDOWN_DELAY,
@@ -416,6 +418,8 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   // both paths deliver to the same run channel causing duplicate 'response' events.
   // The second delivery can overwrite streamed content after finalizeStreaming() clears it.
   const processedResponsesRef = useRef(new Set<string>());
+  const lastRunActivityAtRef = useRef(Date.now());
+  const busyStallReportedRef = useRef(false);
   useEffect(() => {
     return store.subscribe(() => {
       setSnapshot(store.getSnapshot());
@@ -451,6 +455,38 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       clearInterval(interval);
     };
   }, [isBusy]);
+
+  useEffect(() => {
+    if (!isBusy) {
+      busyStallReportedRef.current = false;
+      return;
+    }
+
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const stalledMs = now - lastRunActivityAtRef.current;
+      if (stalledMs < BUSY_STALL_TIMEOUT || busyStallReportedRef.current) {
+        return;
+      }
+
+      busyStallReportedRef.current = true;
+      const stalledSeconds = Math.round(BUSY_STALL_TIMEOUT / 1000);
+      store.batch(() => {
+        store.addMessage(
+          "system",
+          `Request stalled: no bridge events for ${stalledSeconds}s. Marking run as failed to avoid silent hangs.`
+        );
+        store.finalizeStreaming();
+        store.finalizeReasoning();
+        store.clearProgress();
+        store.setError("Request stalled (no bridge events)");
+      });
+    }, BUSY_STALL_CHECK_INTERVAL);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [isBusy, store]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -633,6 +669,8 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
   const handleBridgeEvent = (event: BridgeEvent) => {
     profiler.begin(`tui.handleEvent:${event.type}`, 'tui');
+    lastRunActivityAtRef.current = Date.now();
+    busyStallReportedRef.current = false;
     try {
       switch (event.type) {
         case "ready":
@@ -1433,7 +1471,18 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     const payload = needsWorkingDir
       ? { ...data, working_dir: process.cwd() }
       : data;
-    client.send({ type, data: payload });
+    const sent = client.send({ type, data: payload });
+    if (!sent) {
+      store.batch(() => {
+        store.addMessage("system", `Failed to send command "${type}": bridge not connected.`);
+        store.setError("Bridge not connected");
+      });
+      return;
+    }
+    if (type === "send_text" || type === "user_prompt_response" || type === "async_start") {
+      lastRunActivityAtRef.current = Date.now();
+      busyStallReportedRef.current = false;
+    }
   };
 
   const handleQuit = () => {

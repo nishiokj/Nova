@@ -173,6 +173,51 @@ bun run clean                  # Clean all build artifacts
 bun run lint                   # Typecheck all packages
 ```
 
+## AgentLab Zero-Glue Experiment
+
+`/jesus` includes a sidecar-first, image-declared harness setup for SWE-bench Lite:
+
+- Experiment: `.lab/experiments/swebench_lite_v2_zero_glue.yaml`
+- Harness metadata: `config/agentlab/harness.swebench-lite-v2.json`
+- Harness image build file: `Dockerfile.rex-harness.v2`
+- Benchmark mapper: `scripts/agentlab/map_swebench_lite_to_task_boundary.mjs`
+
+Prepare mapped benchmark input:
+
+```bash
+bun scripts/agentlab/map_swebench_lite_to_task_boundary.mjs \
+  --input bench/agentlab/swebench_lite_smoke_1.jsonl \
+  --output .lab/experiments/data/swebench_lite_smoke_1.task_boundary_v1.jsonl \
+  --limit 1
+```
+
+Build harness image:
+
+```bash
+docker build -f Dockerfile.rex-harness.v2 -t rex-harness:swebench-lite-v2 .
+```
+
+Run experiment:
+
+```bash
+cd /Users/jevinnishioka/Desktop/Experiments/rust
+cargo run -p lab-cli -- run /Users/jevinnishioka/Desktop/jesus/.lab/experiments/swebench_lite_v2_zero_glue.yaml --executor local_docker --materialize outputs_only
+```
+
+Observe run state (live):
+
+```bash
+cd /Users/jevinnishioka/Desktop/jesus
+bash scripts/agentlab/observe_run.sh --latest
+```
+
+Observe a specific run once:
+
+```bash
+cd /Users/jevinnishioka/Desktop/jesus
+bash scripts/agentlab/observe_run.sh --run-id run_20260214_051636 --once
+```
+
 ## Key Design Principles
 
 - **Agents are pure functions**: receive `ContextWindow` by value, mutate locally

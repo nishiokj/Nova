@@ -47,6 +47,8 @@ import { createAgenticTaskRepository } from '../db/repositories/agentic-task.js'
 import type { AgenticTaskRepository } from '../db/repositories/agentic-task.js'
 import { createAgenticRunRepository } from '../db/repositories/agentic-run.js'
 import type { AgenticRunRepository } from '../db/repositories/agentic-run.js'
+import { createResearchRepository } from '../db/repositories/research.js'
+import type { ResearchRepository } from '../db/repositories/research.js'
 import { AgenticTaskIntegration, type AgenticIntegrationConfig } from '../agentic/integration.js'
 import { SyncEngine, type SyncEngineConfig } from '../sync/engine.js'
 import { Collector } from '../sync/collector.js'
@@ -156,6 +158,7 @@ export class SyncDaemon {
   readonly agenticTaskRepo: AgenticTaskRepository
   readonly agenticRunRepo: AgenticRunRepository
   readonly agenticIntegration: AgenticTaskIntegration
+  readonly researchRepo: ResearchRepository
 
   readonly server: HttpServer
   private connectors: Map<ConnectorType, Connector> = new Map()
@@ -191,6 +194,7 @@ export class SyncDaemon {
     agenticTaskRepo: AgenticTaskRepository,
     agenticRunRepo: AgenticRunRepository,
     agenticIntegration: AgenticTaskIntegration,
+    researchRepo: ResearchRepository,
   ) {
     this.config = config
     this.sql = config.sql
@@ -219,6 +223,7 @@ export class SyncDaemon {
     this.agenticTaskRepo = agenticTaskRepo
     this.agenticRunRepo = agenticRunRepo
     this.agenticIntegration = agenticIntegration
+    this.researchRepo = researchRepo
   }
 
   /**
@@ -253,6 +258,7 @@ export class SyncDaemon {
     const escalationsRepo = createEscalationsRepository(ctx)
     const agenticTaskRepo = createAgenticTaskRepository(ctx)
     const agenticRunRepo = createAgenticRunRepository(ctx)
+    const researchRepo = createResearchRepository(ctx)
 
     // Create auth provider with connector registry
     const connectors = new Map<ConnectorType, Connector>()
@@ -338,6 +344,7 @@ export class SyncDaemon {
       agenticTaskRepo,
       agenticRunRepo,
       agenticIntegration,
+      researchRepo,
     )
 
     // Store connectors map reference in daemon for registration

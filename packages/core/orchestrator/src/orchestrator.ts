@@ -417,14 +417,7 @@ export class Orchestrator {
         event: params.event,
         context: params.hookContext,
       };
-      const hookCallContext = new ContextWindow(params.contextWindow.sessionKey, params.contextWindow.maxTokens);
-      hookCallContext.addFunctionCall(callId, `hook:${params.hookType}`, hookArgs);
-      params.contextWindow.addAgentResultContext({
-        response: '',
-        filesRead: [],
-        invalidatedPaths: [],
-        localContext: hookCallContext,
-      });
+      params.contextWindow.addFunctionCall(callId, `hook:${params.hookType}`, hookArgs);
 
       this.emit(createEvent('hook_call', {
         hookType: params.hookType,
@@ -461,8 +454,7 @@ export class Orchestrator {
         if (timer) {
           clearTimeout(timer);
         }
-        const hookOutput = new ContextWindow(params.contextWindow.sessionKey, params.contextWindow.maxTokens);
-        hookOutput.addFunctionCallOutput(
+        params.contextWindow.addFunctionCallOutput(
           callId,
           JSON.stringify(
             {
@@ -476,12 +468,6 @@ export class Orchestrator {
           ),
           !success
         );
-        params.contextWindow.addAgentResultContext({
-          response: '',
-          filesRead: [],
-          invalidatedPaths: [],
-          localContext: hookOutput,
-        });
       }
     })();
   }

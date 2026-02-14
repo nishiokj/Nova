@@ -21,6 +21,29 @@ import type { ProviderContext, LLMProviderAdapter } from './types.js';
 import { PartialStreamError } from './types.js';
 import { compileSchemaForCodex } from './schema_compiler.js';
 
+const DEFAULT_CODEX_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_MS = 600_000;
+
+function parsePositiveTimeoutMs(value: string | undefined, fallback: number): number {
+  if (!value || value.trim().length === 0) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
+}
+
+const CODEX_REQUEST_TIMEOUT_MS = parsePositiveTimeoutMs(
+  process.env.CODEX_REQUEST_TIMEOUT_MS,
+  DEFAULT_CODEX_REQUEST_TIMEOUT_MS
+);
+const CODEX_STREAM_IDLE_TIMEOUT_MS = parsePositiveTimeoutMs(
+  process.env.CODEX_STREAM_IDLE_TIMEOUT_MS,
+  DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_MS
+);
+
 // ============================================
 // CODEX PROVIDER
 // ============================================
@@ -108,11 +131,53 @@ export class CodexProvider implements LLMProviderAdapter {
       headers['Chatgpt-Account-Id'] = config.chatgptAccountId;
     }
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
+    const abortController = new AbortController();
+    let requestTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    let streamIdleTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+    const clearRequestTimeout = () => {
+      if (!requestTimeoutHandle) return;
+      clearTimeout(requestTimeoutHandle);
+      requestTimeoutHandle = null;
+    };
+
+    const clearStreamIdleTimeout = () => {
+      if (!streamIdleTimeoutHandle) return;
+      clearTimeout(streamIdleTimeoutHandle);
+      streamIdleTimeoutHandle = null;
+    };
+
+    const abortWithReason = (reason: string) => {
+      if (abortController.signal.aborted) return;
+      abortController.abort(new Error(reason));
+    };
+
+    const scheduleRequestTimeout = () => {
+      clearRequestTimeout();
+      requestTimeoutHandle = setTimeout(() => {
+        abortWithReason(`Codex request timed out after ${CODEX_REQUEST_TIMEOUT_MS}ms`);
+      }, CODEX_REQUEST_TIMEOUT_MS);
+    };
+
+    const resetStreamIdleTimeout = () => {
+      clearStreamIdleTimeout();
+      streamIdleTimeoutHandle = setTimeout(() => {
+        abortWithReason(`Codex stream idle timeout after ${CODEX_STREAM_IDLE_TIMEOUT_MS}ms`);
+      }, CODEX_STREAM_IDLE_TIMEOUT_MS);
+    };
+
+    let response: Response;
+    try {
+      scheduleRequestTimeout();
+      response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: abortController.signal,
+      });
+    } finally {
+      clearRequestTimeout();
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -210,9 +275,11 @@ export class CodexProvider implements LLMProviderAdapter {
     };
 
     try {
+      resetStreamIdleTimeout();
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        resetStreamIdleTimeout();
 
         const chunk = decoder.decode(value, { stream: true });
         const frames = parseSseFrames(chunk);
@@ -436,7 +503,14 @@ export class CodexProvider implements LLMProviderAdapter {
         }
       }
     } catch (streamError) {
-      const cause = streamError instanceof Error ? streamError : new Error(String(streamError));
+      const rawCause = streamError instanceof Error ? streamError : new Error(String(streamError));
+      const abortReason = abortController.signal.reason;
+      const abortReasonMessage = abortReason instanceof Error
+        ? abortReason.message
+        : (typeof abortReason === 'string' ? abortReason : undefined);
+      const cause = rawCause.name === 'AbortError'
+        ? new Error(abortReasonMessage ?? rawCause.message)
+        : rawCause;
       logger.warn('Codex stream interrupted', {
         model: config.model,
         partialContentLength: fullContent.length,
@@ -445,6 +519,8 @@ export class CodexProvider implements LLMProviderAdapter {
       });
       throw new PartialStreamError('Stream interrupted', cause, fullContent, Array.from(toolCallsById.values()));
     } finally {
+      clearRequestTimeout();
+      clearStreamIdleTimeout();
       reader.releaseLock();
     }
 

@@ -386,7 +386,7 @@ async function main(): Promise<void> {
 
   const command = args[0]
 
-  await loadEnvFile(join(import.meta.dir, '../../../.env'))
+  await loadEnvFile(join(import.meta.dir, '../../../../.env'))
 
   const databaseUrl = process.env.DATABASE_URL
   if (!databaseUrl) {

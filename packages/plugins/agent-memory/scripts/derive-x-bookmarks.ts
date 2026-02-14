@@ -61,7 +61,7 @@ function loadConfig(metadata: Record<string, unknown> | undefined): BookmarksCon
     }
   }
 
-  const projectRoot = path.join(import.meta.dir, '../../../')
+  const projectRoot = path.join(import.meta.dir, '../../../../')
 
   return {
     sessionKey: (metadata?.sessionKey as string) ?? 'x-bookmarks-digest',

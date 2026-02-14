@@ -391,6 +391,55 @@ describe('Agent', () => {
       expect(result.terminationReason).toBe('max_tool_calls_exceeded');
       expect(result.response).toContain('Exploration incomplete. Tools called:');
     });
+
+    it('allows explorer bounds exits without artifact hard-failure', async () => {
+      let streamCalls = 0;
+      const agent = new Agent({
+        type: 'explorer',
+        systemPrompt: 'Explorer test prompt',
+        tools: ['Read'],
+        budget: { maxIterations: 5, maxToolCalls: 1, maxDurationMs: 1000 },
+        outputSchema: { name: 'goal_driven_output', schema: { type: 'object' }, strict: true, schemaId: 'goal_driven' },
+      }, {
+        llm: {
+          respond: async () => ({
+            content: '',
+            stopReason: 'tool_use',
+            usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+            model: 'test-model',
+            durationMs: 1,
+          }),
+          stream: async function* () {
+            streamCalls++;
+            yield '';
+            return {
+              content: '',
+              toolCalls: [{ id: `r${streamCalls}`, name: 'Read', arguments: { path: 'README.md' } }],
+              stopReason: 'tool_use',
+              usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+              model: 'test-model',
+              durationMs: 1,
+            };
+          },
+        } as LLMAdapter,
+        toolRegistry: createReadToolRegistry('export const x = 1;'),
+        llmConfig: { model: 'test-model', provider: 'openai', apiKey: 'test-key' },
+      });
+
+      const result = await agent.run({
+        globalContext: new ContextWindow('test-session', 200_000),
+        workItem: createWorkItem({ goal: 'test', objective: 'find symbols', bounds: { maxLlmCalls: 5, maxToolCalls: 1, maxDurationMs: 1000 } }),
+        cwd: process.cwd(),
+      });
+
+      expect(result.terminationReason).toBe('max_tool_calls_exceeded');
+      expect(result.terminationReason).not.toBe('invalid_action');
+      expect(result.success).toBe(true);
+      expect(result.isIncomplete).toBe(true);
+      expect(result.filesRead.length).toBeGreaterThan(0);
+      expect(result.artifacts).toEqual([]);
+      expect(result.response).toContain('Exploration incomplete. Tools called:');
+    });
   });
 
   describe('Stagnation Detection', () => {

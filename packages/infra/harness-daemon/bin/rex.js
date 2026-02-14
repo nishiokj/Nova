@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { runHarnessDaemon } from '../src/harness/daemon.js';
-import { runHarnessTrialCli } from '../src/harness/trial_cli.js';
+import { runHarnessTrialCli } from '../src/cli/run_trial.js';
 
 async function main() {
   const args = process.argv.slice(2);

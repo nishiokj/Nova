@@ -399,6 +399,7 @@ function parseItemBlocks(body: string): ContextItem[] {
  */
 const STATIC_SYSTEM_SUFFIX = `RESPONSE ACTIONS:
 - action: "done" + goalStateReached: true → objective complete
+- action: "done" + awaitingUserInput: true → waiting on user input
 - action: "continue" → progress made, more work needed
 - Use PromptUser tool when you need user input
 

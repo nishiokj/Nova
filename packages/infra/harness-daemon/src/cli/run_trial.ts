@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
 import { HarnessClient, type BridgeEvent, type ErrorData, type ProgressData, type ResponseData, type StreamData, type UserPromptData } from 'harness-client';
-import { HarnessDaemon } from './daemon.js';
+import { HarnessDaemon } from '../harness/daemon.js';
 
 type TrialIds = {
   run_id: string;

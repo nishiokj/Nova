@@ -21,8 +21,29 @@ function unixToIso(ts: number): string {
   return new Date(ts * 1000).toISOString()
 }
 
+function normalizeUnixSeconds(ts: unknown, fallback = 0): number {
+  if (typeof ts === 'number' && Number.isFinite(ts)) {
+    if (ts > 1e12) return Math.floor(ts / 1000)
+    if (ts > 0) return Math.floor(ts)
+  }
+
+  if (typeof ts === 'string') {
+    const asNumber = Number(ts)
+    if (!Number.isNaN(asNumber)) {
+      return normalizeUnixSeconds(asNumber, fallback)
+    }
+    const parsed = Date.parse(ts)
+    if (!Number.isNaN(parsed)) return Math.floor(parsed / 1000)
+  }
+
+  return fallback
+}
+
 function toISOTimestamp(ts: unknown, fallback: string): string {
-  if (typeof ts === 'number') return unixToIso(ts)
+  if (typeof ts === 'number' || typeof ts === 'string') {
+    const normalized = normalizeUnixSeconds(ts)
+    if (normalized > 0) return unixToIso(normalized)
+  }
   if (typeof ts === 'string') {
     const parsed = Date.parse(ts)
     if (!Number.isNaN(parsed)) return new Date(parsed).toISOString()
@@ -34,6 +55,10 @@ function mapStatus(status: string, lastAccessedAt: number): SessionState {
   // If explicitly closed/expired, it's ended
   if (status === 'closed' || status === 'expired') {
     return 'ended'
+  }
+
+  if (!Number.isFinite(lastAccessedAt) || lastAccessedAt <= 0) {
+    return 'idle'
   }
 
   // Check if session is stale (no activity in last 5 minutes)
@@ -495,7 +520,10 @@ function extractWatcherDecisions(
 
 export function mapGraphDSession(raw: GraphDSession, messages: GraphDMessage[] = []): Session {
   const meta = raw.metadata_json ? JSON.parse(raw.metadata_json) : {}
-  const createdAt = unixToIso(raw.created_at)
+  const nowSeconds = Math.floor(Date.now() / 1000)
+  const createdAtSeconds = normalizeUnixSeconds(raw.created_at, nowSeconds)
+  const lastAccessedAtSeconds = normalizeUnixSeconds(raw.last_accessed_at, createdAtSeconds)
+  const createdAt = unixToIso(createdAtSeconds)
 
   // Parse agent requests from event metadata
   const requests: AgentRequest[] = parseRequestsFromMetadata(meta, raw.session_key, createdAt, messages)
@@ -503,7 +531,7 @@ export function mapGraphDSession(raw: GraphDSession, messages: GraphDMessage[] =
 
   // Staleness takes priority — a session with no recent activity is idle/ended
   // regardless of orphaned running requests in its metadata
-  const baseStatus = mapStatus(raw.status, raw.last_accessed_at)
+  const baseStatus = mapStatus(raw.status, lastAccessedAtSeconds)
   let inferredState: SessionState = baseStatus
   if (baseStatus === 'active') {
     const hasRunningRequests = requests.some(r => r.state === 'running')
@@ -523,8 +551,8 @@ export function mapGraphDSession(raw: GraphDSession, messages: GraphDMessage[] =
     state: inferredState,
     env: mapClientTypeToEnv(raw.client_type),
     createdAt,
-    startedAt: unixToIso(raw.last_accessed_at),
-    endedAt: raw.status === 'closed' ? unixToIso(raw.last_accessed_at) : undefined,
+    startedAt: createdAt,
+    endedAt: raw.status === 'closed' ? unixToIso(lastAccessedAtSeconds) : undefined,
     tags: [raw.client_type, raw.working_dir?.split('/').pop() ?? 'unknown'].filter(Boolean) as string[],
     meta: {
       clientType: raw.client_type,
