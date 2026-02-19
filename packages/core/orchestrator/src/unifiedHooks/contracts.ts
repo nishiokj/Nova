@@ -191,6 +191,7 @@ export interface UnifiedEffectContext {
   workingDir?: string;
   internal?: InternalHookContext;
   metadata?: Record<string, unknown>;
+  signal?: AbortSignal;
 }
 
 export interface UnifiedEffectHookRegistration<E extends EffectEventType>

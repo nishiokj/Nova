@@ -17,13 +17,15 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "effect": "^3.19.18",
     "types": "workspace:*",
     "agent": "workspace:*",
     "llm": "workspace:*",
     "tools": "workspace:*",
     "context": "workspace:*",
     "work": "workspace:*",
-    "protocol": "workspace:*"
+    "protocol": "workspace:*",
+    "runtime": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "^1.0.0",

@@ -85,6 +85,15 @@ export interface BridgeEvent {
   data?: Record<string, unknown>;
 }
 
+export type SessionControlAction = 'pause' | 'resume' | 'cancel';
+
+export interface SessionControlResult {
+  success: boolean;
+  requestId?: string;
+  quiesced?: boolean;
+  error?: string;
+}
+
 /**
  * Handle returned from agent.run() for streaming events.
  */
@@ -92,6 +101,9 @@ export interface AgentRunHandle {
   result: Promise<AgentRunResult>;
   events: AsyncIterable<BridgeEvent>;
   abort?: () => void;
+  pause?: (reason?: string) => Promise<SessionControlResult>;
+  resume?: (reason?: string) => Promise<SessionControlResult>;
+  cancel?: (reason?: string) => Promise<SessionControlResult>;
 }
 
 /**

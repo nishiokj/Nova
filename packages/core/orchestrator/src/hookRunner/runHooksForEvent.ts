@@ -4,6 +4,7 @@
  * Executes hooks with ordering, timeout, retries, and policy enforcement.
  */
 
+import { Effect, Fiber } from 'effect';
 import {
   assertNever,
   getBackoffMs,
@@ -23,7 +24,6 @@ import {
   type Hook,
   type HookCriticality,
   type HookContext,
-  type HookIdempotency,
   type HookOutcome,
   type HookPolicy,
   type StatePatch,
@@ -117,13 +117,10 @@ export async function runHooksForEvent<E extends ControlEventType>(
 
   for (const priority of priorities) {
     const group = byPriority.get(priority)!;
-
-    const results = await Promise.all(
-      group.map(hook => executeHookWithPolicy(
-        hook as unknown as RegisteredHook<ControlEvent, DecisionFor<E>>,
-        event,
-        ctx
-      ))
+    const results = await executePriorityGroup(
+      group as unknown as Array<RegisteredHook<ControlEvent, DecisionFor<E>>>,
+      event,
+      ctx
     );
 
     for (const result of results) {
@@ -188,6 +185,8 @@ export async function runHooksForEvent<E extends ControlEventType>(
 // HELPERS
 // ============================================
 
+const HOOK_TIMEOUT_SENTINEL = '__hook_timeout__';
+
 function groupByPriority<Evt extends ControlEvent, D>(
   hooks: Array<RegisteredHook<Evt, D>>
 ): Map<number, Array<RegisteredHook<Evt, D>>> {
@@ -201,80 +200,124 @@ function groupByPriority<Evt extends ControlEvent, D>(
   return groups;
 }
 
-async function executeHookWithPolicy<D>(
-  hook: RegisteredHook<ControlEvent, D>,
+async function executePriorityGroup<D>(
+  hooks: Array<RegisteredHook<ControlEvent, D>>,
   event: ControlEvent,
   ctx: HookContext
-): Promise<{
+): Promise<Array<{
   hookId: string;
   source: string;
   criticality: 'critical' | 'non_critical';
   outcome: HookOutcome<D>;
   policy: HookPolicy;
   audit: HookAuditEntry;
-}> {
-  const startedAt = Date.now();
-  let retriesAttempted = 0;
-  let outcome: HookOutcome<D>;
-  let policyApplied: string | undefined;
+}>> {
+  return Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fibers = yield* Effect.forEach(
+          hooks,
+          (hook) => Effect.forkScoped(executeHookWithPolicyEffect(hook, event, ctx)),
+          { concurrency: 'unbounded' }
+        );
+        return yield* Effect.forEach(fibers, (fiber) => Fiber.join(fiber), {
+          concurrency: 'unbounded',
+        });
+      })
+    )
+  );
+}
 
-  const maxRetries = hook.idempotency === 'idempotent' ? getMaxRetries(hook.policy) : 0;
-  const backoffMs = getBackoffMs(hook.policy);
+function executeHookWithPolicyEffect<D>(
+  hook: RegisteredHook<ControlEvent, D>,
+  event: ControlEvent,
+  ctx: HookContext
+): Effect.Effect<{
+  hookId: string;
+  source: string;
+  criticality: 'critical' | 'non_critical';
+  outcome: HookOutcome<D>;
+  policy: HookPolicy;
+  audit: HookAuditEntry;
+}, never> {
+  return Effect.gen(function* () {
+    const startedAt = Date.now();
+    let retriesAttempted = 0;
+    let outcome: HookOutcome<D> = {
+      kind: 'failed',
+      error: 'Hook execution did not start',
+    };
+    let policyApplied: string | undefined;
 
-  while (true) {
-    try {
-      outcome = await executeWithTimeout(hook, event, ctx);
-    } catch (err) {
-      outcome = { kind: 'failed', error: err instanceof Error ? err.message : String(err) };
-    }
+    const maxRetries = hook.idempotency === 'idempotent' ? getMaxRetries(hook.policy) : 0;
+    const backoffMs = getBackoffMs(hook.policy);
 
-    if (isSuccess(outcome) || outcome.kind === 'skip') {
+    while (true) {
+      outcome = yield* executeWithTimeoutEffect(hook, event, ctx);
+
+      if (isSuccess(outcome) || outcome.kind === 'skip') {
+        break;
+      }
+
+      if (retriesAttempted < maxRetries) {
+        retriesAttempted++;
+        policyApplied = `retry_${retriesAttempted}`;
+        yield* Effect.sleep(backoffMs * retriesAttempted);
+        continue;
+      }
+
+      policyApplied = applyFailurePolicy(hook.policy);
       break;
     }
 
-    if (retriesAttempted < maxRetries) {
-      retriesAttempted++;
-      policyApplied = `retry_${retriesAttempted}`;
-      await sleep(backoffMs * retriesAttempted);
-      continue;
-    }
-
-    policyApplied = applyFailurePolicy(hook.policy);
-    break;
-  }
-
-  return {
-    hookId: hook.id,
-    source: hook.source,
-    criticality: hook.criticality,
-    outcome,
-    policy: hook.policy,
-    audit: {
+    return {
       hookId: hook.id,
       source: hook.source,
-      priority: hook.priority,
-      startedAt,
-      completedAt: Date.now(),
+      criticality: hook.criticality,
       outcome,
-      policyApplied,
-      retriesAttempted,
-    },
-  };
+      policy: hook.policy,
+      audit: {
+        hookId: hook.id,
+        source: hook.source,
+        priority: hook.priority,
+        startedAt,
+        completedAt: Date.now(),
+        outcome,
+        policyApplied,
+        retriesAttempted,
+      },
+    };
+  });
 }
 
-async function executeWithTimeout<Evt extends ControlEvent, D>(
+function executeWithTimeoutEffect<Evt extends ControlEvent, D>(
   hook: Hook<Evt, D>,
   event: ControlEvent,
   ctx: HookContext
-): Promise<HookOutcome<D>> {
-  const timeoutPromise = new Promise<HookOutcome<D>>((resolve) => {
-    setTimeout(() => resolve(timeout()), hook.timeoutMs);
+): Effect.Effect<HookOutcome<D>, never> {
+  const runEffect: Effect.Effect<HookOutcome<D>, Error> = Effect.tryPromise({
+    try: () => hook.run(event as Evt, ctx),
+    catch: (error) =>
+      error instanceof Error
+        ? error
+        : new Error(String(error)),
   });
 
-  return Promise.race([
-    hook.run(event as Evt, ctx),
-    timeoutPromise,
-  ]);
+  return runEffect.pipe(
+    Effect.timeoutFail({
+      duration: hook.timeoutMs,
+      onTimeout: () => new Error(HOOK_TIMEOUT_SENTINEL),
+    }),
+    Effect.catchAll((error): Effect.Effect<HookOutcome<D>, never> => {
+      if (error instanceof Error && error.message === HOOK_TIMEOUT_SENTINEL) {
+        return Effect.succeed(timeout());
+      }
+      return Effect.succeed({
+        kind: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    })
+  );
 }
 
 function applyFailurePolicy(policy: HookPolicy): string {
@@ -292,8 +335,4 @@ function applyFailurePolicy(policy: HookPolicy): string {
     default:
       return assertNever(policy);
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }

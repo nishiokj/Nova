@@ -1,5 +1,13 @@
 import type { WorkItem } from 'work';
-import type { AgentEvent, StructuredOutputSchema, ToolResult, ArtifactItem, LLMRequestConfig } from 'types';
+import type {
+  AgentEvent,
+  StructuredOutputSchema,
+  ToolResult,
+  ArtifactItem,
+  LLMRequestConfig,
+  RunControlMetadata,
+  RunExecutionMetadata,
+} from 'types';
 import type { ContextWindow } from 'context';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
@@ -100,8 +108,24 @@ export interface AgentRunParams {
   workItem: WorkItem;
   /** Working directory for tool execution. Required for concurrent-safe operation. */
   cwd: string;
-  /** Optional abort signal to cancel agent execution. */
+  /** Optional run-scoped execution metadata and control state. */
+  runControl?: {
+    execution: RunExecutionMetadata;
+    control: RunControlMetadata;
+  };
+  /** Optional abort signal for legacy callers; runtime should prefer runControl metadata. */
   signal?: AbortSignal;
+}
+
+/**
+ * Runtime control directive consumed inside the agent loop.
+ * Used to propagate pause/cancel/continue decisions across iteration and tool phases.
+ */
+export interface AgentControlDirective {
+  action: 'continue' | 'stop' | 'pause';
+  reason?: string;
+  source?: 'signal' | 'run_control';
+  terminationReason?: Extract<TerminationReason, 'user_stopped'>;
 }
 
 /**

@@ -107,6 +107,15 @@ interface HarnessLike {
   getSessionAsyncRun?(sessionKey: string): { requestId: string; goal: string; cancelled: boolean; startedAt: number } | null;
   cancelSessionAsyncRun?(sessionKey: string): void;
   clearSessionAsyncRun?(sessionKey: string): void;
+  controlSessionExecution?(params: {
+    sessionKey: string;
+    action: 'pause' | 'resume' | 'cancel';
+    reason?: string;
+    requestedBy?: 'user' | 'system' | 'policy';
+    scope?: 'run' | 'work_item' | 'tool';
+    targetWorkIds?: string[];
+    timeoutMs?: number;
+  }): Promise<{ success: boolean; requestId?: string; quiesced?: boolean; error?: string }>;
 }
 
 interface AsyncRunInfo {
@@ -287,8 +296,8 @@ export class BridgeGateway {
     register('providers_list', (data, ctx) => this.handleProvidersList(ctx.connectionId, data));
     register('providers_save', (data, ctx) => this.handleProvidersSave(ctx.connectionId, data));
     register('providers_delete', (data, ctx) => this.handleProvidersDelete(ctx.connectionId, data));
-    register('providers_test', (data, ctx) => {
-      void this.handleProvidersTest(ctx.connectionId, data);
+    register('providers_test', async (data, ctx) => {
+      await this.handleProvidersTest(ctx.connectionId, data);
     });
     register('session_fork', (_data, ctx) => this.handleSessionFork(ctx.connectionId, ctx.state));
     register('session_close', (_data, ctx) => this.handleSessionClose(ctx.connectionId, ctx.state));
@@ -300,8 +309,8 @@ export class BridgeGateway {
     register('get_model', (data, ctx) => this.handleGetModel(ctx.connectionId, data, ctx.state));
     register('permission_response', (data, ctx) => this.handlePermissionResponse(ctx.connectionId, data));
     register('set_dangerous_mode', (data, ctx) => this.handleSetDangerousMode(ctx.connectionId, data));
-    register('async_start', (data, ctx) => {
-      void this.handleAsyncStart(ctx.connectionId, data, ctx.state);
+    register('async_start', async (data, ctx) => {
+      await this.handleAsyncStart(ctx.connectionId, data, ctx.state);
     });
     register('async_cancel', (data, ctx) => this.handleAsyncCancel(ctx.connectionId, data, ctx.state));
     register('async_status', (data, ctx) => this.handleAsyncStatus(ctx.connectionId, data, ctx.state));
@@ -416,11 +425,11 @@ export class BridgeGateway {
     }
   }
 
-  private handleSendText(
+  private async handleSendText(
     connectionId: string,
     data: Record<string, unknown> | undefined,
     state: ConnectionState
-  ): void {
+  ): Promise<void> {
     profiler.begin('handleSendText', 'handler');
     const sessionKey = state.sessionKey;
     if (!sessionKey) {
@@ -468,8 +477,7 @@ export class BridgeGateway {
       return;
     }
 
-    const commandMatch = text.trim().match(/^\/?(fork|stop)\b(?:\s+(.+))?$/i);
-    let isStopCommand = false;
+    const commandMatch = text.trim().match(/^\/?(fork|stop|pause|resume)\b(?:\s+(.+))?$/i);
     if (commandMatch) {
       const action = commandMatch[1].toLowerCase();
       const commandArg = typeof commandMatch[2] === 'string' ? commandMatch[2].trim() : '';
@@ -496,13 +504,74 @@ export class BridgeGateway {
         return;
       }
 
-      isStopCommand = true;
-      text = commandArg || 'Stop current work now and pause for user confirmation.';
+      if (!this.harness.controlSessionExecution) {
+        this.sendError(connectionId, 'Runtime control is not supported by this harness');
+        return;
+      }
+
+      if (action === 'stop') {
+        const result = await this.harness.controlSessionExecution({
+          sessionKey,
+          action: 'cancel',
+          reason: commandArg || 'Stop requested from bridge command',
+          requestedBy: 'user',
+          timeoutMs: 30_000,
+        }).catch((error) => {
+          this.sendAuthResponse(connectionId, 'control_plane_stop', {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        });
+        if (result) {
+          this.sendAuthResponse(connectionId, 'control_plane_stop', result);
+        }
+        return;
+      }
+
+      if (action === 'pause') {
+        const result = await this.harness.controlSessionExecution({
+          sessionKey,
+          action: 'pause',
+          reason: commandArg || 'Pause requested from bridge command',
+          requestedBy: 'user',
+          timeoutMs: 30_000,
+        }).catch((error) => {
+          this.sendAuthResponse(connectionId, 'control_plane_stop', {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        });
+        if (result) {
+          this.sendAuthResponse(connectionId, 'control_plane_stop', result);
+        }
+        return;
+      }
+
+      if (action === 'resume') {
+        const result = await this.harness.controlSessionExecution({
+          sessionKey,
+          action: 'resume',
+          reason: commandArg || 'Resume requested from bridge command',
+          requestedBy: 'user',
+        }).catch((error) => {
+          this.sendAuthResponse(connectionId, 'control_plane_stop', {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        });
+        if (result) {
+          this.sendAuthResponse(connectionId, 'control_plane_stop', result);
+        }
+        return;
+      }
     }
 
     // Set goal from first user message (no-op if goal already set)
     const graphd = this.harness.getGraphD?.();
-    if (graphd && !isStopCommand) {
+    if (graphd) {
       const goalPreview = text.trim().slice(0, 500);
       graphd.sessionSetGoalIfEmpty(sessionKey, goalPreview);
     }
@@ -1784,32 +1853,45 @@ export class BridgeGateway {
     this.sendAuthResponse(connectionId, 'control_plane_dispatch', result);
   }
 
-  private handleControlPlaneStop(
+  private async handleControlPlaneStop(
     connectionId: string,
     data: Record<string, unknown> | undefined
-  ): void {
+  ): Promise<void> {
     const sessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
     const note = typeof data?.note === 'string' && data.note.trim().length > 0
       ? data.note.trim()
-      : 'Stop current work now and wait for user direction.';
-    const workingDir = typeof data?.working_dir === 'string' ? data.working_dir : undefined;
+      : undefined;
+    const requestedAction = typeof data?.action === 'string' ? data.action.trim().toLowerCase() : 'cancel';
+    const action = requestedAction === 'pause' || requestedAction === 'resume' || requestedAction === 'cancel'
+      ? requestedAction
+      : 'cancel';
+    const timeoutMs = typeof data?.timeout_ms === 'number' && Number.isFinite(data.timeout_ms)
+      ? Math.max(1000, data.timeout_ms)
+      : 30_000;
 
     if (!sessionKey) {
       this.sendAuthResponse(connectionId, 'control_plane_stop', { success: false, error: 'Missing session_key' });
       return;
     }
 
-    try {
-      this.harness.cancelSessionAsyncRun?.(sessionKey);
-    } catch {
-      // Non-fatal: still attempt to deliver stop note.
+    if (!this.harness.controlSessionExecution) {
+      this.sendAuthResponse(connectionId, 'control_plane_stop', {
+        success: false,
+        error: 'Runtime control is not supported by this harness',
+      });
+      return;
     }
 
-    const result = this.dispatchControlPlaneMessage({
+    const result = await this.harness.controlSessionExecution({
       sessionKey,
-      message: note,
-      workingDir,
+      action,
+      reason: note,
+      requestedBy: 'system',
+      timeoutMs,
     });
+    if (result.success && action === 'cancel') {
+      this.harness.cancelSessionAsyncRun?.(sessionKey);
+    }
     this.sendAuthResponse(connectionId, 'control_plane_stop', result);
   }
 
@@ -2148,11 +2230,11 @@ export class BridgeGateway {
     }
   }
 
-  private handleAsyncCancel(
+  private async handleAsyncCancel(
     connectionId: string,
     data: Record<string, unknown> | undefined,
     state: ConnectionState
-  ): void {
+  ): Promise<void> {
     const explicitSessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
     const sessionKey = explicitSessionKey || state.sessionKey;
     if (!sessionKey) {
@@ -2175,9 +2257,22 @@ export class BridgeGateway {
 
     const { requestId, goal } = sessionAsyncRun;
 
-    // Mark as cancelled at session level
-    this.harness.cancelSessionAsyncRun?.(sessionKey);
-    this.harness.clearSessionAsyncRun?.(sessionKey);
+    const controlResult = this.harness.controlSessionExecution
+      ? await this.harness.controlSessionExecution({
+          sessionKey,
+          action: 'cancel',
+          reason: 'Async session cancelled by user request',
+          requestedBy: 'user',
+          timeoutMs: 30_000,
+        })
+      : { success: false, error: 'Runtime control is not supported by this harness' };
+    if (!controlResult.success) {
+      this.sendAuthResponse(connectionId, 'async_cancel', {
+        success: false,
+        error: controlResult.error ?? 'Failed to cancel active async session',
+      });
+      return;
+    }
 
     if (state.asyncRun?.requestId === requestId) {
       state.asyncRun = null;
@@ -2186,11 +2281,14 @@ export class BridgeGateway {
       state.activeRequestId = null;
     }
     this.harness.setSessionAsyncModeEnabled?.(sessionKey, false);
+    this.harness.cancelSessionAsyncRun?.(sessionKey);
+    this.harness.clearSessionAsyncRun?.(sessionKey);
 
     this.sendAuthResponse(connectionId, 'async_cancel', {
       success: true,
       requestId,
       goal,
+      quiesced: controlResult.quiesced ?? true,
     });
 
     // Emit cancellation response on the session channel.

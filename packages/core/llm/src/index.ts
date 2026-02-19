@@ -1,10 +1,5 @@
-/**
- * LLM Adapter Layer - Barrel Export
- *
- * Provides LLM adapters for Anthropic and OpenAI.
- */
+/** LLM module barrel exports. */
 
-// Re-export LLMAdapter type from types for convenience
 export type {
   LLMAdapter,
   LLMRequestConfig,
@@ -22,6 +17,9 @@ export {
   type RateLimitType,
   type RateLimitInfo,
   createCircuitState,
+  getProviderCircuitState,
+  resetProviderCircuit,
+  getCircuitStatus,
   DEFAULT_RESILIENCE_CONFIG,
   calculateBackoff,
   sleep,
@@ -36,7 +34,7 @@ export {
   withTimeout,
   type ResilientCallOptions,
   resilientCall,
-} from './retry.js';
+} from './policies.js';
 
 // Adapters
 export {

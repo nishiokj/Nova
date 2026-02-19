@@ -5,8 +5,10 @@
 import fg from 'fast-glob';
 import { resolve } from 'path';
 import type { ToolResult } from 'types';
+import { Effect } from 'effect';
 import { successResult, errorResult } from 'types';
-import type { ToolExecutionContext, ToolRegistrationOptions } from '../types.js';
+import type { ToolExecutionContext, ToolExecutionError, ToolRegistrationOptions } from '../types.js';
+import { toToolExecutionError } from '../types.js';
 import { canUseRipgrep, runRipgrepLines } from './ripgrep.js';
 
 /** Default ignore patterns for common non-source directories */
@@ -154,6 +156,19 @@ export async function executeGlob(
   }
 }
 
+export function executeGlobEffect(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.tryPromise({
+    try: () => executeGlob(args, context),
+    catch: (error) =>
+      toToolExecutionError(error, 'execution_error', {
+        toolName: 'Glob',
+      }),
+  });
+}
+
 /**
  * Glob tool registration options.
  */
@@ -183,7 +198,7 @@ export const globToolOptions: ToolRegistrationOptions = {
     required: ['pattern'],
   },
   required: ['pattern'],
-  executor: executeGlob,
+  executor: executeGlobEffect,
   timeoutMs: 15000,
   readOnly: true,
   parallelizable: true,

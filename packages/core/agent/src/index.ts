@@ -4,11 +4,6 @@
 
 export { Agent, type ModelSelection, type MemoryInjector } from './agent.js';
 export { AgentRegistry } from './agent-registry.js';
-export {
-  circuitBreakerRegistry,
-  resetProviderCircuit,
-  getCircuitStatus,
-} from './circuit-breaker-registry.js';
 export { TOOL_LIMITS, getMaxOutputLength, isRefusal, REFUSAL_PATTERNS } from './constants.js';
 export type {
   AgentType,
@@ -16,6 +11,7 @@ export type {
   AgentConfig,
   LLMParams,
   AgentRunParams,
+  AgentControlDirective,
   AgentMetrics,
   AgentResult,
   UserPromptInfo,
@@ -30,9 +26,6 @@ export type {
   InternalHookHandler,
   InternalHookQueue,
   ExecutionSnapshot,
-  StopHookResult,
-  StopHookContext,
-  StopHookHandler,
 } from './types.js';
 
 export { DEFAULT_AGENT_BUDGET, DEFAULT_LLM_PARAMS, noopEmit, noopHookQueue } from './types.js';

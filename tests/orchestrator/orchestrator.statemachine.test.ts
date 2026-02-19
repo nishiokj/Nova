@@ -56,7 +56,7 @@ import {
 } from 'orchestrator/orchestrator.js';
 import { createHookRegistry } from 'orchestrator/hookRegistry/index.js';
 import { getOutputSchemaJson } from 'shared';
-import { resetProviderCircuit } from 'agent';
+import { resetProviderCircuit } from 'llm';
 
 // ============================================
 // STATE MODEL TYPES

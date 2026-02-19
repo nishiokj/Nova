@@ -16,7 +16,8 @@ import { mkdir, writeFile, rm } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
-import { executeBash } from 'tools/builtins/bash.js';
+import { Effect, Fiber } from 'effect';
+import { executeBash, executeBashEffect } from 'tools/builtins/bash.js';
 
 function createTempDir(): string {
   return join(tmpdir(), `bash-test-${randomBytes(8).toString('hex')}`);
@@ -271,6 +272,23 @@ describe('executeBash', () => {
       expect(result.status).toBe('timeout');
       // Should complete close to timeout, not wait for full sleep
       expect(duration).toBeLessThan(5000);
+    });
+
+    it('interrupts long-running bash effect without orphaning execution', async () => {
+      const fiber = await Effect.runPromise(
+        Effect.fork(
+          executeBashEffect(
+            { command: 'sleep 60' },
+            { workdirOverride: tempDir }
+          )
+        )
+      );
+
+      await Effect.runPromise(Effect.sleep(100));
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      const exit = await Effect.runPromise(Fiber.await(fiber));
+
+      expect(exit._tag).toBe('Failure');
     });
   });
 

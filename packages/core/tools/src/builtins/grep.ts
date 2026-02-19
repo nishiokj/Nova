@@ -7,13 +7,15 @@
 import { readdir, readFile, stat } from 'fs/promises';
 import { resolve, join, relative } from 'path';
 import type { ToolResult } from 'types';
+import { Effect } from 'effect';
 import { successResult, errorResult } from 'types';
-import type { ToolExecutionContext, ToolRegistrationOptions } from '../types.js';
+import type { ToolExecutionContext, ToolExecutionError, ToolRegistrationOptions } from '../types.js';
 import {
   DEFAULT_EXCLUDE_DIRS,
   DEFAULT_EXCLUDE_EXTENSIONS,
   shouldSkipDir,
   shouldSkipFile,
+  toToolExecutionError,
 } from '../types.js';
 import { canUseRipgrep, runRipgrepLines } from './ripgrep.js';
 
@@ -363,6 +365,19 @@ export async function executeGrep(
   }
 }
 
+export function executeGrepEffect(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.tryPromise({
+    try: () => executeGrep(args, context),
+    catch: (error) =>
+      toToolExecutionError(error, 'execution_error', {
+        toolName: 'Grep',
+      }),
+  });
+}
+
 /**
  * Grep tool registration options.
  */
@@ -400,7 +415,7 @@ export const grepToolOptions: ToolRegistrationOptions = {
     required: ['pattern'],
   },
   required: ['pattern'],
-  executor: executeGrep,
+  executor: executeGrepEffect,
   timeoutMs: 20000,
   readOnly: true,
   parallelizable: true,

@@ -8,9 +8,15 @@ import { writeFile, readFile, mkdir, stat, rename, unlink } from 'fs/promises';
 import { resolve, dirname } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
+import { Effect } from 'effect';
 import type { ToolResult } from 'types';
 import { successResult, errorResult } from 'types';
-import type { ToolExecutionContext, ToolRegistrationOptions } from '../types.js';
+import type {
+  ToolExecutionContext,
+  ToolExecutionError,
+  ToolRegistrationOptions,
+} from '../types.js';
+import { toToolExecutionError } from '../types.js';
 
 /**
  * Atomically write content to a file using a temporary file.
@@ -266,7 +272,7 @@ export const writeToolOptions: ToolRegistrationOptions = {
     required: ['path', 'content'],
   },
   required: ['path', 'content'],
-  executor: executeWrite,
+  executor: executeWriteEffect,
   timeoutMs: 10000,
   readOnly: false,
   parallelizable: false,
@@ -302,7 +308,7 @@ export const editToolOptions: ToolRegistrationOptions = {
     required: ['path', 'oldString', 'newString'],
   },
   required: ['path', 'oldString', 'newString'],
-  executor: executeEdit,
+  executor: executeEditEffect,
   timeoutMs: 10000,
   readOnly: false,
   parallelizable: false,
@@ -501,6 +507,47 @@ export async function executeBatchEdit(
   };
 }
 
+export function executeWriteEffect(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.tryPromise({
+    try: () => executeWrite(args, context),
+    catch: (error) =>
+      toToolExecutionError(error, 'execution_error', {
+        toolName: 'Write',
+        path: args.path ?? args.file_path,
+      }),
+  });
+}
+
+export function executeEditEffect(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.tryPromise({
+    try: () => executeEdit(args, context),
+    catch: (error) =>
+      toToolExecutionError(error, 'execution_error', {
+        toolName: 'Edit',
+        path: args.path ?? args.file_path,
+      }),
+  });
+}
+
+export function executeBatchEditEffect(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.tryPromise({
+    try: () => executeBatchEdit(args, context),
+    catch: (error) =>
+      toToolExecutionError(error, 'execution_error', {
+        toolName: 'BatchEdit',
+      }),
+  });
+}
+
 /**
  * BatchEdit tool registration options.
  */
@@ -528,7 +575,7 @@ export const batchEditToolOptions: ToolRegistrationOptions = {
     required: ['edits'],
   },
   required: ['edits'],
-  executor: executeBatchEdit,
+  executor: executeBatchEditEffect,
   timeoutMs: 30000,
   readOnly: false,
   parallelizable: false,

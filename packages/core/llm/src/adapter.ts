@@ -14,17 +14,19 @@ import type {
   LLMClientConfig,
   LLMAdapter,
   LLMResponse,
+  LLMExecutionError,
   RespondParams,
   StreamParams,
   LLMProvider,
   LLMRequestConfig,
 } from 'types';
+import { Effect, Exit, Stream } from 'effect';
 import { getProviderBaseUrl, isSupportedProvider, providerRequiresAuth, toGatewayModel } from 'types';
 import { profiler } from 'shared';
 import { getProvider } from './providers/registry.js';
 import { getCodexTokenManager } from './auth/codex-auth.js';
 import type { ResolvedRequestConfig, ProviderContext, AdapterLogger } from './providers/types.js';
-import { PartialStreamError } from './providers/types.js';
+import { PartialStreamError, toLLMExecutionError } from './providers/types.js';
 
 // Re-export types and classes for external use
 export type { AdapterLogger };
@@ -253,52 +255,82 @@ class LLMRouterAdapter implements LLMAdapter {
    * Send a non-streaming request.
    * Delegates directly to the provider - no retry or fallback.
    */
-  async respond(params: RespondParams): Promise<LLMResponse> {
-    const resolved = await this.resolveRequestConfig(params.llm);
-    const provider = getProvider(resolved.provider);
-    const context: ProviderContext = {
-      config: resolved,
-      logger: this.logger,
-      startTime: Date.now(),
-    };
-    const asyncId = profiler.asyncBegin(`llm:${resolved.provider}:${resolved.model}`, 'llm');
-    try {
-      const response = await provider.respond(context, params);
-      profiler.asyncEnd(`llm:${resolved.provider}:${resolved.model}`, asyncId, 'llm', {
-        promptTokens: response.usage?.promptTokens,
-        completionTokens: response.usage?.completionTokens,
+  respond(params: RespondParams): Effect.Effect<LLMResponse, LLMExecutionError> {
+    return Effect.gen(this, function* () {
+      const resolved = yield* Effect.tryPromise({
+        try: () => this.resolveRequestConfig(params.llm),
+        catch: (error) => toLLMExecutionError(error, params.llm.provider ?? 'unknown', params.llm.model),
       });
-      return response;
-    } catch (error) {
+
+      const provider = getProvider(resolved.provider);
+      const context: ProviderContext = {
+        config: resolved,
+        logger: this.logger,
+        startTime: Date.now(),
+      };
+      const asyncId = profiler.asyncBegin(`llm:${resolved.provider}:${resolved.model}`, 'llm');
+      const exit = yield* Effect.exit(provider.respond(context, params));
+
+      if (Exit.isSuccess(exit)) {
+        profiler.asyncEnd(`llm:${resolved.provider}:${resolved.model}`, asyncId, 'llm', {
+          promptTokens: exit.value.usage?.promptTokens,
+          completionTokens: exit.value.usage?.completionTokens,
+        });
+        return exit.value;
+      }
+
       profiler.asyncEnd(`llm:${resolved.provider}:${resolved.model}`, asyncId, 'llm', { error: true });
-      throw error;
-    }
+      return yield* Effect.failCause(exit.cause);
+    });
   }
 
   /**
    * Send a streaming request.
    * Delegates directly to the provider - no retry or fallback.
    */
-  async *stream(params: StreamParams): AsyncGenerator<string, LLMResponse> {
-    const resolved = await this.resolveRequestConfig(params.llm);
-    const provider = getProvider(resolved.provider);
-    const context: ProviderContext = {
-      config: resolved,
-      logger: this.logger,
-      startTime: Date.now(),
-    };
-    const asyncId = profiler.asyncBegin(`llm:stream:${resolved.provider}:${resolved.model}`, 'llm');
-    try {
-      const response = yield* provider.stream(context, params);
-      profiler.asyncEnd(`llm:stream:${resolved.provider}:${resolved.model}`, asyncId, 'llm', {
-        promptTokens: response.usage?.promptTokens,
-        completionTokens: response.usage?.completionTokens,
-      });
-      return response;
-    } catch (error) {
-      profiler.asyncEnd(`llm:stream:${resolved.provider}:${resolved.model}`, asyncId, 'llm', { error: true });
-      throw error;
-    }
+  stream(params: StreamParams): Stream.Stream<string, LLMExecutionError> {
+    return Stream.unwrap(
+      Effect.gen(this, function* () {
+        const resolved = yield* Effect.tryPromise({
+          try: () => this.resolveRequestConfig(params.llm),
+          catch: (error) => toLLMExecutionError(error, params.llm.provider ?? 'unknown', params.llm.model),
+        });
+
+        const provider = getProvider(resolved.provider);
+        const context: ProviderContext = {
+          config: resolved,
+          logger: this.logger,
+          startTime: Date.now(),
+        };
+        const asyncId = profiler.asyncBegin(`llm:stream:${resolved.provider}:${resolved.model}`, 'llm');
+        let finalResponse: LLMResponse | undefined;
+
+        const streamParams: StreamParams = {
+          ...params,
+          onComplete: (response) => {
+            finalResponse = response;
+            params.onComplete?.(response);
+          },
+        };
+
+        return provider.stream(context, streamParams).pipe(
+          Stream.ensuring(
+            Effect.sync(() => {
+              if (finalResponse) {
+                profiler.asyncEnd(`llm:stream:${resolved.provider}:${resolved.model}`, asyncId, 'llm', {
+                  promptTokens: finalResponse.usage?.promptTokens,
+                  completionTokens: finalResponse.usage?.completionTokens,
+                });
+              } else {
+                profiler.asyncEnd(`llm:stream:${resolved.provider}:${resolved.model}`, asyncId, 'llm', {
+                  error: true,
+                });
+              }
+            })
+          )
+        );
+      })
+    );
   }
 }
 

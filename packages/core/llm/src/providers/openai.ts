@@ -11,14 +11,22 @@ import type {
   LLMResponse,
   RespondParams,
   StreamParams,
+  LLMExecutionError,
 } from 'types';
+import { Effect, Stream } from 'effect';
 import type { ProviderContext, ResolvedRequestConfig, LLMProviderAdapter } from './types.js';
-import { PartialStreamError } from './types.js';
+import { PartialStreamError, toLLMExecutionError } from './types.js';
 import { compileSchemaForOpenAI } from './schema_compiler.js';
 import {
   createRateLimitError,
 } from '../rate-limits.js';
 import { parseApiErrorResponse, formatApiError } from '../response_schemas.js';
+import {
+  CODEX_TO_REX,
+  REX_TO_CODEX,
+  formatToolForOpenAI,
+  translateCodexArgsToRex,
+} from './tool_skins.js';
 
 function parseApiError(provider: string, status: number, responseText: string): Error {
   const parsed = parseApiErrorResponse(provider, status, responseText);
@@ -32,27 +40,58 @@ function parseApiError(provider: string, status: number, responseText: string): 
 export class OpenAIProvider implements LLMProviderAdapter {
   readonly name = 'openai' as const;
 
-  respond(context: ProviderContext, params: RespondParams): Promise<LLMResponse> {
-    return this.respondOpenAI(context, params);
+  respond(context: ProviderContext, params: RespondParams): Effect.Effect<LLMResponse, LLMExecutionError> {
+    return Effect.tryPromise({
+      try: () => this.respondOpenAI(context, params),
+      catch: (error) => toLLMExecutionError(error, this.name, context.config.model),
+    });
   }
 
-  async *stream(context: ProviderContext, params: StreamParams): AsyncGenerator<string, LLMResponse> {
-    return yield* this.streamOpenAI(context, params);
+  stream(context: ProviderContext, params: StreamParams): Stream.Stream<string, LLMExecutionError> {
+    return Stream.unwrapScoped(
+      Effect.acquireRelease(
+        Effect.sync(() => this.streamOpenAI(context, params)),
+        (generator) =>
+          Effect.tryPromise({
+            try: async () => {
+              if (typeof generator.return === 'function') {
+                await generator.return(undefined as never);
+              }
+            },
+            catch: () => undefined,
+          }).pipe(Effect.orDie)
+      ).pipe(
+        Effect.map((generator) =>
+          Stream.fromAsyncIterable(
+            {
+              [Symbol.asyncIterator]: async function* () {
+                while (true) {
+                  const next = await generator.next();
+                  if (next.done) {
+                    if (next.value) {
+                      params.onComplete?.(next.value);
+                    }
+                    return;
+                  }
+                  yield next.value;
+                }
+              },
+            },
+            (error) => toLLMExecutionError(error, 'openai', context.config.model)
+          )
+        )
+      )
+    );
   }
 
-  formatTools(tools: ToolDefinition[]): Record<string, unknown>[] {
-    return tools.map((t) => ({
-      type: 'function',
-      name: t.name,
-      description: t.description,
-      parameters: {
-        type: 'object',
-        properties: t.parameters.properties,
-        required: t.parameters.required,
-        additionalProperties: t.parameters.additionalProperties,
-      },
-      strict: t.strict ?? false,
-    }));
+  formatTools(tools: ToolDefinition[], model?: string): Record<string, unknown>[] {
+    const effectiveModel = model ?? '';
+    const formatted: Record<string, unknown>[] = [];
+    for (const t of tools) {
+      const skinned = formatToolForOpenAI(t, effectiveModel);
+      if (skinned) formatted.push(skinned);
+    }
+    return formatted;
   }
 
   // ============================================
@@ -84,7 +123,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
     }
 
     if (params.tools && params.tools.length > 0) {
-      body.tools = this.formatTools(params.tools);
+      body.tools = this.formatTools(params.tools, resolved.model);
     }
     if (params.toolChoice) {
       body.tool_choice = params.toolChoice;
@@ -384,7 +423,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
     }
 
     if (params.tools && params.tools.length > 0) {
-      body.tools = this.formatTools(params.tools);
+      body.tools = this.formatTools(params.tools, resolved.model);
     }
     if (params.toolChoice) {
       body.tool_choice = params.toolChoice;
@@ -620,11 +659,33 @@ export class OpenAIProvider implements LLMProviderAdapter {
         if (!isValidToolName(item.name)) {
           continue;
         }
+        // Translate Rex names → Codex names so the model sees its native tool names
+        const rexName = item.name as string;
+        const codexName = REX_TO_CODEX[rexName] ?? rexName;
+
+        // apply_patch: unwrap { input: text } to raw text for freeform round-trip
+        let args = item.arguments;
+        if (codexName === 'apply_patch' && typeof args === 'string') {
+          try {
+            const parsed = JSON.parse(args);
+            if (parsed && typeof parsed === 'object' && typeof parsed.input === 'string') {
+              args = parsed.input;
+            }
+          } catch {
+            // Keep as-is
+          }
+        } else if (codexName === 'apply_patch' && typeof args === 'object' && args !== null) {
+          const argsObj = args as Record<string, unknown>;
+          if (typeof argsObj.input === 'string') {
+            args = argsObj.input;
+          }
+        }
+
         input.push({
           type: 'function_call',
           call_id: callId,
-          name: item.name,
-          arguments: item.arguments,
+          name: codexName,
+          arguments: args,
         });
         continue;
       }
@@ -756,6 +817,43 @@ export class OpenAIProvider implements LLMProviderAdapter {
     const isValidCallId = (id: unknown): id is string =>
       typeof id === 'string' && id.length > 0;
 
+    const translateCall = (callId: string, codexName: string, argsRaw: unknown): ToolCall | null => {
+      // apply_patch: raw text payload, not JSON
+      if (codexName === 'apply_patch') {
+        const rawText = typeof argsRaw === 'string' ? argsRaw : '';
+        return {
+          id: callId,
+          name: 'apply_patch',
+          arguments: { input: rawText },
+        };
+      }
+
+      // Translate Codex name → Rex name
+      const rexName = CODEX_TO_REX[codexName] ?? codexName;
+
+      // Parse JSON args
+      let args: Record<string, unknown> = {};
+      if (typeof argsRaw === 'string' && argsRaw.length > 0) {
+        try {
+          const parsed = JSON.parse(argsRaw);
+          if (parsed && typeof parsed === 'object') {
+            args = parsed as Record<string, unknown>;
+          }
+        } catch {
+          // Invalid JSON, keep empty args
+        }
+      } else if (typeof argsRaw === 'object' && argsRaw !== null) {
+        args = argsRaw as Record<string, unknown>;
+      }
+
+      // Translate Codex args → Rex args for 1:1 skinned tools
+      if (CODEX_TO_REX[codexName]) {
+        args = translateCodexArgsToRex(codexName, args);
+      }
+
+      return { id: callId, name: rexName, arguments: args };
+    };
+
     for (const item of output) {
       if (!item || typeof item !== 'object') continue;
 
@@ -764,20 +862,8 @@ export class OpenAIProvider implements LLMProviderAdapter {
         const name = item.name as string;
         if (!isValidToolName(name) || !isValidCallId(callId)) continue;
 
-        let args: Record<string, unknown> = {};
-        const argsJson = item.arguments as string;
-        if (typeof argsJson === 'string' && argsJson.length > 0) {
-          try {
-            const parsed = JSON.parse(argsJson);
-            if (parsed && typeof parsed === 'object') {
-              args = parsed as Record<string, unknown>;
-            }
-          } catch {
-            // Invalid JSON, keep empty args
-          }
-        }
-
-        toolCalls.push({ id: callId, name, arguments: args });
+        const translated = translateCall(callId, name, item.arguments);
+        if (translated) toolCalls.push(translated);
         continue;
       }
 
@@ -791,20 +877,8 @@ export class OpenAIProvider implements LLMProviderAdapter {
         const name = block.name as string;
         if (!isValidToolName(name) || !isValidCallId(callId)) continue;
 
-        let args: Record<string, unknown> = {};
-        const argsJson = block.arguments as string;
-        if (typeof argsJson === 'string' && argsJson.length > 0) {
-          try {
-            const parsed = JSON.parse(argsJson);
-            if (parsed && typeof parsed === 'object') {
-              args = parsed as Record<string, unknown>;
-            }
-          } catch {
-            // Invalid JSON, keep empty args
-          }
-        }
-
-        toolCalls.push({ id: callId, name, arguments: args });
+        const translated = translateCall(callId, name, block.arguments);
+        if (translated) toolCalls.push(translated);
       }
     }
 

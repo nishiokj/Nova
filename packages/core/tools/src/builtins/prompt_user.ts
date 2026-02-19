@@ -7,7 +7,8 @@
  */
 
 import type { ToolResult } from 'types';
-import type { ToolRegistrationOptions } from '../types.js';
+import { Effect } from 'effect';
+import type { ToolExecutionError, ToolRegistrationOptions } from '../types.js';
 
 /**
  * Option structure for user prompts.
@@ -58,6 +59,19 @@ export async function executePromptUser(
     durationMs: 0,
     metadata: { isPromptUser: true, args },
   };
+}
+
+export function executePromptUserEffect(
+  args: Record<string, unknown>
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.succeed({
+    toolName: 'PromptUser',
+    status: 'success',
+    output: '__PROMPT_USER__',
+    isSuccess: true,
+    durationMs: 0,
+    metadata: { isPromptUser: true, args },
+  });
 }
 
 /**
@@ -129,7 +143,7 @@ export const promptUserToolOptions: ToolRegistrationOptions = {
     required: ['question'],
   },
   required: ['question'],
-  executor: executePromptUser,
+  executor: executePromptUserEffect,
   timeoutMs: 1000,
   readOnly: true,
   parallelizable: false,

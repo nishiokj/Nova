@@ -6,6 +6,7 @@
  */
 
 import path from 'node:path';
+import { Effect, Fiber, Stream } from 'effect';
 import type { LLMAdapter, Message, LLMRequestConfig, LLMResponse } from 'llm';
 import {
   resilientCall,
@@ -14,6 +15,7 @@ import {
   RetriesExhaustedError,
   TimeoutError,
   DEFAULT_RESILIENCE_CONFIG,
+  getProviderCircuitState,
 } from 'llm';
 import type { ToolRegistry } from 'tools';
 import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema, MessageItem, ContextItem, ArtifactItem, LLMItem, ContentBlock } from 'types';
@@ -35,17 +37,11 @@ import type {
   InternalHookQueue,
   InternalHookContext,
   MutableAgentResult,
+  AgentControlDirective,
 } from './types.js';
 import { noopEmit, noopHookQueue } from './types.js';
 import type { AgentRegistry } from './agent-registry.js';
-import {
-  getProviderCircuitState,
-  resetProviderCircuit,
-  getCircuitStatus,
-} from './circuit-breaker-registry.js';
 import { TOOL_LIMITS, truncateToolOutput, isRefusal } from './constants.js';
-import { createMicroQueue } from './microqueue.js';
-
 import { DEFAULT_AGENT_BUDGET } from './types.js';
 
 /**
@@ -53,9 +49,6 @@ import { DEFAULT_AGENT_BUDGET } from './types.js';
  * For a 50-iteration budget this gives 5 check-ins; for 20 iterations, 2.
  */
 const CADENCE_CHECK_INTERVAL = 10;
-
-// Re-export circuit breaker functions for backwards compatibility
-export { resetProviderCircuit, getCircuitStatus };
 
 type AgentAction = 'done' | 'continue';
 
@@ -278,6 +271,62 @@ export class Agent {
       requestId: this.requestId,
       objective: workItem.objective,
     };
+  }
+
+  /**
+   * Resolve runtime control into a typed directive for loop/tool phases.
+   */
+  private resolveControlDirective(
+    signal?: AbortSignal,
+    runControl?: AgentRunParams['runControl']
+  ): AgentControlDirective {
+    if (signal?.aborted) {
+      return {
+        action: 'stop',
+        source: 'signal',
+        reason: 'Execution aborted by signal',
+        terminationReason: 'user_stopped',
+      };
+    }
+
+    const state = runControl?.control?.state;
+    if (state === 'paused') {
+      return {
+        action: 'pause',
+        source: 'run_control',
+        reason: runControl?.control?.pause?.reason ?? 'Execution paused by runtime control',
+      };
+    }
+
+    if (state === 'cancelling' || state === 'cancelled') {
+      return {
+        action: 'stop',
+        source: 'run_control',
+        reason: runControl?.control?.cancellation?.reason ?? 'Execution cancelled by runtime control',
+        terminationReason: 'user_stopped',
+      };
+    }
+
+    return { action: 'continue' };
+  }
+
+  /**
+   * Apply an out-of-band control directive to the mutable result.
+   * Returns true when loop/tool execution should stop immediately.
+   */
+  private applyControlDirective(
+    result: MutableAgentResult,
+    directive: AgentControlDirective
+  ): boolean {
+    if (directive.action === 'continue') {
+      return false;
+    }
+
+    result.terminationReason = directive.terminationReason ?? 'user_stopped';
+    result.error = directive.reason ?? (directive.action === 'pause'
+      ? 'Execution paused'
+      : 'Execution stopped');
+    return true;
   }
 
   /**
@@ -856,29 +905,29 @@ export class Agent {
     // Note: We wrap the entire stream consumption, not just the initial call
     return resilientCall(
       async () => {
+        let response: LLMResponse | undefined;
+        let buffer = '';
+
         const stream = this.llm.stream({
           messages: params.messages,
           tools: params.tools,
           toolChoice: params.toolChoice,
           llm: this.llmConfig,
           responseSchema: params.responseSchema,
-          onChunk: params.onChunk,
           onReasoningChunk: params.onReasoningChunk,
+          onComplete: (finalResponse) => {
+            response = finalResponse;
+          },
         });
 
-        let buffer = '';
-        let response: LLMResponse | undefined;
-
-        while (true) {
-          const { value, done } = await stream.next();
-          if (done) {
-            response = value;
-            break;
-          }
-          if (value) {
-            buffer += value;
-          }
-        }
+        await Effect.runPromise(
+          Stream.runForEach(stream, (chunk) =>
+            Effect.sync(() => {
+              buffer += chunk;
+              params.onChunk?.(chunk);
+            })
+          )
+        );
 
         if (!response) {
           throw new Error('LLM stream completed without a final response');
@@ -913,7 +962,7 @@ export class Agent {
    * GlobalContext is never mutated.
    */
   async run(params: AgentRunParams): Promise<AgentResult> {
-    const { globalContext, workItem, cwd, signal } = params;
+    const { globalContext, workItem, cwd, signal, runControl } = params;
     const runAsyncId = profiler.asyncBegin(`agent.run:${this.config.type}`, 'agent');
 
     // Create fresh local context for this agent's work
@@ -948,7 +997,7 @@ export class Agent {
     };
 
     try {
-      await this.executeLoop(globalContext, localContext, workItem, result, metrics, startTime, cwd, signal);
+      await this.executeLoop(globalContext, localContext, workItem, result, metrics, startTime, cwd, signal, runControl);
     } catch (error) {
       // Capture error message - ensure we always have SOME diagnostic info
       let message = error instanceof Error ? error.message : String(error);
@@ -987,6 +1036,17 @@ export class Agent {
           result.terminationReason = 'timeout';
           result.error = `LLM call timed out after ${cause.timeoutMs}ms (retries exhausted)`;
           console.error(`[AGENT] LLM timeout after ${error.attempts} retries: ${cause.timeoutMs}ms`);
+        } else if (cause instanceof RateLimitError) {
+          result.terminationReason = 'rate_limit';
+          result.error = cause.message;
+          result.rateLimitInfo = {
+            provider: cause.provider,
+            model: cause.model,
+            type: cause.info.type,
+            retryAfterMs: cause.info.retryAfterMs,
+            message: cause.info.message,
+          };
+          console.error(`[AGENT] Rate limit persisted after ${error.attempts} attempts for ${cause.provider}/${cause.model}`);
         } else {
           result.terminationReason = 'agent_error';
           result.error = `Retries exhausted after ${error.attempts} attempts: ${message}`;
@@ -1099,7 +1159,8 @@ export class Agent {
     metrics: AgentMetrics,
     startTime: number,
     cwd: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    runControl?: AgentRunParams['runControl']
   ): Promise<void> {
     const maxIterations = Math.min(
       this.config.budget.maxIterations,
@@ -1115,14 +1176,24 @@ export class Agent {
 
     // Auto-read target files
     if (workItem.targetPaths && workItem.targetPaths.length > 0) {
-      await this.autoReadTargetFiles(workItem.targetPaths, localContext, localReadFiles, metrics, cwd, workItem.workId);
+      await this.autoReadTargetFiles(
+        workItem.targetPaths,
+        localContext,
+        localReadFiles,
+        metrics,
+        cwd,
+        workItem.workId,
+        signal,
+        runControl
+      );
     }
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
       profiler.instant(`agent.iteration:${iteration}`, 'agent', 'p', { agentType: this.config.type });
 
-      if (signal?.aborted) {
-        throw new Error('aborted');
+      const loopDirective = this.resolveControlDirective(signal, runControl);
+      if (this.applyControlDirective(result, loopDirective)) {
+        break;
       }
 
       // Check for user stop request at the start of each iteration
@@ -1305,6 +1376,12 @@ export class Agent {
 
       // 4. Process tools (if any)
       if (toolCalls.length > 0) {
+        const preToolDirective = this.resolveControlDirective(signal, runControl);
+        if (this.applyControlDirective(result, preToolDirective)) {
+          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
+          return;
+        }
+
         const toolCallsSucceededBefore = metrics.toolCallsSucceeded;
         const toolCallsFailedBefore = metrics.toolCallsFailed;
 
@@ -1318,7 +1395,9 @@ export class Agent {
           workItem,
           cwd,
           workItem.workId,
-          toolRepeatState
+          toolRepeatState,
+          signal,
+          runControl
         );
 
         const successCount = metrics.toolCallsSucceeded - toolCallsSucceededBefore;
@@ -1894,9 +1973,10 @@ export class Agent {
     workItem: WorkItem,
     cwd: string,
     workItemId?: string,
-    toolRepeatState?: { lastKey: string; lastOutput: string; repeats: number }
+    toolRepeatState?: { lastKey: string; lastOutput: string; repeats: number },
+    signal?: AbortSignal,
+    runControl?: AgentRunParams['runControl']
   ): Promise<void> {
-    const mq = createMicroQueue();
     const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
     const itemWorkId = workItemId ?? workItem.workId;
 
@@ -1907,7 +1987,7 @@ export class Agent {
     }
     const pendingParallel: Array<{
       call: { id: string; name: string; arguments: Record<string, unknown> };
-      promise: Promise<{ toolResult: ToolResult; toolDurationMs: number }>;
+      run: () => Effect.Effect<{ toolResult: ToolResult; toolDurationMs: number }>;
     }> = [];
 
     const invalidatePath = (pathValue: unknown): void => {
@@ -2036,7 +2116,18 @@ export class Agent {
     const flushParallel = async (): Promise<boolean> => {
       if (pendingParallel.length === 0) return false;
       const batch = pendingParallel.splice(0, pendingParallel.length);
-      const results = await Promise.all(batch.map((item) => item.promise));
+      const results = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const fibers = yield* Effect.forEach(
+              batch,
+              (item) => Effect.forkScoped(item.run()),
+              { concurrency: 'unbounded' }
+            );
+            return yield* Effect.forEach(fibers, (fiber) => Fiber.join(fiber));
+          })
+        )
+      );
       for (let i = 0; i < batch.length; i++) {
         const { call } = batch[i];
         const { toolResult, toolDurationMs } = results[i];
@@ -2044,12 +2135,17 @@ export class Agent {
         if (shouldStop) {
           return true;
         }
-        await mq.yieldIfNeeded();
       }
       return false;
     };
 
     for (const call of toolCalls) {
+      const controlDirective = this.resolveControlDirective(signal, runControl);
+      if (this.applyControlDirective(result, controlDirective)) {
+        await flushParallel();
+        return;
+      }
+
       metrics.toolCallsMade++;
       const nameLower = call.name.toLowerCase();
 
@@ -2136,23 +2232,29 @@ export class Agent {
 
         const toolStartTime = Date.now();
         const capturedArgs = effectiveArgs;
-        const promise = (async () => {
-          try {
-            const toolResult = await this.applyPostToolUseHook(
-              canonicalName, capturedArgs,
-              await this.toolRegistry.execute(canonicalName, capturedArgs, { cwd }),
-            );
+        const run = () =>
+          Effect.promise(async () => {
+            try {
+              const toolResult = await this.applyPostToolUseHook(
+                canonicalName, capturedArgs,
+                await this.toolRegistry.execute(canonicalName, capturedArgs, {
+                  cwd,
+                  signal,
+                  execution: runControl?.execution,
+                  control: runControl?.control,
+                }),
+              );
 
-            return { toolResult, toolDurationMs: Date.now() - toolStartTime };
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            const toolResult = errorResult(canonicalName, message, 0);
-            toolResult.output = `Error: ${message}`;
-            return { toolResult, toolDurationMs: Date.now() - toolStartTime };
-          }
-        })();
+              return { toolResult, toolDurationMs: Date.now() - toolStartTime };
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              const toolResult = errorResult(canonicalName, message, 0);
+              toolResult.output = `Error: ${message}`;
+              return { toolResult, toolDurationMs: Date.now() - toolStartTime };
+            }
+          });
 
-        pendingParallel.push({ call, promise });
+        pendingParallel.push({ call, run });
         continue;
       }
 
@@ -2180,8 +2282,21 @@ export class Agent {
         // Use canonical name for execution, but pass original call for agent tools (which need call.id)
         const normalizedCall = { ...call, name: canonicalName, arguments: effectiveArgs };
         const rawResult = isAgentTool
-          ? await this.executeAgentToolCall(normalizedCall, workItem, globalContext, localContext, cwd)
-          : await this.toolRegistry.execute(canonicalName, effectiveArgs, { cwd });
+          ? await this.executeAgentToolCall(
+              normalizedCall,
+              workItem,
+              globalContext,
+              localContext,
+              cwd,
+              signal,
+              runControl
+            )
+          : await this.toolRegistry.execute(canonicalName, effectiveArgs, {
+              cwd,
+              signal,
+              execution: runControl?.execution,
+              control: runControl?.control,
+            });
         const toolDurationMs = Date.now() - toolStartTime;
         const toolResult = await this.applyPostToolUseHook(canonicalName, effectiveArgs, rawResult);
 
@@ -2351,7 +2466,9 @@ export class Agent {
     parentWorkItem: WorkItem,
     globalContext: ContextWindow,
     parentLocalContext: ContextWindow,
-    cwd: string
+    cwd: string,
+    signal?: AbortSignal,
+    runControl?: AgentRunParams['runControl']
   ) {
     if (!this.agentRegistry) {
       return errorResult(call.name, 'Agent tool registry not available', 0);
@@ -2449,7 +2566,13 @@ export class Agent {
       }
     );
 
-    const subResult = await agent.run({ globalContext: mergedContextForSubAgent, workItem: subWorkItem, cwd });
+    const subResult = await agent.run({
+      globalContext: mergedContextForSubAgent,
+      workItem: subWorkItem,
+      cwd,
+      signal,
+      runControl,
+    });
 
     // Track post-processing errors separately - we want to preserve sub-agent results
     // even if artifact extraction or merging fails
@@ -2660,7 +2783,9 @@ export class Agent {
     localReadFiles: Set<string>,
     metrics: AgentMetrics,
     cwd: string,
-    workItemId?: string
+    workItemId?: string,
+    signal?: AbortSignal,
+    runControl?: AgentRunParams['runControl']
   ): Promise<void> {
     const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
     if (!allowedTools.has('read')) {
@@ -2670,7 +2795,12 @@ export class Agent {
     for (const targetPath of targetPaths) {
       try {
         metrics.toolCallsMade++;
-        const result = await this.toolRegistry.execute('Read', { path: targetPath }, { cwd });
+        const result = await this.toolRegistry.execute('Read', { path: targetPath }, {
+          cwd,
+          signal,
+          execution: runControl?.execution,
+          control: runControl?.control,
+        });
         if (result.isSuccess) {
           localReadFiles.add(targetPath);
           metrics.toolCallsSucceeded++;

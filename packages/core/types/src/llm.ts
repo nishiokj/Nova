@@ -124,6 +124,7 @@ export function getToolUseBlocks(message: Message): ToolUseContentBlock[] {
 
 // Import and re-export LLMProvider from the central providers module
 import type { LLMProvider } from './providers.js';
+import type { Effect, Stream } from 'effect';
 export type { LLMProvider };
 
 /**
@@ -236,6 +237,57 @@ export interface LLMResponse {
 }
 
 // ============================================
+// EFFECT RUNTIME CONTROL
+// ============================================
+
+export type RunControlState = 'running' | 'paused' | 'cancelling' | 'cancelled';
+
+export interface RunPauseMetadata {
+  requestedAt: number;
+  requestedBy?: 'user' | 'system' | 'policy';
+  reason?: string;
+}
+
+export interface RunCancellationMetadata {
+  requestedAt: number;
+  requestedBy?: 'user' | 'system' | 'policy';
+  reason?: string;
+  scope?: 'run' | 'work_item' | 'tool';
+  targetWorkIds?: string[];
+}
+
+export interface RunControlMetadata {
+  state: RunControlState;
+  pause?: RunPauseMetadata;
+  cancellation?: RunCancellationMetadata;
+}
+
+export interface RunExecutionMetadata {
+  requestId: string;
+  runId?: string;
+  workItemId?: string;
+  attempt?: number;
+}
+
+export interface LLMExecutionContext {
+  execution: RunExecutionMetadata;
+  control: RunControlMetadata;
+}
+
+export interface LLMExecutionError {
+  type:
+    | 'cancelled'
+    | 'paused'
+    | 'timeout'
+    | 'provider_error'
+    | 'schema_error'
+    | 'unknown';
+  message: string;
+  cause?: unknown;
+  metadata?: Record<string, unknown>;
+}
+
+// ============================================
 // LLM ADAPTER INTERFACE
 // ============================================
 
@@ -257,6 +309,8 @@ export interface RespondParams {
   previousResponseId?: string;
   maxToolCalls?: number;
   parallelToolCalls?: boolean;
+  run?: RunExecutionMetadata;
+  control?: RunControlMetadata;
 }
 
 /**
@@ -266,6 +320,8 @@ export interface StreamParams extends RespondParams {
   onChunk?: (chunk: string) => void;
   /** Callback for reasoning/thinking content chunks (e.g., GLM-4.7 thinking traces) */
   onReasoningChunk?: (chunk: string) => void;
+  /** Callback when streaming finalizes with the complete response object. */
+  onComplete?: (response: LLMResponse) => void;
 }
 
 /**
@@ -279,13 +335,12 @@ export interface LLMAdapter {
   /**
    * Send a prompt and get a complete response.
    */
-  respond(params: RespondParams): Promise<LLMResponse>;
+  respond(params: RespondParams): Effect.Effect<LLMResponse, LLMExecutionError>;
 
   /**
-   * Send a prompt and stream the response.
-   * Returns an async generator that yields chunks.
+   * Send a prompt and stream response chunks.
    */
-  stream(params: StreamParams): AsyncGenerator<string, LLMResponse>;
+  stream(params: StreamParams): Stream.Stream<string, LLMExecutionError>;
 
   /**
    * Register a model mapping for provider/baseUrl resolution.

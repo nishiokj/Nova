@@ -6,7 +6,13 @@
  */
 
 import type { ToolResult } from 'types';
-import type { ToolRegistrationOptions, ToolExecutionContext } from '../types.js';
+import { Effect } from 'effect';
+import type {
+  ToolRegistrationOptions,
+  ToolExecutionContext,
+  ToolExecutionError,
+} from '../types.js';
+import { toToolExecutionError } from '../types.js';
 
 // ============================================
 // TYPES
@@ -80,8 +86,7 @@ export async function executeWebSearch(
       count: String(count),
     });
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    const signal = composeSignals(context?.signal, FETCH_TIMEOUT_MS);
 
     const response = await fetch(`${BRAVE_API_ENDPOINT}?${params}`, {
       method: 'GET',
@@ -90,10 +95,8 @@ export async function executeWebSearch(
         'Accept-Encoding': 'gzip',
         'X-Subscription-Token': apiKey,
       },
-      signal: controller.signal,
+      signal,
     });
-
-    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const body = await response.text().catch(() => '');
@@ -139,6 +142,20 @@ export async function executeWebSearch(
     const msg = error instanceof Error ? error.message : String(error);
     return errorResult(`Web search failed: ${msg}`, startTime);
   }
+}
+
+export function executeWebSearchEffect(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.tryPromise({
+    try: () => executeWebSearch(args, context),
+    catch: (error) =>
+      toToolExecutionError(error, 'execution_error', {
+        toolName: 'WebSearch',
+        query: args.query,
+      }),
+  });
 }
 
 // ============================================
@@ -217,6 +234,17 @@ function formatSearchResults(results: BraveWebResult[], query: string): string {
   return lines.join('\n');
 }
 
+function composeSignals(
+  parentSignal: AbortSignal | undefined,
+  timeoutMs: number
+): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  if (!parentSignal) {
+    return timeoutSignal;
+  }
+  return AbortSignal.any([parentSignal, timeoutSignal]);
+}
+
 // ============================================
 // TOOL REGISTRATION
 // ============================================
@@ -258,7 +286,7 @@ IMPORTANT: After using search results to answer a question, always include a "So
     required: ['query'],
   },
   required: ['query'],
-  executor: executeWebSearch,
+  executor: executeWebSearchEffect,
   enabled: true,
   timeoutMs: 20000,
   readOnly: true,

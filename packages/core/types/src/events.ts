@@ -4,6 +4,12 @@
  * Events are emitted via callbacks; the EventBus tags requestId/runId and fans out.
  */
 
+import type {
+  RunCancellationMetadata,
+  RunControlState,
+  RunPauseMetadata,
+} from './llm.js';
+
 // AgentType is just a string identifier for agent types (e.g., 'routing', 'explorer', 'standard')
 type CoreAgentType = string;
 
@@ -32,7 +38,10 @@ export type AgentCoreEventType =
   | 'harness_response'
   | 'harness_status'
   | 'harness_error'
-  | 'harness_user_prompt';
+  | 'harness_user_prompt'
+  | 'run_control_requested'
+  | 'run_control_applied'
+  | 'run_control_rejected';
 
 /**
  * Orchestrator event types.
@@ -56,6 +65,49 @@ export type AgentEventType = AgentCoreEventType | OrchestratorEventType;
  * Event agent type identifiers.
  */
 export type AgentType = CoreAgentType | 'orchestrator';
+
+// ============================================
+// RUN CONTROL TYPES
+// ============================================
+
+export type RunControlAction = 'pause' | 'resume' | 'cancel';
+export type RunControlScope = 'run' | 'work_item' | 'tool';
+export type RunControlSource = 'user' | 'system' | 'policy';
+
+export interface RunControlTarget {
+  scope: RunControlScope;
+  runId?: string;
+  workItemIds?: string[];
+}
+
+export interface RunControlRequestedData {
+  action: RunControlAction;
+  source: RunControlSource;
+  target: RunControlTarget;
+  stateBefore: RunControlState;
+  pause?: RunPauseMetadata;
+  cancellation?: RunCancellationMetadata;
+}
+
+export interface RunControlAppliedData {
+  action: RunControlAction;
+  source: RunControlSource;
+  target: RunControlTarget;
+  stateBefore: RunControlState;
+  stateAfter: RunControlState;
+  pause?: RunPauseMetadata;
+  cancellation?: RunCancellationMetadata;
+}
+
+export interface RunControlRejectedData {
+  action: RunControlAction;
+  source: RunControlSource;
+  target: RunControlTarget;
+  stateBefore: RunControlState;
+  reason: string;
+  pause?: RunPauseMetadata;
+  cancellation?: RunCancellationMetadata;
+}
 
 // ============================================
 // BASE EVENT
@@ -452,6 +504,24 @@ export interface GitCommitData {
   /** Branch name if detectable */
   branch?: string;
 }
+
+/**
+ * Data for run_control_requested event.
+ * Emitted when pause/resume/cancel is requested.
+ */
+export interface RunControlRequestedEventData extends RunControlRequestedData {}
+
+/**
+ * Data for run_control_applied event.
+ * Emitted after run control has been applied and quiesced.
+ */
+export interface RunControlAppliedEventData extends RunControlAppliedData {}
+
+/**
+ * Data for run_control_rejected event.
+ * Emitted when a control request cannot be safely applied.
+ */
+export interface RunControlRejectedEventData extends RunControlRejectedData {}
 
 // ============================================
 // EVENT CALLBACK TYPE

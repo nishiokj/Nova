@@ -1,7 +1,8 @@
 import { ContextWindow } from 'context';
 import type { GraphDManager } from 'graphd';
-import type { ContextWindowSnapshot, SessionPermissionState } from 'types';
+import type { ContextWindowSnapshot, RunControlMetadata, SessionPermissionState } from 'types';
 import type { ModelSelection } from 'agent';
+import type { RuntimeControlQueue } from 'runtime';
 import { PermissionChecker } from './permissions.js';
 import path from 'path';
 import { existsSync, readdirSync } from 'fs';
@@ -112,7 +113,6 @@ function buildInterruptionDirective(userMessage: string): string {
   return `**User Interruption**: "${userMessage}"
 
 Consider if the user is:
-- Asking you to stop current work
 - Requesting a pivot to a different task
 - Providing information that invalidates your current action
 - Adding context as an addendum
@@ -160,6 +160,14 @@ export interface AsyncRunInfo {
   startedAt: number;
 }
 
+export interface SessionExecutionHandle {
+  requestId: string;
+  controlQueue: RuntimeControlQueue;
+  runControl: RunControlMetadata;
+  startedAt: number;
+  completion: Promise<void>;
+}
+
 export class SessionStore {
   private readonly sessionKey: string;
   private readonly maxTokens: number;
@@ -178,6 +186,10 @@ export class SessionStore {
   // Execution tracking: prevents race conditions when user sends messages during agent execution
   private executingRequestId: string | null = null;
   private queuedUserMessages: Array<{ requestId: string; message: string }> = [];
+  private executionControlQueue: RuntimeControlQueue | null = null;
+  private executionRunControl: RunControlMetadata = { state: 'running' };
+  private executionCompletion: Promise<void> | null = null;
+  private executionCompletionResolver: (() => void) | null = null;
 
   // Session-level exclusive operation tracking (prevents multiple connections from starting concurrent ops)
   private asyncRun: AsyncRunInfo | null = null;
@@ -600,6 +612,12 @@ export class SessionStore {
     this.pausedWorkItems.clear();
     this.modelSelections.clear();
     this.asyncRun = null;
+    this.executionCompletionResolver?.();
+    this.executionCompletionResolver = null;
+    this.executionCompletion = null;
+    this.executionControlQueue = null;
+    this.executionRunControl = { state: 'running' };
+    this.executingRequestId = null;
   }
 
   /**
@@ -717,11 +735,16 @@ export class SessionStore {
    * Mark that an orchestrator is executing for this session.
    * Returns false if there's already an active execution (caller should queue message instead).
    */
-  startExecution(requestId: string): boolean {
+  startExecution(requestId: string, controlQueue: RuntimeControlQueue): boolean {
     if (this.executingRequestId !== null) {
       return false;
     }
     this.executingRequestId = requestId;
+    this.executionControlQueue = controlQueue;
+    this.executionRunControl = { state: 'running' };
+    this.executionCompletion = new Promise((resolve) => {
+      this.executionCompletionResolver = resolve;
+    });
     return true;
   }
 
@@ -739,11 +762,89 @@ export class SessionStore {
     return this.executingRequestId;
   }
 
+  getActiveExecutionHandle(): SessionExecutionHandle | null {
+    if (
+      this.executingRequestId === null ||
+      this.executionControlQueue === null ||
+      this.executionCompletion === null
+    ) {
+      return null;
+    }
+    return {
+      requestId: this.executingRequestId,
+      controlQueue: this.executionControlQueue,
+      runControl: {
+        state: this.executionRunControl.state,
+        pause: this.executionRunControl.pause ? { ...this.executionRunControl.pause } : undefined,
+        cancellation: this.executionRunControl.cancellation
+          ? {
+              ...this.executionRunControl.cancellation,
+              targetWorkIds: this.executionRunControl.cancellation.targetWorkIds
+                ? [...this.executionRunControl.cancellation.targetWorkIds]
+                : undefined,
+            }
+          : undefined,
+      },
+      startedAt: this.asyncRun?.startedAt ?? Date.now(),
+      completion: this.executionCompletion,
+    };
+  }
+
+  updateExecutionRunControl(control: RunControlMetadata): void {
+    this.executionRunControl = {
+      state: control.state,
+      pause: control.pause ? { ...control.pause } : undefined,
+      cancellation: control.cancellation
+        ? {
+            ...control.cancellation,
+            targetWorkIds: control.cancellation.targetWorkIds
+              ? [...control.cancellation.targetWorkIds]
+              : undefined,
+          }
+        : undefined,
+    };
+  }
+
+  getExecutionRunControl(): RunControlMetadata {
+    return {
+      state: this.executionRunControl.state,
+      pause: this.executionRunControl.pause ? { ...this.executionRunControl.pause } : undefined,
+      cancellation: this.executionRunControl.cancellation
+        ? {
+            ...this.executionRunControl.cancellation,
+            targetWorkIds: this.executionRunControl.cancellation.targetWorkIds
+              ? [...this.executionRunControl.cancellation.targetWorkIds]
+              : undefined,
+          }
+        : undefined,
+    };
+  }
+
+  async waitForExecutionCompletion(requestId: string, timeoutMs = 30_000): Promise<boolean> {
+    if (this.executingRequestId !== requestId || !this.executionCompletion) {
+      return true;
+    }
+
+    const completion = this.executionCompletion;
+    const timedOut = await Promise.race([
+      completion.then(() => false),
+      new Promise<boolean>((resolve) => {
+        setTimeout(() => resolve(true), timeoutMs);
+      }),
+    ]);
+    return !timedOut;
+  }
+
   /**
    * Mark execution as complete and return any queued user messages.
    * Messages should be injected into context before next agent turn.
    */
   endExecution(): Array<{ requestId: string; message: string }> {
+    this.executionCompletionResolver?.();
+    this.executionCompletionResolver = null;
+    this.executionCompletion = null;
+    this.executionControlQueue = null;
+    this.executionRunControl = { state: 'running' };
     this.executingRequestId = null;
     const queued = this.queuedUserMessages;
     this.queuedUserMessages = [];
@@ -791,13 +892,5 @@ export class SessionStore {
    */
   hasPendingInterruption(): boolean {
     return this.queuedUserMessages.length > 0;
-  }
-
-  /**
-   * Check if any pending user message is a stop request.
-   * Used by agent to exit loop early on explicit user stop.
-   */
-  hasPendingStopRequest(): boolean {
-    return this.queuedUserMessages.some(({ message }) => /\bstop\b/i.test(message));
   }
 }

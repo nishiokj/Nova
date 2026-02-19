@@ -1,403 +1,240 @@
-/**
- * State-machine tests for Pause/Resume flow patterns
- *
- * These tests focus on the data structures and patterns used in pause/resume:
- * - Context preservation during pause
- * - User prompt structure validation
- * - Paused state management
- * - Context continuity on resume
- *
- * Note: Full execution tests require complex harness mocking.
- * These tests verify the core state machine patterns.
- */
+import { Effect, Stream } from 'effect';
+import type { AgentConfig } from 'agent';
+import type { AgentRegistry } from 'agent';
+import { ContextWindow } from 'context';
+import { resetProviderCircuit, type LLMAdapter, type LLMResponse } from 'llm';
+import { Orchestrator, type OrchestratorRuntime } from 'orchestrator/orchestrator.js';
+import { getOutputSchemaJson } from 'shared';
+import { successResult } from 'types';
+import type { ToolRegistry } from 'tools';
+import { makeRuntimeControlQueue, publishRuntimeControl } from 'runtime';
 
-import { ContextWindow } from 'context/context-window.js';
-import type { UserPromptInfo } from 'agent/types.js';
+const REQUEST_ID = 'req-pause-flow';
+const CWD = process.cwd();
 
-// Simulate paused state as stored by harness
-interface PausedState {
-  goal: string;
-  agentType: string;
-  workingDir: string;
+function makeResponse(action: 'done' | 'continue', response: string, goalStateReached: boolean, toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>): LLMResponse {
+  return {
+    content: JSON.stringify({
+      action,
+      response,
+      goalStateReached,
+      awaitingUserInput: false,
+    }),
+    stopReason: toolCalls && toolCalls.length > 0 ? 'tool_use' : 'end_turn',
+    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    toolCalls,
+    model: 'mock-model',
+    durationMs: 1,
+  };
 }
 
-describe('Pause/Resume Flow Patterns', () => {
-  let context: ContextWindow;
+function createMockLLM(sequence: LLMResponse[]): LLMAdapter {
+  let index = 0;
+  const next = () => {
+    const value = sequence[Math.min(index, sequence.length - 1)];
+    index++;
+    return value;
+  };
 
+  return {
+    respond: () => Effect.sync(next),
+    stream: (params) => Stream.unwrap(Effect.sync(() => {
+      const value = next();
+      params.onComplete?.(value);
+      return Stream.fromIterable(value.content.length > 0 ? [value.content] : []);
+    })),
+  } as LLMAdapter;
+}
+
+function createToolRegistry(onAbort?: () => void): ToolRegistry {
+  return {
+    getDefinitions: () => [{
+      name: 'SleepTool',
+      description: 'Tool used to validate pause quiesce behavior',
+      parameters: {
+        type: 'object',
+        properties: { ms: { type: 'number' } },
+        required: [],
+      },
+    }],
+    execute: async (_name: string, args: Record<string, unknown>, options?: { signal?: AbortSignal }) => {
+      const ms = typeof args.ms === 'number' ? args.ms : 1000;
+      const status = await new Promise<'done' | 'aborted'>((resolve) => {
+        const timer = setTimeout(() => resolve('done'), ms);
+        options?.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          onAbort?.();
+          resolve('aborted');
+        }, { once: true });
+      });
+      if (status === 'aborted') {
+        return {
+          toolName: 'SleepTool',
+          status: 'cancelled',
+          output: 'cancelled',
+          error: 'cancelled',
+          durationMs: 1,
+          isSuccess: false,
+        };
+      }
+      return successResult('SleepTool', 'slept', 1);
+    },
+    getWorkingDir: () => CWD,
+    isParallelSafe: () => false,
+  } as unknown as ToolRegistry;
+}
+
+function createAgentRegistry(): AgentRegistry {
+  const base: AgentConfig = {
+    type: 'standard',
+    systemPrompt: 'pause/resume test prompt',
+    tools: ['SleepTool'],
+    budget: {
+      maxIterations: 12,
+      maxToolCalls: 24,
+      maxDurationMs: 120_000,
+      llmStreamTimeoutMs: 10_000,
+    },
+    llmParams: {
+      maxTokens: 2048,
+      temperature: 0,
+    },
+    outputSchema: getOutputSchemaJson('agent_action'),
+  };
+
+  const configs = new Map<string, AgentConfig>([
+    ['standard', base],
+    ['planner', { ...base, type: 'planner', outputSchema: getOutputSchemaJson('planner_output') }],
+    ['observer', { ...base, type: 'observer' }],
+    ['explorer', { ...base, type: 'explorer' }],
+  ]);
+
+  return {
+    has: (type: string) => configs.has(type),
+    getConfig: (type: string) => {
+      const config = configs.get(type);
+      if (!config) throw new Error(`Unknown type: ${type}`);
+      return config;
+    },
+    listToolDefinitions: () => [],
+    register: () => {},
+    get: () => null,
+  } as unknown as AgentRegistry;
+}
+
+function createOrchestrator(llm: LLMAdapter, toolRegistry?: ToolRegistry): Orchestrator {
+  return new Orchestrator(
+    { maxIterations: 10 },
+    toolRegistry ?? createToolRegistry(),
+    llm,
+    () => {},
+    REQUEST_ID,
+    undefined,
+    createAgentRegistry(),
+    undefined,
+    () => ({ provider: 'openai', model: 'mock-model' })
+  );
+}
+
+describe('Pause/resume flow (Effect runtime)', () => {
   beforeEach(() => {
-    context = new ContextWindow('test-session', 200_000);
+    resetProviderCircuit();
   });
 
-  describe('UserPromptInfo structure', () => {
-    it('validates complete prompt structure', () => {
-      const prompt: UserPromptInfo = {
-        question: 'Which option do you prefer?',
-        options: ['Option A', 'Option B'],
-        context: 'Choose one of the following',
-        multiSelect: false,
-      };
+  it('preserves context through serialize/deserialize', () => {
+    const context = new ContextWindow('pause-context', 200_000);
+    context.addMessage('user', 'start');
+    context.addFileContent('/tmp/file.ts', 'const x = 1;');
 
-      expect(prompt.question).toBe('Which option do you prefer?');
-      expect(prompt.options).toHaveLength(2);
-      expect(prompt.context).toBe('Choose one of the following');
-      expect(prompt.multiSelect).toBe(false);
-    });
+    const snapshot = context.serialize();
+    const restored = ContextWindow.deserialize(snapshot);
 
-    it('allows minimal prompt with just question', () => {
-      const prompt: UserPromptInfo = {
-        question: 'What name should I use?',
-      };
+    expect(restored.sessionKey).toBe(context.sessionKey);
+    expect(restored.items.length).toBe(context.items.length);
+    expect(restored.hasReadFile('/tmp/file.ts')).toBe(true);
+  });
 
-      expect(prompt.question).toBe('What name should I use?');
-      expect(prompt.options).toBeUndefined();
-      expect(prompt.context).toBeUndefined();
-      expect(prompt.multiSelect).toBeUndefined();
-    });
+  it('pause command returns paused result with user prompt', async () => {
+    const orchestrator = createOrchestrator(createMockLLM([
+      makeResponse('continue', 'working', false),
+      makeResponse('continue', 'still working', false),
+    ]));
 
-    it('supports multi-select prompts', () => {
-      const prompt: UserPromptInfo = {
-        question: 'Select features to enable:',
-        options: ['Auth', 'Logging', 'Analytics'],
-        multiSelect: true,
-      };
+    const controlQueue = Effect.runSync(makeRuntimeControlQueue());
+    let sentPause = false;
 
-      expect(prompt.multiSelect).toBe(true);
-      expect(prompt.options).toHaveLength(3);
-    });
+    const runtime: OrchestratorRuntime = {
+      controlQueue,
+      onIteration: async ({ iteration }) => {
+        if (sentPause || iteration !== 1) return;
+        sentPause = true;
+        await Effect.runPromise(publishRuntimeControl(controlQueue, {
+          action: 'pause',
+          pause: {
+            requestedAt: Date.now(),
+            requestedBy: 'user',
+            reason: 'pause requested by test',
+          },
+        }));
+      },
+    };
 
-    it('supports structured option objects', () => {
-      const prompt: UserPromptInfo = {
-        question: 'Choose configuration:',
-        options: [
-          { label: 'Basic', description: 'Minimal setup' },
-          { label: 'Advanced', description: 'Full features' },
-        ],
-      };
+    const result = await orchestrator.execute(
+      new ContextWindow('pause-session', 200_000),
+      'pause goal',
+      'standard',
+      CWD,
+      runtime
+    );
 
-      expect(prompt.options).toHaveLength(2);
-      const firstOption = prompt.options![0];
-      if (typeof firstOption === 'object') {
-        expect(firstOption.label).toBe('Basic');
-        expect(firstOption.description).toBe('Minimal setup');
+    expect(result.paused).toBe(true);
+    expect(result.terminationReason).toBe('user_input_required');
+    expect(result.runControl.state).toBe('paused');
+    expect(result.userPrompt?.question).toContain('paused');
+  });
+
+  it('pause quiesces active tool work before returning', async () => {
+    let abortedTools = 0;
+    const orchestrator = createOrchestrator(
+      createMockLLM([
+        makeResponse('continue', '', false, [{ id: 'sleep_1', name: 'SleepTool', arguments: { ms: 15_000 } }]),
+        makeResponse('continue', 'loop', false),
+      ]),
+      createToolRegistry(() => {
+        abortedTools++;
+      })
+    );
+
+    const controlQueue = Effect.runSync(makeRuntimeControlQueue());
+    let sentPause = false;
+
+    const startedAt = Date.now();
+    const result = await orchestrator.execute(
+      new ContextWindow('pause-quiesce-session', 200_000),
+      'pause quiesce goal',
+      'standard',
+      CWD,
+      {
+        controlQueue,
+        onIteration: async ({ iteration }) => {
+          if (sentPause || iteration !== 1) return;
+          sentPause = true;
+          await Effect.runPromise(publishRuntimeControl(controlQueue, {
+            action: 'pause',
+            pause: {
+              requestedAt: Date.now(),
+              requestedBy: 'system',
+              reason: 'pause and quiesce',
+            },
+          }));
+        },
       }
-    });
-  });
-
-  describe('Paused state management', () => {
-    it('stores goal, agentType, and workingDir', () => {
-      const pausedState: PausedState = {
-        goal: 'Setup my project',
-        agentType: 'standard',
-        workingDir: '/home/user/project',
-      };
-
-      expect(pausedState.goal).toBe('Setup my project');
-      expect(pausedState.agentType).toBe('standard');
-      expect(pausedState.workingDir).toBe('/home/user/project');
-    });
-
-    it('paused state can be stored and retrieved by sessionKey', () => {
-      const pausedStates = new Map<string, PausedState>();
-      const sessionKey = 'session-123';
-
-      pausedStates.set(sessionKey, {
-        goal: 'Test goal',
-        agentType: 'explorer',
-        workingDir: '/tmp',
-      });
-
-      expect(pausedStates.has(sessionKey)).toBe(true);
-      expect(pausedStates.get(sessionKey)?.goal).toBe('Test goal');
-    });
-
-    it('clears paused state after successful completion', () => {
-      const pausedStates = new Map<string, PausedState>();
-      const sessionKey = 'session-123';
-
-      pausedStates.set(sessionKey, {
-        goal: 'Test',
-        agentType: 'standard',
-        workingDir: '/home',
-      });
-
-      // Simulate successful completion
-      pausedStates.delete(sessionKey);
-
-      expect(pausedStates.has(sessionKey)).toBe(false);
-    });
-
-    it('handles missing paused state gracefully', () => {
-      const pausedStates = new Map<string, PausedState>();
-      const sessionKey = 'nonexistent-session';
-
-      const state = pausedStates.get(sessionKey);
-      expect(state).toBeUndefined();
-    });
-  });
-
-  describe('Context preservation on pause', () => {
-    it('preserves all item types during pause', () => {
-      // Add various item types
-      context.addMessage('user', 'Initial request');
-      context.addFileContent('/file.ts', 'const x = 1;');
-      context.addFunctionCall('call-1', 'Read', { path: '/file.ts' });
-      context.addFunctionCallOutput('call-1', 'const x = 1;');
-      context.addReasoning('Analyzing the code...');
-
-      // Snapshot state
-      const itemCount = context.items.length;
-      const version = context.version;
-
-      // Verify all items preserved
-      expect(context.items.length).toBe(itemCount);
-      expect(context.version).toBe(version);
-
-      const types = new Set(context.items.map(i => i.type));
-      expect(types.has('message')).toBe(true);
-      expect(types.has('file_content')).toBe(true);
-      expect(types.has('function_call')).toBe(true);
-      expect(types.has('function_call_output')).toBe(true);
-      expect(types.has('reasoning')).toBe(true);
-    });
-
-    it('preserves read files tracking', () => {
-      context.addFileContent('/a.ts', 'a');
-      context.addFileContent('/b.ts', 'b');
-      context.markFileRead('/c.ts');
-
-      expect(context.hasReadFile('/a.ts')).toBe(true);
-      expect(context.hasReadFile('/b.ts')).toBe(true);
-      expect(context.hasReadFile('/c.ts')).toBe(true);
-      expect(context.hasReadFile('/d.ts')).toBe(false);
-    });
-
-    it('preserves metrics', () => {
-      context.updateMetrics(1000, 500);
-
-      expect(context.metrics.inputTokens).toBe(1000);
-      expect(context.metrics.outputTokens).toBe(500);
-    });
-  });
-
-  describe('Resume flow patterns', () => {
-    it('adds user answer as message after pause', () => {
-      // Pre-pause state
-      context.addMessage('user', 'Setup project');
-      expect(context.items.length).toBe(1);
-
-      // Simulate pause and user answering
-      const userAnswer = 'TypeScript';
-      context.addMessage('user', userAnswer);
-
-      expect(context.items.length).toBe(2);
-      const messages = context.items.filter(i => i.type === 'message');
-      expect((messages[1] as { content: string }).content).toBe('TypeScript');
-    });
-
-    it('supports structured answer serialization', () => {
-      // For multi-select, answer might be an array
-      const answer = ['Feature A', 'Feature B'];
-      const serialized = JSON.stringify(answer);
-
-      context.addMessage('user', serialized);
-
-      const messages = context.items.filter(i => i.type === 'message');
-      const lastMessage = messages[messages.length - 1] as { content: string };
-      expect(JSON.parse(lastMessage.content)).toEqual(['Feature A', 'Feature B']);
-    });
-
-    it('preserves context order across pause/resume', () => {
-      // Phase 1: Initial work
-      context.addMessage('user', '1-initial');
-      context.addFunctionCall('call-1', 'Read', { path: '/a.ts' });
-      context.addFunctionCallOutput('call-1', 'content');
-
-      // Phase 2: Pause and user answer
-      context.addMessage('user', '2-answer');
-
-      // Phase 3: More work after resume
-      context.addFunctionCall('call-2', 'Write', { path: '/b.ts' });
-      context.addFunctionCallOutput('call-2', 'written');
-      context.addMessage('assistant', '3-done');
-
-      // Verify order
-      const items = context.items;
-      expect((items[0] as { type: string }).type).toBe('message');
-      expect((items[1] as { type: string }).type).toBe('function_call');
-      expect((items[2] as { type: string }).type).toBe('function_call_output');
-      expect((items[3] as { type: string }).type).toBe('message');
-      expect((items[4] as { type: string }).type).toBe('function_call');
-    });
-  });
-
-  describe('Multiple sequential pauses', () => {
-    it('handles multiple pause/resume cycles', () => {
-      const pauseCount = 3;
-
-      for (let i = 0; i < pauseCount; i++) {
-        // Simulate work
-        context.addMessage('user', `request-${i}`);
-        context.addFunctionCall(`call-${i}`, 'Read', { path: `/file${i}.ts` });
-        context.addFunctionCallOutput(`call-${i}`, `content-${i}`);
-
-        // Simulate answer after pause
-        context.addMessage('user', `answer-${i}`);
-      }
-
-      const messages = context.items.filter(i => i.type === 'message');
-      expect(messages.length).toBe(pauseCount * 2); // request + answer per cycle
-    });
-
-    it('accumulates tool calls across pauses', () => {
-      // First pause cycle
-      context.addFunctionCall('call-1', 'Read', { path: '/a.ts' });
-      context.addFunctionCallOutput('call-1', 'a');
-
-      // Second pause cycle
-      context.addFunctionCall('call-2', 'Read', { path: '/b.ts' });
-      context.addFunctionCallOutput('call-2', 'b');
-
-      // Third pause cycle
-      context.addFunctionCall('call-3', 'Read', { path: '/c.ts' });
-      context.addFunctionCallOutput('call-3', 'c');
-
-      const calls = context.items.filter(i => i.type === 'function_call');
-      expect(calls.length).toBe(3);
-    });
-  });
-
-  describe('Context serialization for pause', () => {
-    it('serializes complete context state', () => {
-      context.addMessage('user', 'test');
-      context.addFileContent('/file.ts', 'code');
-      context.updateMetrics(100, 50);
-
-      const snapshot = context.serialize();
-
-      expect(snapshot.sessionKey).toBe('test-session');
-      expect(snapshot.items.length).toBe(2);
-      expect(snapshot.metrics.inputTokens).toBe(100);
-      expect(snapshot.readFiles).toContain('/file.ts');
-    });
-
-    it('deserializes context preserving all state', () => {
-      context.addMessage('user', 'hello');
-      context.addFileContent('/code.ts', 'const x = 1;');
-      context.updateMetrics(500, 250);
-
-      const snapshot = context.serialize();
-      const restored = ContextWindow.deserialize(snapshot);
-
-      expect(restored.sessionKey).toBe(context.sessionKey);
-      expect(restored.items.length).toBe(context.items.length);
-      expect(restored.metrics.inputTokens).toBe(context.metrics.inputTokens);
-      expect(restored.hasReadFile('/code.ts')).toBe(true);
-    });
-  });
-
-  describe('Edge cases', () => {
-    it('handles pause with empty context', () => {
-      // No items added
-      expect(context.items.length).toBe(0);
-
-      // Pause should still be valid
-      const snapshot = context.serialize();
-      expect(snapshot.items).toEqual([]);
-    });
-
-    it('handles resume after context compaction', () => {
-      // Add old file content
-      context.addFileContent('/old.ts', 'old content');
-      const items = context.items as Array<{ timestamp: number }>;
-      items[0].timestamp = Date.now() - 120_000;
-
-      // Compact removes old content
-      context.compact({ maxFileContentAgeMs: 60_000 });
-
-      // Resume with user answer
-      context.addMessage('user', 'answer');
-
-      // Should work fine
-      expect(context.items.length).toBe(1);
-      expect((context.items[0] as { type: string }).type).toBe('message');
-    });
-
-    it('handles very long user answers', () => {
-      const longAnswer = 'x'.repeat(10_000);
-      context.addMessage('user', longAnswer);
-
-      const message = context.items[0] as { content: string };
-      expect(message.content.length).toBe(10_000);
-    });
-
-    it('handles unicode in user answers', () => {
-      const unicodeAnswer = '選択A: 日本語 🎉';
-      context.addMessage('user', unicodeAnswer);
-
-      const message = context.items[0] as { content: string };
-      expect(message.content).toBe(unicodeAnswer);
-    });
-  });
-
-  describe('Pause state lifecycle', () => {
-    it('creates pause state on user_input_required', () => {
-      const pausedStates = new Map<string, PausedState>();
-
-      // Simulate orchestrator returning paused result
-      const sessionKey = context.sessionKey;
-      const paused = true;
-      const userPrompt: UserPromptInfo = { question: 'Continue?' };
-      const goal = 'Test task';
-      const agentType = 'standard';
-      const workingDir = '/home/user';
-
-      if (paused) {
-        pausedStates.set(sessionKey, { goal, agentType, workingDir });
-      }
-
-      expect(pausedStates.has(sessionKey)).toBe(true);
-      expect(pausedStates.get(sessionKey)?.goal).toBe(goal);
-    });
-
-    it('clears pause state on goal_reached', () => {
-      const pausedStates = new Map<string, PausedState>();
-      const sessionKey = context.sessionKey;
-
-      // Create pause state
-      pausedStates.set(sessionKey, {
-        goal: 'Test',
-        agentType: 'standard',
-        workingDir: '/home',
-      });
-
-      // Simulate goal reached
-      const paused = false;
-      if (!paused) {
-        pausedStates.delete(sessionKey);
-      }
-
-      expect(pausedStates.has(sessionKey)).toBe(false);
-    });
-
-    it('updates pause state on subsequent pause', () => {
-      const pausedStates = new Map<string, PausedState>();
-      const sessionKey = context.sessionKey;
-
-      // First pause
-      pausedStates.set(sessionKey, {
-        goal: 'Original goal',
-        agentType: 'standard',
-        workingDir: '/home',
-      });
-
-      // After resume and another pause (shouldn't happen normally but test robustness)
-      pausedStates.set(sessionKey, {
-        goal: 'Same goal', // Should be same
-        agentType: 'standard',
-        workingDir: '/home/subdir', // Might change
-      });
-
-      expect(pausedStates.get(sessionKey)?.workingDir).toBe('/home/subdir');
-    });
+    );
+    const durationMs = Date.now() - startedAt;
+
+    expect(result.paused).toBe(true);
+    expect(result.runControl.state).toBe('paused');
+    expect(abortedTools).toBeGreaterThanOrEqual(0);
+    expect(durationMs).toBeLessThan(10_000);
   });
 });

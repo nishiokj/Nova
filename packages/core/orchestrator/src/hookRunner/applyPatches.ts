@@ -38,6 +38,7 @@ export interface HookState {
   terminationReason: TerminationReason | null;
   metadata: Map<string, unknown>;
   auditLog: AuditLogEntry[];
+  cancelInProgressWork?: (workId: string, reason: string) => boolean;
 }
 
 /**
@@ -132,7 +133,20 @@ function applyPatch(state: HookState, patch: StatePatch): void {
 
     case 'cancel_work': {
       const cancelSet = new Set(patch.workIds);
-      state.workQueue = state.workQueue.filter(w => !cancelSet.has(w.workId));
+      const { scope, reason } = patch.cancellation;
+
+      if (scope === 'queued' || scope === 'all') {
+        state.workQueue = state.workQueue.filter(w => !cancelSet.has(w.workId));
+      }
+
+      if (scope === 'in_progress' || scope === 'all') {
+        if (!state.cancelInProgressWork) {
+          throw new Error('cancel_work with in_progress scope requires cancelInProgressWork handler');
+        }
+        for (const workId of cancelSet) {
+          state.cancelInProgressWork(workId, reason);
+        }
+      }
       break;
     }
 
@@ -235,7 +249,11 @@ function summarizePatch(patch: StatePatch): Record<string, unknown> {
     case 'enqueue_work':
       return { itemCount: patch.items.length, position: patch.position };
     case 'cancel_work':
-      return { workIdCount: patch.workIds.length, reason: patch.reason };
+      return {
+        workIdCount: patch.workIds.length,
+        scope: patch.cancellation.scope,
+        reason: patch.cancellation.reason,
+      };
     case 'inject_message':
       return { role: patch.role, contentLength: patch.content.length };
     case 'inject_guidance':

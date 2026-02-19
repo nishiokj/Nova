@@ -136,6 +136,13 @@ export const WorkItemSpecSchema = z.object({
   }).optional(),
 });
 
+export const CancellationScopeSchema = z.enum(['queued', 'in_progress', 'all']);
+
+export const CancellationTargetSchema = z.object({
+  scope: CancellationScopeSchema,
+  reason: z.string().min(1),
+});
+
 export const StatePatchSchema = z.discriminatedUnion('op', [
   z.object({
     op: z.literal('enqueue_work'),
@@ -145,7 +152,7 @@ export const StatePatchSchema = z.discriminatedUnion('op', [
   z.object({
     op: z.literal('cancel_work'),
     workIds: z.array(z.string()).min(1),
-    reason: z.string().min(1),
+    cancellation: CancellationTargetSchema,
   }),
   z.object({
     op: z.literal('inject_message'),
@@ -216,3 +223,5 @@ export type CadenceDecisionSchemaType = z.infer<typeof CadenceDecisionSchema>;
 export type AgentErrorDecisionSchemaType = z.infer<typeof AgentErrorDecisionSchema>;
 export type WorkItemCompletedDecisionSchemaType = z.infer<typeof WorkItemCompletedDecisionSchema>;
 export type StatePatchSchemaType = z.infer<typeof StatePatchSchema>;
+export type CancellationScopeSchemaType = z.infer<typeof CancellationScopeSchema>;
+export type CancellationTargetSchemaType = z.infer<typeof CancellationTargetSchema>;

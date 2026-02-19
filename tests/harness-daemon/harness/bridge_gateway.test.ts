@@ -28,6 +28,12 @@ function waitFor(predicate: () => boolean, timeoutMs = 300): Promise<void> {
 
 class FakeHarness {
   lastRunSessionKey: string | null = null;
+  controlCalls: Array<{
+    sessionKey: string;
+    action: 'pause' | 'resume' | 'cancel';
+    reason?: string;
+    requestedBy?: 'user' | 'system' | 'policy';
+  }> = [];
   private readonly config: FullHarnessConfig;
 
   constructor() {
@@ -142,6 +148,20 @@ class FakeHarness {
 
   async shutdown(): Promise<void> {
     return;
+  }
+
+  async controlSessionExecution(params: {
+    sessionKey: string;
+    action: 'pause' | 'resume' | 'cancel';
+    reason?: string;
+    requestedBy?: 'user' | 'system' | 'policy';
+  }): Promise<{ success: boolean; requestId?: string; quiesced?: boolean; error?: string }> {
+    this.controlCalls.push(params);
+    return {
+      success: true,
+      requestId: 'req_control',
+      quiesced: params.action !== 'resume',
+    };
   }
 }
 
@@ -261,6 +281,96 @@ describe('BridgeGateway', () => {
     expect(payload.success).toBe(true);
     expect(payload.sessionCount).toBe(1);
     expect(Array.isArray(payload.sessions)).toBe(true);
+
+    client.close();
+    await server.stop();
+  });
+
+  it('routes /pause and /resume commands through runtime control operations', async () => {
+    const harness = new FakeHarness();
+    let gateway: BridgeGateway;
+    const server = new BusServer({
+      host: '127.0.0.1',
+      port: 0,
+      onPublish: (connectionId, channel, payload) =>
+        gateway.handlePublish(connectionId, channel, payload),
+    });
+    gateway = new BridgeGateway(server, harness, process.cwd());
+    const address = await server.start();
+
+    const client = new BusClient({ host: address.host, port: address.port });
+    const events: BridgeEvent[] = [];
+    client.on('event', (payload) => {
+      events.push(payload as BridgeEvent);
+    });
+    await client.connect();
+
+    client.publish(BRIDGE_COMMAND_CHANNEL, { type: 'init', data: {} });
+    await waitFor(() => events.some((event) => event.type === 'ready'));
+
+    client.publish(BRIDGE_COMMAND_CHANNEL, {
+      type: 'send_text',
+      data: { text: '/pause hold here' },
+    });
+    await waitFor(() =>
+      events.some((event) =>
+        event.type === 'response'
+        && isRecord(event.data?.metadata)
+        && event.data.metadata.kind === 'control_plane_stop'
+      )
+    );
+
+    client.publish(BRIDGE_COMMAND_CHANNEL, {
+      type: 'send_text',
+      data: { text: '/resume continue' },
+    });
+    await waitFor(() => harness.controlCalls.length >= 2);
+
+    expect(harness.controlCalls[0]?.action).toBe('pause');
+    expect(harness.controlCalls[0]?.reason).toContain('hold here');
+    expect(harness.controlCalls[1]?.action).toBe('resume');
+    expect(harness.controlCalls[1]?.reason).toContain('continue');
+
+    client.close();
+    await server.stop();
+  });
+
+  it('routes control_plane_stop cancel action through runtime control operation', async () => {
+    const harness = new FakeHarness();
+    let gateway: BridgeGateway;
+    const server = new BusServer({
+      host: '127.0.0.1',
+      port: 0,
+      onPublish: (connectionId, channel, payload) =>
+        gateway.handlePublish(connectionId, channel, payload),
+    });
+    gateway = new BridgeGateway(server, harness, process.cwd());
+    const address = await server.start();
+
+    const client = new BusClient({ host: address.host, port: address.port });
+    const events: BridgeEvent[] = [];
+    client.on('event', (payload) => {
+      events.push(payload as BridgeEvent);
+    });
+    await client.connect();
+
+    const sessionKey = 'cp-stop-session';
+    client.publish(BRIDGE_COMMAND_CHANNEL, { type: 'init', data: { session_key: sessionKey } });
+    await waitFor(() => events.some((event) => event.type === 'ready'));
+
+    client.publish(BRIDGE_COMMAND_CHANNEL, {
+      type: 'control_plane_stop',
+      data: {
+        session_key: sessionKey,
+        action: 'cancel',
+        note: 'cancel from control plane',
+      },
+    });
+    await waitFor(() => harness.controlCalls.length >= 1);
+
+    expect(harness.controlCalls[0]?.action).toBe('cancel');
+    expect(harness.controlCalls[0]?.reason).toBe('cancel from control plane');
+    expect(harness.controlCalls[0]?.requestedBy).toBe('system');
 
     client.close();
     await server.stop();

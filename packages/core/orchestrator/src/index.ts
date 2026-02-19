@@ -22,8 +22,6 @@ export {
   type BoundsCheckResult,
 } from './bounds-checker.js';
 
-export type { StopHookHandler, StopHookContext } from 'agent';
-
 // New protocol hook registry/runner (orchestrator-owned)
 export {
   createHookRegistry,

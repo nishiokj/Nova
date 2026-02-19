@@ -16,9 +16,11 @@ import type {
   LLMResponse,
   RespondParams,
   StreamParams,
+  LLMExecutionError,
 } from 'types';
+import { Effect, Stream } from 'effect';
 import type { ProviderContext, LLMProviderAdapter } from './types.js';
-import { PartialStreamError } from './types.js';
+import { PartialStreamError, toLLMExecutionError } from './types.js';
 import { compileSchemaForCodex } from './schema_compiler.js';
 
 const DEFAULT_CODEX_REQUEST_TIMEOUT_MS = 120_000;
@@ -55,21 +57,65 @@ export class CodexProvider implements LLMProviderAdapter {
    * Non-streaming respond - internally uses streaming and collects result.
    * The ChatGPT backend requires stream=true for OAuth requests.
    */
-  async respond(context: ProviderContext, params: RespondParams): Promise<LLMResponse> {
-    const generator = this.stream(context, {
-      ...params,
+  respond(context: ProviderContext, params: RespondParams): Effect.Effect<LLMResponse, LLMExecutionError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const generator = this.streamCodex(context, {
+          ...params,
+        });
+
+        let result: IteratorResult<string, LLMResponse>;
+        do {
+          result = await generator.next();
+        } while (!result.done);
+
+        return result.value;
+      },
+      catch: (error) => toLLMExecutionError(error, this.name, context.config.model),
     });
-
-    // Consume the generator to get the final response
-    let result: IteratorResult<string, LLMResponse>;
-    do {
-      result = await generator.next();
-    } while (!result.done);
-
-    return result.value;
   }
 
-  async *stream(context: ProviderContext, params: StreamParams): AsyncGenerator<string, LLMResponse> {
+  stream(context: ProviderContext, params: StreamParams): Stream.Stream<string, LLMExecutionError> {
+    return Stream.unwrapScoped(
+      Effect.acquireRelease(
+        Effect.sync(() => this.streamCodex(context, params)),
+        (generator) =>
+          Effect.tryPromise({
+            try: async () => {
+              if (typeof generator.return === 'function') {
+                await generator.return(undefined as never);
+              }
+            },
+            catch: () => undefined,
+          }).pipe(Effect.orDie)
+      ).pipe(
+        Effect.map((generator) =>
+          Stream.fromAsyncIterable(
+            {
+              [Symbol.asyncIterator]: async function* () {
+                while (true) {
+                  const next = await generator.next();
+                  if (next.done) {
+                    if (next.value) {
+                      params.onComplete?.(next.value);
+                    }
+                    return;
+                  }
+                  yield next.value;
+                }
+              },
+            },
+            (error) => toLLMExecutionError(error, 'codex', context.config.model)
+          )
+        )
+      )
+    );
+  }
+
+  private async *streamCodex(
+    context: ProviderContext,
+    params: StreamParams
+  ): AsyncGenerator<string, LLMResponse> {
     const { config, logger } = context;
     const { messages, tools, system } = params;
 

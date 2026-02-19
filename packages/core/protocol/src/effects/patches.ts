@@ -55,10 +55,17 @@ export interface EnqueueWorkPatch {
 /**
  * Cancel work items by ID.
  */
+export type CancellationScope = 'queued' | 'in_progress' | 'all';
+
+export interface CancellationTarget {
+  scope: CancellationScope;
+  reason: string;
+}
+
 export interface CancelWorkPatch {
   op: 'cancel_work';
   workIds: string[];
-  reason: string;
+  cancellation: CancellationTarget;
 }
 
 /**
@@ -171,8 +178,18 @@ export function validatePatch(patch: StatePatch): ValidationResult {
       if (!patch.workIds.length) {
         return { valid: false, error: 'cancel_work requires at least one workId' };
       }
-      if (!patch.reason?.trim()) {
+      if (patch.workIds.some(workId => !workId?.trim())) {
+        return { valid: false, error: 'cancel_work workIds must be non-empty strings' };
+      }
+      if (!patch.cancellation.reason?.trim()) {
         return { valid: false, error: 'cancel_work requires a reason' };
+      }
+      if (
+        patch.cancellation.scope !== 'queued' &&
+        patch.cancellation.scope !== 'in_progress' &&
+        patch.cancellation.scope !== 'all'
+      ) {
+        return { valid: false, error: 'cancel_work scope must be queued, in_progress, or all' };
       }
       return { valid: true };
 
@@ -257,8 +274,19 @@ export function enqueueWork(items: WorkItemSpec[], position: 'front' | 'back' = 
 /**
  * Create a cancel_work patch.
  */
-export function cancelWork(workIds: string[], reason: string): CancelWorkPatch {
-  return { op: 'cancel_work', workIds, reason };
+export function cancelWork(
+  workIds: string[],
+  reason: string,
+  scope: CancellationScope = 'all'
+): CancelWorkPatch {
+  return {
+    op: 'cancel_work',
+    workIds,
+    cancellation: {
+      scope,
+      reason,
+    },
+  };
 }
 
 /**
