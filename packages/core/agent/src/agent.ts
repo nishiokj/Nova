@@ -6,7 +6,7 @@
  */
 
 import path from 'node:path';
-import { Effect, Fiber, Stream } from 'effect';
+import { Effect, Stream } from 'effect';
 import type { LLMAdapter, Message, LLMRequestConfig, LLMResponse } from 'llm';
 import {
   resilientCall,
@@ -150,11 +150,10 @@ export interface ModelSelection {
  * Memory injector interface for injecting relevant memory into agent context.
  */
 export interface MemoryInjector {
-  inject(params: { query: string; maxTokens: number }): Promise<string | null>;
   injectRecentConversations?: (params: { limit?: number; maxTokens: number; connectors?: string }) => Promise<string | null>;
   summarizeQueryPlan?: (query: string) => string;
   explainQueryPlan?: (query: string) => { intent?: string } | undefined;
-  injectV2?: (params: {
+  injectEvidence?: (params: {
     task: {
       objective: string;
       recentMessages: string[];
@@ -172,7 +171,6 @@ export interface MemoryInjector {
       minCoverage?: Partial<Record<string, number>>;
     };
     options?: {
-      forceV1Fallback?: boolean;
       trace?: boolean;
     };
   }) => Promise<{
@@ -210,8 +208,6 @@ export class Agent {
     query: string;
     content: string | null;
     itemCount: number;
-    version: 'v1' | 'v2';
-    fallbackToV1?: boolean;
     latencyMs?: number;
     coverage?: Record<string, number>;
     discriminatorsIncluded?: number;
@@ -332,12 +328,10 @@ export class Agent {
     itemCount: number;
     success: boolean;
     iteration: number;
-    version: 'v1' | 'v2';
     latencyMs?: number;
     coverage?: Record<string, number>;
     discriminatorsIncluded?: number;
     totalTokens?: number;
-    fallbackToV1?: boolean;
     trainingSignal?: Record<string, unknown>;
   }): void {
     this.internalHookQueue.enqueue({
@@ -414,48 +408,51 @@ export class Agent {
    * Compact context if near full and rebuild localReadFiles tracking.
    * Handles both LLM-assisted compaction and fallback basic compaction.
    */
-  private async compactIfNeeded(
+  private compactIfNeeded(
     localContext: ContextWindow,
     localReadFiles: Set<string>,
     workItem: WorkItem
-  ): Promise<void> {
-    if (!localContext.isNearFull(0.5)) return;
+  ): Effect.Effect<void> {
+    return Effect.sync(() => {
+      if (!localContext.isNearFull(0.5)) return;
 
-    localContext.compact({
-      deduplicateByPath: true,
-      truncateOutputsTo: 4000,
+      localContext.compact({
+        deduplicateByPath: true,
+        truncateOutputsTo: 4000,
+      });
+
+      // Rebuild localReadFiles from compacted context
+      localReadFiles.clear();
+      for (const path of localContext.getReadFilesArray()) {
+        localReadFiles.add(path);
+      }
+
+      this.internalHookQueue.enqueue({
+        type: 'context_threshold',
+        usagePercent: localContext.metrics.percentageUsed,
+        tokenCount: localContext.metrics.inputTokens + localContext.metrics.outputTokens,
+        itemCount: localContext.items.length,
+      }, this.buildHookContext(workItem));
     });
-
-    // Rebuild localReadFiles from compacted context
-    localReadFiles.clear();
-    for (const path of localContext.getReadFilesArray()) {
-      localReadFiles.add(path);
-    }
-
-    this.internalHookQueue.enqueue({
-      type: 'context_threshold',
-      usagePercent: localContext.metrics.percentageUsed,
-      tokenCount: localContext.metrics.inputTokens + localContext.metrics.outputTokens,
-      itemCount: localContext.items.length,
-    }, this.buildHookContext(workItem));
   }
 
   /**
    * Build the LLM request parameters for an iteration.
    * Consolidates system prompt, tools, messages, and last-iteration handling.
    */
-  private async buildIterationRequest(
+  private buildIterationRequest(
     workItem: WorkItem,
     globalContext: ContextWindow,
     localContext: ContextWindow,
     cwd: string,
     iteration: number,
     maxIterations: number
-  ): Promise<{
+  ): Effect.Effect<{
     messages: Array<Record<string, unknown>>;
     tools: ToolDefinition[] | undefined;
     toolChoice: 'none' | 'auto' | undefined;
   }> {
+    return Effect.promise(async () => {
     const { system, taskContext } = this.buildSystemPromptComponents(workItem, cwd);
 
     const allTools = [
@@ -469,7 +466,7 @@ export class Agent {
       ? '\n\nIMPORTANT: This is your final iteration. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.'
       : '';
 
-    // Memory injection (recent + v1/v2)
+    // Memory injection (recent + evidence retrieval)
     let recentConversationContent: string | null = null;
     if (this.memoryInjector?.injectRecentConversations && iteration === 0) {
       try {
@@ -498,17 +495,13 @@ export class Agent {
         const queryKey = this.normalizeMemoryQueryKey(eventQuery);
         const cacheKey = this.getMemoryCacheKey(workItem);
         const recentMessageItems = globalContext.getItemsByType('message') as MessageItem[];
-        const shouldUseV2 = !!this.memoryInjector.injectV2
+        const shouldUseEvidence = !!this.memoryInjector.injectEvidence
           && !isConceptIntent
-          && !isRecallIntent
-          && this.shouldUseMemoryV2(this.sessionKey, workItem.workId);
+          && !isRecallIntent;
         const cached = this.memoryInjectionCache.get(cacheKey);
-        const canReuseCached = cached && cached.queryKey === queryKey && (
-          cached.version === (shouldUseV2 ? 'v2' : 'v1')
-          || (shouldUseV2 && cached.fallbackToV1 && cached.version === 'v1')
-        );
+        const canReuseCached = !!shouldUseEvidence && !!cached && cached.queryKey === queryKey;
 
-        let v2Result: {
+        let evidenceResult: {
           content: string;
           atoms: unknown[];
           trainingSignal?: Record<string, unknown>;
@@ -520,7 +513,6 @@ export class Agent {
             latencyMs: number;
           };
         } | null = null;
-        let fallbackToV1 = false;
 
         if (canReuseCached) {
           memoryContent = cached.content;
@@ -532,118 +524,103 @@ export class Agent {
             itemCount: cached.itemCount,
             success: memoryContent !== null,
             iteration,
-            version: cached.version,
             latencyMs: cached.latencyMs,
             coverage: cached.coverage,
             discriminatorsIncluded: cached.discriminatorsIncluded,
             totalTokens: cached.totalTokens,
-            fallbackToV1: cached.fallbackToV1,
             trainingSignal: cached.trainingSignal,
           });
-        } else if (shouldUseV2 && this.memoryInjector.injectV2) {
-          const recentMessages = recentMessageItems
-            .filter(item => item.role === 'user')
-            .map(item => {
-              if (typeof item.content === 'string') return item.content;
-              if (Array.isArray(item.content)) {
-                return item.content
-                  .map(block => (block.type === 'text' ? block.text : ''))
-                  .join(' ');
+        } else {
+          if (shouldUseEvidence && this.memoryInjector.injectEvidence) {
+            const recentMessages = recentMessageItems
+              .filter(item => item.role === 'user')
+              .map(item => {
+                if (typeof item.content === 'string') return item.content;
+                if (Array.isArray(item.content)) {
+                  return item.content
+                    .map(block => (block.type === 'text' ? block.text : ''))
+                    .join(' ');
+                }
+                return '';
+              })
+              .filter(text => text && text.trim().length > 0)
+              .slice(-3);
+
+            const touchedFiles = globalContext.getReadFilesArray().map((filePath) => {
+              if (path.isAbsolute(filePath)) {
+                return path.relative(cwd, filePath);
               }
-              return '';
-            })
-            .filter(text => text && text.trim().length > 0)
-            .slice(-3);
+              return filePath;
+            });
 
-          const touchedFiles = globalContext.getReadFilesArray().map((filePath) => {
-            if (path.isAbsolute(filePath)) {
-              return path.relative(cwd, filePath);
-            }
-            return filePath;
-          });
-
-          v2Result = await this.memoryInjector.injectV2({
-            task: {
-              objective: workItem.objective,
-              recentMessages,
-              touchedFiles,
-              iteration,
-              sessionId: this.sessionKey,
-              runId: this.requestId || undefined,
-              workItemId: workItem.workId,
-            },
-            budget: {
-              maxTokens: 1000,
-              maxItems: 3,
-              topK: 12,
+            evidenceResult = await this.memoryInjector.injectEvidence({
+              task: {
+                objective: workItem.objective,
+                recentMessages,
+                touchedFiles,
+                iteration,
+                sessionId: this.sessionKey,
+                runId: this.requestId || undefined,
+                workItemId: workItem.workId,
+              },
+              budget: {
+                maxTokens: 1000,
+                maxItems: 3,
+                topK: 12,
               filters: {
                 intent,
-                mode: 'memory_injection_v2',
+                mode: 'memory_injection',
               },
-              minCoverage: {},
-            },
-          });
-        }
+                minCoverage: {},
+              },
+            });
+          }
 
-        if (v2Result?.content) {
-          memoryContent = v2Result.content;
-          const contextWithMemory = memoryContent ? `${taskContext}\n\n${memoryContent}` : undefined;
-          this.memoryInjectionCache.set(cacheKey, {
-            queryKey,
-            query,
-            content: memoryContent,
-            itemCount: v2Result.atoms?.length ?? 0,
-            version: 'v2',
-            fallbackToV1: false,
-            latencyMs: v2Result.metrics?.latencyMs,
-            coverage: v2Result.metrics?.coverage,
-            discriminatorsIncluded: v2Result.metrics?.discriminatorsIncluded,
-            totalTokens: v2Result.metrics?.totalTokens,
-            trainingSignal: v2Result.trainingSignal,
-          });
-          this.emitMemoryInjected(workItem, {
-            query: eventQuery,
-            resultPreview: memoryContent.slice(0, 500),
-            memoryContent,
-            contextWithMemory,
-            itemCount: v2Result.atoms?.length ?? 0,
-            success: true,
-            iteration,
-            version: 'v2',
-            latencyMs: v2Result.metrics?.latencyMs,
-            coverage: v2Result.metrics?.coverage,
-            discriminatorsIncluded: v2Result.metrics?.discriminatorsIncluded,
-            totalTokens: v2Result.metrics?.totalTokens,
-            fallbackToV1: false,
-            trainingSignal: v2Result.trainingSignal,
-          });
-        } else {
-          fallbackToV1 = shouldUseV2;
-          memoryContent = await this.memoryInjector.inject({ query, maxTokens: 1000 });
-          const contextWithMemory = memoryContent ? `${taskContext}\n\n${memoryContent}` : undefined;
-          const itemCount = memoryContent ? memoryContent.split('\n\n').filter(line => line.trim().length > 0).length : 0;
-          this.memoryInjectionCache.set(cacheKey, {
-            queryKey,
-            query,
-            content: memoryContent,
-            itemCount,
-            version: 'v1',
-            fallbackToV1,
-          });
-          this.emitMemoryInjected(workItem, {
-            query: eventQuery,
-            resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
-            memoryContent: memoryContent ?? undefined,
-            contextWithMemory,
-            itemCount,
-            success: memoryContent !== null,
-            iteration,
-            version: 'v1',
-            fallbackToV1,
-          });
+          if (evidenceResult?.content) {
+            memoryContent = evidenceResult.content;
+            const contextWithMemory = `${taskContext}\n\n${memoryContent}`;
+            this.memoryInjectionCache.set(cacheKey, {
+              queryKey,
+              query,
+              content: memoryContent,
+              itemCount: evidenceResult.atoms?.length ?? 0,
+              latencyMs: evidenceResult.metrics?.latencyMs,
+              coverage: evidenceResult.metrics?.coverage,
+              discriminatorsIncluded: evidenceResult.metrics?.discriminatorsIncluded,
+              totalTokens: evidenceResult.metrics?.totalTokens,
+              trainingSignal: evidenceResult.trainingSignal,
+            });
+            this.emitMemoryInjected(workItem, {
+              query: eventQuery,
+              resultPreview: memoryContent.slice(0, 500),
+              memoryContent,
+              contextWithMemory,
+              itemCount: evidenceResult.atoms?.length ?? 0,
+              success: true,
+              iteration,
+              latencyMs: evidenceResult.metrics?.latencyMs,
+              coverage: evidenceResult.metrics?.coverage,
+              discriminatorsIncluded: evidenceResult.metrics?.discriminatorsIncluded,
+              totalTokens: evidenceResult.metrics?.totalTokens,
+              trainingSignal: evidenceResult.trainingSignal,
+            });
+          } else {
+            this.memoryInjectionCache.set(cacheKey, {
+              queryKey,
+              query,
+              content: null,
+              itemCount: 0,
+            });
+            this.emitMemoryInjected(workItem, {
+              query: eventQuery,
+              itemCount: 0,
+              success: false,
+              iteration,
+            });
+          }
         }
       } catch {
-        // Silent fallback - continue without memory
+        // Silent failure - continue without memory
         // Fire memory_injected hook even on failure for observability
         this.emitMemoryInjected(workItem, {
           query: this.memoryInjector.summarizeQueryPlan?.(this.buildMemoryQuery(workItem, globalContext))
@@ -651,7 +628,6 @@ export class Agent {
           itemCount: 0,
           success: false,
           iteration,
-          version: 'v1',
         });
       }
     }
@@ -676,6 +652,7 @@ export class Agent {
     const toolChoice = isLastIteration && tools ? 'none' as const : undefined;
 
     return { messages, tools, toolChoice };
+    });
   }
 
   /**
@@ -880,7 +857,7 @@ export class Agent {
    * Stream LLM response with resilience (retry + circuit breaker).
    * Returns final response on success, throws on unrecoverable error.
    */
-  private async streamWithResilience(
+  private streamWithResilience(
     params: {
       messages: Message[];
       tools?: ToolDefinition[];
@@ -889,16 +866,15 @@ export class Agent {
       onChunk?: (chunk: string) => void;
       onReasoningChunk?: (chunk: string) => void;
     }
-  ): Promise<{ response: LLMResponse }> {
+  ): Effect.Effect<{ response: LLMResponse }, Error | RateLimitError | CircuitOpenError | TimeoutError | RetriesExhaustedError> {
     const provider = this.llmConfig.provider ?? 'unknown';
     const circuitState = getProviderCircuitState(provider);
     const circuitKey = `${provider}:${this.llmConfig.model ?? 'unknown'}`;
 
     // Wrap the streaming operation in resilientCall with timeout.
     // We wrap full stream consumption so retry/timeout covers the full LLM operation.
-    return Effect.runPromise(
-      resilientCall(
-        Effect.gen(this, function* () {
+    return resilientCall(
+      Effect.gen(this, function* () {
         let response: LLMResponse | undefined;
         let buffer = '';
 
@@ -931,21 +907,20 @@ export class Agent {
         }
 
         return { response };
-        }),
-        {
-          circuitState,
-          circuitKey,
-          timeoutMs: this.config.budget.llmStreamTimeoutMs ?? DEFAULT_AGENT_BUDGET.llmStreamTimeoutMs!,
-          operationName: `LLM stream (${this.config.type})`,
-          config: {
-            ...DEFAULT_RESILIENCE_CONFIG,
-            maxRetries: 2, // Retry up to 2 times for transient errors
-          },
-          onRetry: (attempt, error, delayMs) => {
-            console.error(`[AGENT] Retrying LLM call (attempt ${attempt}): ${error.message}, waiting ${delayMs}ms`);
-          },
-        }
-      )
+      }),
+      {
+        circuitState,
+        circuitKey,
+        timeoutMs: this.config.budget.llmStreamTimeoutMs ?? DEFAULT_AGENT_BUDGET.llmStreamTimeoutMs!,
+        operationName: `LLM stream (${this.config.type})`,
+        config: {
+          ...DEFAULT_RESILIENCE_CONFIG,
+          maxRetries: 2, // Retry up to 2 times for transient errors
+        },
+        onRetry: (attempt, error, delayMs) => {
+          console.error(`[AGENT] Retrying LLM call (attempt ${attempt}): ${error.message}, waiting ${delayMs}ms`);
+        },
+      }
     );
   }
 
@@ -990,21 +965,17 @@ export class Agent {
         localContext,
       };
 
-      yield* Effect.tryPromise({
-        try: () =>
-          this.executeLoop(
-            globalContext,
-            localContext,
-            workItem,
-            result,
-            metrics,
-            startTime,
-            cwd,
-            signal,
-            runControl
-          ),
-        catch: (error) => error,
-      }).pipe(
+      yield* this.executeLoop(
+        globalContext,
+        localContext,
+        workItem,
+        result,
+        metrics,
+        startTime,
+        cwd,
+        signal,
+        runControl
+      ).pipe(
         Effect.catchAll((error) =>
           Effect.sync(() => {
             this.handleLoopError(error, result, localContext, workItem.workId);
@@ -1093,7 +1064,7 @@ export class Agent {
   /**
    * Main execution loop.
    */
-  private async executeLoop(
+  private executeLoop(
     globalContext: ContextWindow,
     localContext: ContextWindow,
     workItem: WorkItem,
@@ -1103,81 +1074,86 @@ export class Agent {
     cwd: string,
     signal?: AbortSignal,
     runControl?: AgentRunParams['runControl']
-  ): Promise<void> {
-    const maxIterations = Math.min(
-      this.config.budget.maxIterations,
-      workItem.bounds.maxLlmCalls
-    );
-
-    const localReadFiles = new Set(globalContext.getReadFilesArray());
-    const toolRepeatState = {
-      lastKey: '',
-      lastOutput: '',
-      repeats: 0,
-    };
-
-    // Auto-read target files
-    if (workItem.targetPaths && workItem.targetPaths.length > 0) {
-      await this.autoReadTargetFiles(
-        workItem.targetPaths,
-        localContext,
-        localReadFiles,
-        metrics,
-        cwd,
-        workItem.workId,
-        signal,
-        runControl
+  ): Effect.Effect<void, Error | RateLimitError | CircuitOpenError | TimeoutError | RetriesExhaustedError> {
+    return Effect.gen(this, function* () {
+      const maxIterations = Math.min(
+        this.config.budget.maxIterations,
+        workItem.bounds.maxLlmCalls
       );
-    }
 
-    for (let iteration = 0; iteration < maxIterations; iteration++) {
-      profiler.instant(`agent.iteration:${iteration}`, 'agent', 'p', { agentType: this.config.type });
+      const localReadFiles = new Set(globalContext.getReadFilesArray());
+      const toolRepeatState = {
+        lastKey: '',
+        lastOutput: '',
+        repeats: 0,
+      };
 
-      const loopDirective = this.resolveControlDirective(signal, runControl);
-      if (this.applyControlDirective(result, loopDirective)) {
-        break;
+      // Auto-read target files
+      if (workItem.targetPaths && workItem.targetPaths.length > 0) {
+        yield* this.autoReadTargetFiles(
+          workItem.targetPaths,
+          localContext,
+          localReadFiles,
+          metrics,
+          cwd,
+          workItem.workId,
+          signal,
+          runControl
+        );
       }
 
-      // Check for user stop request at the start of each iteration
-      if (this.hooks?.shouldStop?.()) {
-        result.terminationReason = 'user_stopped';
-        break;
-      }
+      for (let iteration = 0; iteration < maxIterations; iteration++) {
+        profiler.instant(`agent.iteration:${iteration}`, 'agent', 'p', { agentType: this.config.type });
 
-      // Cadence check: observer intervention point (every N LLM calls)
-      if (this.hooks?.cadenceCheck && iteration > 0 && iteration % CADENCE_CHECK_INTERVAL === 0) {
-        const cadenceResult = await this.hooks.cadenceCheck({
-          llmCallsMade: metrics.llmCallsMade,
-          toolCallsMade: metrics.toolCallsMade,
-          durationMs: Date.now() - startTime,
-        });
-        if (cadenceResult.action === 'inject' && cadenceResult.systemMessage) {
-          localContext.addMessage('system', cadenceResult.systemMessage, workItem.workId);
-        } else if (cadenceResult.action === 'stop') {
-          if (cadenceResult.systemMessage) {
-            localContext.addMessage('system', cadenceResult.systemMessage, workItem.workId);
-          }
-          const stopReason = cadenceResult.reason ?? cadenceResult.systemMessage ?? 'Observer requested stop.';
-          result.observerStop = {
-            reason: stopReason,
-          };
-          result.terminationReason = cadenceResult.terminationReason ?? 'observer_stopped';
+        const loopDirective = this.resolveControlDirective(signal, runControl);
+        if (this.applyControlDirective(result, loopDirective)) {
           break;
         }
-      }
 
-      // 1. Pre-checks: bounds and context management
-      const elapsedMs = Date.now() - startTime;
-      const boundHit = this.checkBounds(metrics, workItem, elapsedMs);
-      if (boundHit) {
-        result.terminationReason = boundHit;
-        break;
-      }
+        // Check for user stop request at the start of each iteration
+        if (this.hooks?.shouldStop?.()) {
+          result.terminationReason = 'user_stopped';
+          break;
+        }
 
-      await this.compactIfNeeded(localContext, localReadFiles, workItem);
+        // Cadence check: observer intervention point (every N LLM calls)
+        const cadenceCheck = this.hooks?.cadenceCheck;
+        if (cadenceCheck && iteration > 0 && iteration % CADENCE_CHECK_INTERVAL === 0) {
+          const cadenceResult = yield* Effect.tryPromise({
+            try: () => cadenceCheck({
+              llmCallsMade: metrics.llmCallsMade,
+              toolCallsMade: metrics.toolCallsMade,
+              durationMs: Date.now() - startTime,
+            }),
+            catch: (error) => error instanceof Error ? error : new Error(String(error)),
+          });
+          if (cadenceResult.action === 'inject' && cadenceResult.systemMessage) {
+            localContext.addMessage('system', cadenceResult.systemMessage, workItem.workId);
+          } else if (cadenceResult.action === 'stop') {
+            if (cadenceResult.systemMessage) {
+              localContext.addMessage('system', cadenceResult.systemMessage, workItem.workId);
+            }
+            const stopReason = cadenceResult.reason ?? cadenceResult.systemMessage ?? 'Observer requested stop.';
+            result.observerStop = {
+              reason: stopReason,
+            };
+            result.terminationReason = cadenceResult.terminationReason ?? 'observer_stopped';
+            break;
+          }
+        }
+
+        // 1. Pre-checks: bounds and context management
+        const elapsedMs = Date.now() - startTime;
+        const boundHit = this.checkBounds(metrics, workItem, elapsedMs);
+        if (boundHit) {
+          result.terminationReason = boundHit;
+          break;
+        }
+
+      yield* this.compactIfNeeded(localContext, localReadFiles, workItem);
 
       // 2. Build LLM request (async for memory injection)
-      const { messages, tools: toolsForThisCall, toolChoice: toolChoiceForThisCall } = await this.buildIterationRequest(
+      const { messages, tools: toolsForThisCall, toolChoice: toolChoiceForThisCall } = yield* this.buildIterationRequest(
         workItem,
         globalContext,
         localContext,
@@ -1199,7 +1175,7 @@ export class Agent {
 
       // Use resilient streaming with retry + circuit breaker
       const llmAsyncId = profiler.asyncBegin(`agent.llmCall:${this.config.type}`, 'llm');
-      const { response } = await this.streamWithResilience({
+      const { response } = yield* this.streamWithResilience({
         messages: messages as unknown as Message[],
         tools: toolsForThisCall,
         toolChoice: toolChoiceForThisCall,
@@ -1322,19 +1298,21 @@ export class Agent {
         const toolCallsSucceededBefore = metrics.toolCallsSucceeded;
         const toolCallsFailedBefore = metrics.toolCallsFailed;
 
-        await this.processToolCalls(
-          toolCalls,
-          globalContext,
-          localContext,
-          localReadFiles,
-          result,
-          metrics,
-          workItem,
-          cwd,
-          workItem.workId,
-          toolRepeatState,
-          signal,
-          runControl
+        yield* Effect.promise(() =>
+          this.processToolCalls(
+            toolCalls,
+            globalContext,
+            localContext,
+            localReadFiles,
+            result,
+            metrics,
+            workItem,
+            cwd,
+            workItem.workId,
+            toolRepeatState,
+            signal,
+            runControl
+          )
         );
 
         const successCount = metrics.toolCallsSucceeded - toolCallsSucceededBefore;
@@ -1468,6 +1446,7 @@ export class Agent {
     }
 
     result.filesRead = Array.from(localReadFiles);
+    });
   }
 
   /**
@@ -1649,20 +1628,6 @@ export class Agent {
 
     // Cap query length at 500 chars
     return parts.join(' ').slice(0, 500);
-  }
-
-  private shouldUseMemoryV2(sessionId: string, workId?: string): boolean {
-    const rawPercent = process.env.MEMORY_INJECTOR_V2_PERCENT;
-    const percent = rawPercent ? Number(rawPercent) : 100;
-    if (!Number.isFinite(percent) || percent <= 0) return false;
-    if (percent >= 100) return true;
-
-    const seed = `${sessionId}:${workId ?? ''}`;
-    let hash = 0;
-    for (let i = 0; i < seed.length; i++) {
-      hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
-    }
-    return (hash % 100) < percent;
   }
 
   /**
@@ -2001,7 +1966,7 @@ export class Agent {
     }
     const pendingParallel: Array<{
       call: { id: string; name: string; arguments: Record<string, unknown> };
-      run: () => Effect.Effect<{ toolResult: ToolResult; toolDurationMs: number }>;
+      run: () => Promise<{ toolResult: ToolResult; toolDurationMs: number }>;
     }> = [];
 
     const invalidatePath = (pathValue: unknown): void => {
@@ -2127,21 +2092,47 @@ export class Agent {
       return false;
     };
 
+    const executeToolCall = async (params: {
+      call: { id: string; name: string; arguments: Record<string, unknown> };
+      canonicalName: string;
+      effectiveArgs: Record<string, unknown>;
+      isAgentTool: boolean;
+    }): Promise<{ toolResult: ToolResult; toolDurationMs: number }> => {
+      const { call, canonicalName, effectiveArgs, isAgentTool } = params;
+      const toolStartTime = Date.now();
+      try {
+        // Use canonical name for execution, but pass original call for agent tools (which need call.id)
+        const normalizedCall = { ...call, name: canonicalName, arguments: effectiveArgs };
+        const rawResult = isAgentTool
+          ? await this.executeAgentToolCall(
+              normalizedCall,
+              workItem,
+              globalContext,
+              localContext,
+              cwd,
+              signal,
+              runControl
+            )
+          : await this.toolRegistry.execute(canonicalName, effectiveArgs, {
+              cwd,
+              signal,
+              execution: runControl?.execution,
+              control: runControl?.control,
+            });
+        const toolResult = await this.applyPostToolUseHook(canonicalName, effectiveArgs, rawResult);
+        return { toolResult, toolDurationMs: Date.now() - toolStartTime };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const toolResult = errorResult(canonicalName, message, 0);
+        toolResult.output = `Error: ${message}`;
+        return { toolResult, toolDurationMs: Date.now() - toolStartTime };
+      }
+    };
+
     const flushParallel = async (): Promise<boolean> => {
       if (pendingParallel.length === 0) return false;
       const batch = pendingParallel.splice(0, pendingParallel.length);
-      const results = await Effect.runPromise(
-        Effect.scoped(
-          Effect.gen(function* () {
-            const fibers = yield* Effect.forEach(
-              batch,
-              (item) => Effect.forkScoped(item.run()),
-              { concurrency: 'unbounded' }
-            );
-            return yield* Effect.forEach(fibers, (fiber) => Fiber.join(fiber));
-          })
-        )
-      );
+      const results = await Promise.all(batch.map((item) => item.run()));
       for (let i = 0; i < batch.length; i++) {
         const { call } = batch[i];
         const { toolResult, toolDurationMs } = results[i];
@@ -2243,28 +2234,15 @@ export class Agent {
           phase: 'starting',
         }, workItemId));
 
-        const toolStartTime = Date.now();
         const capturedArgs = effectiveArgs;
+        const capturedCanonicalName = canonicalName;
+        const capturedCall = call;
         const run = () =>
-          Effect.promise(async () => {
-            try {
-              const toolResult = await this.applyPostToolUseHook(
-                canonicalName, capturedArgs,
-                await this.toolRegistry.execute(canonicalName, capturedArgs, {
-                  cwd,
-                  signal,
-                  execution: runControl?.execution,
-                  control: runControl?.control,
-                }),
-              );
-
-              return { toolResult, toolDurationMs: Date.now() - toolStartTime };
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              const toolResult = errorResult(canonicalName, message, 0);
-              toolResult.output = `Error: ${message}`;
-              return { toolResult, toolDurationMs: Date.now() - toolStartTime };
-            }
+          executeToolCall({
+            call: capturedCall,
+            canonicalName: capturedCanonicalName,
+            effectiveArgs: capturedArgs,
+            isAgentTool: false,
           });
 
         pendingParallel.push({ call, run });
@@ -2289,55 +2267,14 @@ export class Agent {
         phase: 'starting',
       }, workItemId));
 
-      const toolStartTime = Date.now();
-
-      try {
-        // Use canonical name for execution, but pass original call for agent tools (which need call.id)
-        const normalizedCall = { ...call, name: canonicalName, arguments: effectiveArgs };
-        const rawResult = isAgentTool
-          ? await this.executeAgentToolCall(
-              normalizedCall,
-              workItem,
-              globalContext,
-              localContext,
-              cwd,
-              signal,
-              runControl
-            )
-          : await this.toolRegistry.execute(canonicalName, effectiveArgs, {
-              cwd,
-              signal,
-              execution: runControl?.execution,
-              control: runControl?.control,
-            });
-        const toolDurationMs = Date.now() - toolStartTime;
-        const toolResult = await this.applyPostToolUseHook(canonicalName, effectiveArgs, rawResult);
-
-        const stop = handleToolResult(call, toolResult, toolDurationMs, isAgentTool);
-        if (stop) return;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        metrics.toolCallsFailed++;
-        result.toolErrors.push(`${canonicalName}: ${message}`);
-
-        this.emit(createEvent('tool_call', {
-          toolName: canonicalName,
-          arguments: effectiveArgs,
-          phase: 'completed',
-          result: `Error: ${message}`,
-          success: false,
-          durationMs: Date.now() - toolStartTime,
-        }, workItemId));
-
-        localContext.appendItem({
-          type: 'function_call_output',
-          callId: call.id,
-          output: `Error: ${message}`,
-          isError: true,
-          timestamp: Date.now(),
-          workItemId: itemWorkId,
-        });
-      }
+      const { toolResult, toolDurationMs } = await executeToolCall({
+        call,
+        canonicalName,
+        effectiveArgs,
+        isAgentTool,
+      });
+      const stop = handleToolResult(call, toolResult, toolDurationMs, isAgentTool);
+      if (stop) return;
     }
 
     const shouldStop = await flushParallel();
@@ -2778,7 +2715,7 @@ export class Agent {
   /**
    * Auto-read target files before execution.
    */
-  private async autoReadTargetFiles(
+  private autoReadTargetFiles(
     targetPaths: readonly string[],
     localContext: ContextWindow,
     localReadFiles: Set<string>,
@@ -2787,7 +2724,8 @@ export class Agent {
     workItemId?: string,
     signal?: AbortSignal,
     runControl?: AgentRunParams['runControl']
-  ): Promise<void> {
+  ): Effect.Effect<void> {
+    return Effect.promise(async () => {
     const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
     if (!allowedTools.has('read')) {
       return;
@@ -2819,6 +2757,7 @@ export class Agent {
         metrics.toolCallsFailed++;
       }
     }
+    });
   }
 
   /**

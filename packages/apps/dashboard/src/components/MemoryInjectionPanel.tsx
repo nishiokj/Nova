@@ -45,16 +45,6 @@ function MemoryInjectionRow({ injection, expanded: defaultExpanded = false }: Me
 
         <span className="flex items-center gap-1.5 text-[var(--text-secondary)]">
           <span className="font-mono text-xs font-medium">memory_injected</span>
-          {injection.version && (
-            <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">
-              {injection.version}
-            </span>
-          )}
-          {injection.fallbackToV1 && (
-            <span className="text-[10px] uppercase tracking-wider text-[var(--warning)]">
-              fallback
-            </span>
-          )}
         </span>
 
         <span className="flex-1 font-mono text-xs text-[var(--text-muted)] truncate">

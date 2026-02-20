@@ -67,6 +67,7 @@ interface HarnessLike {
   updateApiKey?(provider: string, apiKey: string): void;
   resetCircuitBreaker?(): void;
   hasApiKey(provider: string): boolean;
+  getLocalProviders?(): LocalProviderManager | null;
   setSessionSelectedModel?(sessionKey: string, agentType: string, selectedModel: import('agent').ModelSelection | null): void;
   getSessionSelectedModel?(sessionKey: string, agentType: string): import('agent').ModelSelection | null;
   getAllSessionSelectedModels?(sessionKey: string): Map<string, import('agent').ModelSelection>;
@@ -180,12 +181,11 @@ export class BridgeGateway {
       ? path.resolve(this.workingDir, config.hooks.directory)
       : path.resolve(this.workingDir, 'config/hooks');
 
-    // Initialize local provider manager using GraphD for storage
-    if (config.graphd.enabled && config.graphd.dbPath) {
-      this.localProviders = new LocalProviderManager(config.graphd.dbPath);
-    } else {
-      this.localProviders = null;
-    }
+    // Share the harness's LocalProviderManager to avoid dual-instance SQLite isolation issues.
+    // Previously, BridgeGateway created its own instance — keys saved here were invisible to
+    // the harness's HarnessProviderKeyService, causing pruneInaccessibleSessionSelections to
+    // clear model selections immediately after set_model.
+    this.localProviders = harness.getLocalProviders?.() ?? null;
   }
 
   handleDisconnect(connectionId: string): void {

@@ -10,6 +10,17 @@ const mockPreferencesSearch = vi.fn(() => Promise.resolve({ preferences: [] }));
 const mockDecisionsSearch = vi.fn(() => Promise.resolve({ decisions: [] }));
 const mockMemorySearch = vi.fn(() => Promise.resolve({ items: [] }));
 const mockMemoryRecent = vi.fn(() => Promise.resolve({ items: [] }));
+const mockEvidenceRetrieve = vi.fn(() => Promise.resolve({
+  content: '',
+  atoms: [],
+  metrics: {
+    totalTokens: 0,
+    attentionTax: 0,
+    coverage: {},
+    discriminatorsIncluded: 0,
+    latencyMs: 0,
+  },
+}));
 
 let memoryEnabled = true;
 
@@ -17,6 +28,7 @@ vi.mock('agent-memory', () => ({
   SyncClient: class MockSyncClient {
     preferences = { search: mockPreferencesSearch };
     decisions = { search: mockDecisionsSearch };
+    evidence = { retrieve: mockEvidenceRetrieve };
     get memory() {
       return memoryEnabled
         ? { search: mockMemorySearch, recent: mockMemoryRecent }
@@ -35,6 +47,7 @@ describe('Memory Injector - recall + recent', () => {
     mockDecisionsSearch.mockReset();
     mockMemorySearch.mockReset();
     mockMemoryRecent.mockReset();
+    mockEvidenceRetrieve.mockReset();
   });
   beforeAll(async () => {
     const mod = await import('memory-injector/injector.js');
@@ -47,61 +60,70 @@ describe('Memory Injector - recall + recent', () => {
     expect(intent).toBe('recall');
   });
 
-  test('recall intent searches conversational memory only', async () => {
-    mockMemorySearch.mockResolvedValue({
-      items: [
-        {
-          conversation_id: 'conv-1',
-          summary: 'Discussed logging preferences for the harness',
-          topic: 'Logging',
-          updated_at: '2026-02-01T00:00:00.000Z',
-          source_timestamp: '2026-02-01T00:00:00.000Z',
-        },
-      ],
-    });
-
-    mockPreferencesSearch.mockResolvedValue({
-      preferences: [
-        { id: 'pref-1', preference: 'Prefer structured logs', rank: 0.9 },
-      ],
-    });
-    mockDecisionsSearch.mockResolvedValue({
-      decisions: [
-        { id: 'dec-1', decision: 'Use JSON logs', rank: 0.9 },
-      ],
+  test('injectEvidence forwards request to evidence endpoint', async () => {
+    mockEvidenceRetrieve.mockResolvedValue({
+      content: 'Evidence block',
+      atoms: [{ id: 'a1' }],
+      metrics: {
+        totalTokens: 21,
+        attentionTax: 0.1,
+        coverage: { decision: 1 },
+        discriminatorsIncluded: 1,
+        latencyMs: 12,
+      },
     });
 
     const injector = createMemoryInjector({ baseUrl: 'http://test' });
-    const result = await injector.inject({
-      query: 'What did we talk about last time?',
-      maxTokens: 200,
-    });
+    if (!injector.injectEvidence) {
+      throw new Error('injectEvidence missing');
+    }
 
-    expect(mockMemorySearch).toHaveBeenCalledTimes(1);
-    expect(mockPreferencesSearch).not.toHaveBeenCalled();
-    expect(mockDecisionsSearch).not.toHaveBeenCalled();
-    expect(result).toContain('## Relevant Memory');
-    expect(result).toContain('Id: conv-1');
-    expect(result).toContain('Topic: Logging');
-    expect(result).toContain('(2026-02-01)');
+    const request = {
+      task: {
+        objective: 'summarize prior choices',
+        recentMessages: ['please recall context'],
+        touchedFiles: ['src/a.ts'],
+        iteration: 0,
+        sessionId: 's1',
+      },
+      budget: {
+        maxTokens: 400,
+      },
+    };
+    const result = await injector.injectEvidence(request);
+
+    expect(mockEvidenceRetrieve).toHaveBeenCalledWith(request);
+    expect(result?.content).toBe('Evidence block');
   });
 
-  test('non-recall intent skips conversational memory search', async () => {
-    mockPreferencesSearch.mockResolvedValue({
-      preferences: [
-        { id: 'pref-1', preference: 'Prefer typed interfaces for tools', rank: 0.9 },
-      ],
+  test('injectEvidence returns null when response content is empty', async () => {
+    mockEvidenceRetrieve.mockResolvedValue({
+      content: '',
+      atoms: [],
+      metrics: {
+        totalTokens: 0,
+        attentionTax: 0,
+        coverage: {},
+        discriminatorsIncluded: 0,
+        latencyMs: 5,
+      },
     });
 
     const injector = createMemoryInjector({ baseUrl: 'http://test' });
-    const result = await injector.inject({
-      query: 'Prefer typed interfaces for tools',
-      maxTokens: 200,
+    if (!injector.injectEvidence) {
+      throw new Error('injectEvidence missing');
+    }
+    const result = await injector.injectEvidence({
+      task: {
+        objective: 'empty',
+        recentMessages: [],
+        iteration: 0,
+        sessionId: 's1',
+      },
+      budget: { maxTokens: 100 },
     });
 
-    expect(mockMemorySearch).not.toHaveBeenCalled();
-    expect(mockPreferencesSearch).toHaveBeenCalled();
-    expect(result).toContain('## Relevant Decisions & Preferences');
+    expect(result).toBeNull();
   });
 
   test('injectRecentConversations formats summaries with Id and topic', async () => {

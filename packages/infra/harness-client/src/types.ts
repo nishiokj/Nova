@@ -401,6 +401,7 @@ export interface ProgressData {
   duration_ms?: number;
   tool_args?: Record<string, unknown>;
   tool_success?: boolean;
+  tool_result?: string;
 }
 
 export interface UserPromptData {

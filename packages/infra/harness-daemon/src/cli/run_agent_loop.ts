@@ -1,9 +1,17 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
-import { HarnessClient, type BridgeEvent, type ErrorData, type ProgressData, type ResponseData, type StreamData, type UserPromptData } from 'harness-client';
+import {
+  HarnessClient,
+  type BridgeEvent,
+  type ErrorData,
+  type ProgressData,
+  type ResponseData,
+  type StreamData,
+  type UserPromptData,
+} from 'harness-client';
 import { HarnessDaemon } from '../harness/daemon.js';
 
-type TrialIds = {
+type AgentResultIds = {
   run_id: string;
   trial_id: string;
   variant_id: string;
@@ -11,15 +19,9 @@ type TrialIds = {
   repl_idx: number;
 };
 
-type TrialInput = {
-  ids?: Partial<TrialIds>;
-  task?: Record<string, unknown>;
-  bindings?: Record<string, unknown>;
-};
-
-type TrialOutput = {
-  schema_version: 'trial_output_v1';
-  ids: TrialIds;
+type AgentResult = {
+  schema_version: 'agent_result_v1';
+  ids: AgentResultIds;
   outcome: 'success' | 'failure' | 'missing' | 'error';
   answer?: string | Record<string, unknown> | unknown[];
   metrics?: Record<string, string | number | boolean | null>;
@@ -28,7 +30,6 @@ type TrialOutput = {
     message?: string;
     stack?: string;
   };
-  ext?: Record<string, unknown>;
 };
 
 type ModelSelection = {
@@ -38,22 +39,9 @@ type ModelSelection = {
   agentType: string;
 };
 
-type ProviderEnvBinding = {
-  provider: string;
-  envName: string;
-};
-
-type RunTrialCliOptions = {
-  inputPath: string;
-  outputPath: string;
-  eventsPath?: string;
-  workingDir: string;
-  configPath?: string;
-  host: string;
-  port: number;
-  sessionKey: string;
-  timeoutMs: number;
-  providerEnv: ProviderEnvBinding[];
+type TrialTaskPayload = {
+  task?: Record<string, unknown>;
+  bindings?: Record<string, unknown>;
 };
 
 type RunResult = {
@@ -62,153 +50,21 @@ type RunResult = {
   error?: string;
 };
 
-const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 9555;
 
-function failUsage(message: string): never {
-  throw new Error(
-    `${message}\n` +
-      'Usage: rex-daemon run-trial --input <path> --output <path> [options]\n' +
-      'Options:\n' +
-      '  --events <path>\n' +
-      '  --working-dir <path>\n' +
-      '  --config <path>\n' +
-      '  --host <host>\n' +
-      '  --port <port>\n' +
-      '  --session-key <key>\n' +
-      '  --timeout-ms <ms>\n' +
-      '  --provider-env <provider=ENV_NAME> (repeatable)'
-  );
+function asNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function parsePositiveInt(raw: string, flag: string): number {
+function parsePositiveInt(raw: string | undefined): number | null {
+  if (!raw || raw.trim().length === 0) return null;
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    failUsage(`${flag} must be a positive integer, got "${raw}"`);
-  }
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
   return parsed;
-}
-
-function parseProviderEnv(raw: string): ProviderEnvBinding {
-  const eq = raw.indexOf('=');
-  if (eq <= 0 || eq === raw.length - 1) {
-    failUsage(`Invalid --provider-env value "${raw}", expected provider=ENV_NAME`);
-  }
-  const provider = raw.slice(0, eq).trim();
-  const envName = raw.slice(eq + 1).trim();
-  if (!provider || !envName) {
-    failUsage(`Invalid --provider-env value "${raw}", expected provider=ENV_NAME`);
-  }
-  return { provider, envName };
-}
-
-function parseRunTrialArgs(rawArgs: string[]): RunTrialCliOptions {
-  const args = rawArgs[0] === 'run-trial' ? rawArgs.slice(1) : rawArgs;
-  let inputPath = '';
-  let outputPath = '';
-  let eventsPath: string | undefined;
-  let workingDir = '';
-  let configPath: string | undefined;
-  let host = DEFAULT_HOST;
-  let port = DEFAULT_PORT;
-  let sessionKey = `trial_${Date.now().toString(36)}`;
-  let timeoutMs = DEFAULT_TIMEOUT_MS;
-  const providerEnv: ProviderEnvBinding[] = [];
-
-  for (let i = 0; i < args.length; i += 1) {
-    const arg = args[i];
-    const next = i + 1 < args.length ? args[i + 1] : undefined;
-    if (arg === '--input') {
-      if (!next) failUsage('--input requires a value');
-      inputPath = next;
-      i += 1;
-    } else if (arg === '--output') {
-      if (!next) failUsage('--output requires a value');
-      outputPath = next;
-      i += 1;
-    } else if (arg === '--events') {
-      if (!next) failUsage('--events requires a value');
-      eventsPath = next;
-      i += 1;
-    } else if (arg === '--working-dir') {
-      if (!next) failUsage('--working-dir requires a value');
-      workingDir = next;
-      i += 1;
-    } else if (arg === '--config') {
-      if (!next) failUsage('--config requires a value');
-      configPath = next;
-      i += 1;
-    } else if (arg === '--host') {
-      if (!next) failUsage('--host requires a value');
-      host = next;
-      i += 1;
-    } else if (arg === '--port') {
-      if (!next) failUsage('--port requires a value');
-      port = parsePositiveInt(next, '--port');
-      i += 1;
-    } else if (arg === '--session-key') {
-      if (!next) failUsage('--session-key requires a value');
-      sessionKey = next;
-      i += 1;
-    } else if (arg === '--timeout-ms') {
-      if (!next) failUsage('--timeout-ms requires a value');
-      timeoutMs = parsePositiveInt(next, '--timeout-ms');
-      i += 1;
-    } else if (arg === '--provider-env') {
-      if (!next) failUsage('--provider-env requires a value');
-      providerEnv.push(parseProviderEnv(next));
-      i += 1;
-    } else if (arg === '--help' || arg === '-h') {
-      failUsage('Help requested');
-    } else {
-      failUsage(`Unknown argument: ${arg}`);
-    }
-  }
-
-  if (!inputPath) failUsage('Missing required --input');
-  if (!outputPath) failUsage('Missing required --output');
-
-  const resolvedInputPath = resolve(inputPath);
-  if (!existsSync(resolvedInputPath)) {
-    throw new Error(`Input file not found: ${resolvedInputPath}`);
-  }
-
-  const parsed: RunTrialCliOptions = {
-    inputPath: resolvedInputPath,
-    outputPath: resolve(outputPath),
-    eventsPath: eventsPath ? resolve(eventsPath) : undefined,
-    workingDir: workingDir ? resolve(workingDir) : '/workspace',
-    configPath: configPath ? resolve(configPath) : undefined,
-    host,
-    port,
-    sessionKey,
-    timeoutMs,
-    providerEnv,
-  };
-
-  return parsed;
-}
-
-function fallbackIds(partial?: Partial<TrialIds>): TrialIds {
-  return {
-    run_id: partial?.run_id || 'unknown_run',
-    trial_id: partial?.trial_id || 'unknown_trial',
-    variant_id: partial?.variant_id || 'unknown_variant',
-    task_id: partial?.task_id || 'unknown_task',
-    repl_idx: Number.isFinite(partial?.repl_idx) ? Number(partial?.repl_idx) : 0,
-  };
-}
-
-function readTrialInput(path: string): TrialInput {
-  const raw = readFileSync(path, 'utf8');
-  return JSON.parse(raw) as TrialInput;
-}
-
-function writeTrialOutput(path: string, output: TrialOutput): void {
-  const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-  if (parent) mkdirSync(parent, { recursive: true });
-  writeFileSync(path, `${JSON.stringify(output, null, 2)}\n`, 'utf8');
 }
 
 function appendJsonl(path: string, value: Record<string, unknown>): void {
@@ -217,10 +73,38 @@ function appendJsonl(path: string, value: Record<string, unknown>): void {
   appendFileSync(path, `${JSON.stringify(value)}\n`, 'utf8');
 }
 
-function asNonEmptyString(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
+function writeAgentResult(path: string, output: AgentResult): void {
+  const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+  if (parent) mkdirSync(parent, { recursive: true });
+  writeFileSync(path, `${JSON.stringify(output, null, 2)}\n`, 'utf8');
+}
+
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value || value.trim().length === 0) {
+    throw new Error(`Missing required env ${name}`);
+  }
+  return value;
+}
+
+function resolveIdsFromEnv(): AgentResultIds {
+  const repl = Number.parseInt(requiredEnv('AGENTLAB_REPL_IDX'), 10);
+  return {
+    run_id: requiredEnv('AGENTLAB_RUN_ID'),
+    trial_id: requiredEnv('AGENTLAB_TRIAL_ID'),
+    variant_id: requiredEnv('AGENTLAB_VARIANT_ID'),
+    task_id: requiredEnv('AGENTLAB_TASK_ID'),
+    repl_idx: Number.isFinite(repl) && repl >= 0 ? repl : 0,
+  };
+}
+
+function loadTaskPayload(taskPath: string, bindingsPath: string): TrialTaskPayload {
+  const taskRaw = JSON.parse(readFileSync(taskPath, 'utf8')) as Record<string, unknown>;
+  const bindingsRaw = JSON.parse(readFileSync(bindingsPath, 'utf8')) as Record<string, unknown>;
+  return {
+    task: taskRaw,
+    bindings: bindingsRaw,
+  };
 }
 
 function extractPrompt(task?: Record<string, unknown>): string | null {
@@ -262,8 +146,7 @@ function waitForReady(
     const onEvent = (event: BridgeEvent) => {
       if (event.type !== 'ready') return;
       const key = asNonEmptyString((event.data ?? {}).session_key);
-      if (!key) return;
-      if (key !== expectedSessionKey) return;
+      if (!key || key !== expectedSessionKey) return;
       cleanup();
       resolvePromise();
     };
@@ -300,7 +183,6 @@ function waitForRunResponse(
         });
         return;
       }
-
       if (event.type === 'user_prompt') {
         const data = (event.data ?? {}) as UserPromptData;
         if (data.request_id !== requestId) return;
@@ -308,19 +190,10 @@ function waitForRunResponse(
         rejectPromise(new Error('Run paused for user input (user_prompt event)'));
         return;
       }
-
       if (event.type === 'provider_key_required') {
         const provider = asNonEmptyString((event.data ?? {}).provider) ?? 'unknown';
         cleanup();
         rejectPromise(new Error(`Provider key required for ${provider}`));
-        return;
-      }
-
-      // Bridge errors (e.g., "No model selected") are terminal — don't wait for timeout
-      if (event.type === 'error') {
-        const message = asNonEmptyString((event.data ?? {}).message) ?? 'bridge error';
-        cleanup();
-        rejectPromise(new Error(`Bridge error: ${message}`));
       }
     };
 
@@ -333,48 +206,50 @@ function waitForRunResponse(
   });
 }
 
-async function maybeSaveProviderKeys(
-  client: HarnessClient,
-  mappings: ProviderEnvBinding[]
-): Promise<void> {
-  for (const mapping of mappings) {
-    const key = process.env[mapping.envName];
-    if (!key) {
-      throw new Error(
-        `Missing env var ${mapping.envName} for --provider-env ${mapping.provider}=${mapping.envName}`
-      );
-    }
-    const result = await client.providersSave(mapping.provider, key);
-    if (!result.success) {
-      throw new Error(
-        `providers_save failed for ${mapping.provider}: ${result.error ?? 'unknown error'}`
-      );
-    }
+export async function runHarnessAgentLoopCli(): Promise<void> {
+  const ids = resolveIdsFromEnv();
+  const taskPath = resolve(requiredEnv('AGENTLAB_TASK_PATH'));
+  const bindingsPath = resolve(requiredEnv('AGENTLAB_BINDINGS_PATH'));
+  const resultPath = resolve(requiredEnv('AGENTLAB_RESULT_PATH'));
+  const timeoutMs =
+    parsePositiveInt(process.env.AGENTLAB_TIMEOUT_MS) ??
+    parsePositiveInt(process.env.AGENTLAB_TRIAL_TIMEOUT_MS) ??
+    DEFAULT_TIMEOUT_MS;
+  const eventsPath = process.env.AGENTLAB_TRAJECTORY_PATH
+    ? resolve(process.env.AGENTLAB_TRAJECTORY_PATH)
+    : undefined;
+  const workingDir = process.env.AGENTLAB_WORKSPACE_PATH
+    ? resolve(process.env.AGENTLAB_WORKSPACE_PATH)
+    : '/agentlab/workspace';
+  const configPath = process.env.REX_CONFIG_PATH
+    ? resolve(process.env.REX_CONFIG_PATH)
+    : '/opt/rex/config/defaults.agentlab.experiment.no_entity_graph.json';
+  const sessionKey = ids.trial_id;
+
+  if (!existsSync(taskPath)) {
+    throw new Error(`Task file not found: ${taskPath}`);
   }
-}
+  if (!existsSync(bindingsPath)) {
+    throw new Error(`Bindings file not found: ${bindingsPath}`);
+  }
 
-export async function runHarnessTrialCli(rawArgs: string[] = process.argv.slice(2)): Promise<void> {
-  const options = parseRunTrialArgs(rawArgs);
-  const input = readTrialInput(options.inputPath);
-  const ids = fallbackIds(input.ids);
-  const modelSelection = extractModelSelection(input.bindings);
-  const prompt = extractPrompt(input.task);
-
+  const payload = loadTaskPayload(taskPath, bindingsPath);
+  const modelSelection = extractModelSelection(payload.bindings);
+  const prompt = extractPrompt(payload.task);
   if (!prompt) {
-    throw new Error('No prompt found in trial input (expected task.input.prompt or task.prompt)');
+    throw new Error('No prompt found in AGENTLAB task payload (expected task.input.prompt or task.prompt)');
   }
 
   const daemon = new HarnessDaemon({
-    host: options.host,
-    port: options.port,
-    workingDir: options.workingDir,
-    configPath: options.configPath,
+    host: DEFAULT_HOST,
+    port: DEFAULT_PORT,
+    workingDir,
+    configPath,
     idleTimeoutMs: 0,
   });
 
   const startedAt = Date.now();
   let streamText = '';
-  const toolResults: string[] = [];
   let tokensIn = 0;
   let tokensOut = 0;
   let modelCallCount = 0;
@@ -383,8 +258,8 @@ export async function runHarnessTrialCli(rawArgs: string[] = process.argv.slice(
   const stepIndex = 0;
 
   const appendHookEvent = (event: Record<string, unknown>) => {
-    if (!options.eventsPath) return;
-    const payload = {
+    if (!eventsPath) return;
+    const payloadEvent = {
       hooks_schema_version: 'hook_events_v1',
       ts: new Date().toISOString(),
       seq: seq++,
@@ -392,18 +267,17 @@ export async function runHarnessTrialCli(rawArgs: string[] = process.argv.slice(
       step_index: stepIndex,
       ...event,
     };
-    appendJsonl(options.eventsPath, payload);
+    appendJsonl(eventsPath, payloadEvent);
   };
 
   let client: HarnessClient | null = null;
-
   try {
     const address = await daemon.start();
     client = new HarnessClient({
       host: address.host,
       port: address.port,
       maxReconnectAttempts: 0,
-      requestTimeout: options.timeoutMs,
+      requestTimeout: timeoutMs,
     });
     await client.connect();
 
@@ -443,11 +317,6 @@ export async function runHarnessTrialCli(rawArgs: string[] = process.argv.slice(
         const toolName = asNonEmptyString(data.tool_name);
         if (!toolName || typeof data.tool_success !== 'boolean') return;
         toolCallCount += 1;
-        // Capture tool results for answer extraction (e.g., Skill tool outputs)
-        const toolResult = asNonEmptyString(data.tool_result);
-        if (toolResult) {
-          toolResults.push(toolResult);
-        }
         appendHookEvent({
           event_type: 'tool_call_end',
           call_id: `tool_${toolCallCount}`,
@@ -476,21 +345,17 @@ export async function runHarnessTrialCli(rawArgs: string[] = process.argv.slice(
 
     const initSent = client.send({
       type: 'init',
-      data: { session_key: options.sessionKey, working_dir: options.workingDir },
+      data: { session_key: sessionKey, working_dir: workingDir },
     });
     if (!initSent) {
       throw new Error('Failed to send init command');
     }
-    await waitForReady(client, options.sessionKey, options.timeoutMs);
+    await waitForReady(client, sessionKey, timeoutMs);
 
     const dangerousResult = await client.setDangerousMode(true);
     if (!dangerousResult.success) {
-      throw new Error(
-        `set_dangerous_mode failed: ${dangerousResult.error ?? 'unknown error'}`
-      );
+      throw new Error(`set_dangerous_mode failed: ${dangerousResult.error ?? 'unknown error'}`);
     }
-
-    await maybeSaveProviderKeys(client, options.providerEnv);
 
     if (modelSelection) {
       const setModel = await client.request<{ success?: boolean; error?: string }>('set_model', {
@@ -505,13 +370,13 @@ export async function runHarnessTrialCli(rawArgs: string[] = process.argv.slice(
     }
 
     const requestId = `trial_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const responsePromise = waitForRunResponse(client, requestId, options.timeoutMs);
+    const responsePromise = waitForRunResponse(client, requestId, timeoutMs);
     const sent = client.send({
       type: 'send_text',
       data: {
         text: prompt,
         client_request_id: requestId,
-        working_dir: options.workingDir,
+        working_dir: workingDir,
       },
     });
     if (!sent) {
@@ -520,15 +385,7 @@ export async function runHarnessTrialCli(rawArgs: string[] = process.argv.slice(
 
     const run = await responsePromise;
     const latencyMs = Date.now() - startedAt;
-    // Answer priority: streamed text > response content.
-    // For multi-turn agents (e.g., Skill-based compilation), the response content
-    // is often just a brief acknowledgment from the final turn. The streamed text
-    // contains ALL assistant output across all turns — including the actual artifact
-    // (e.g., VP JSON) produced in intermediate turns.
-    const fullStreamedText = streamText.trim();
-    const answer = fullStreamedText.length > (run.content?.length ?? 0)
-      ? fullStreamedText
-      : (run.content ?? fullStreamedText);
+    const answer = run.content ?? streamText.trim();
     const success = run.success;
 
     appendHookEvent({
@@ -541,8 +398,8 @@ export async function runHarnessTrialCli(rawArgs: string[] = process.argv.slice(
       },
     });
 
-    const output: TrialOutput = {
-      schema_version: 'trial_output_v1',
+    const output: AgentResult = {
+      schema_version: 'agent_result_v1',
       ids,
       outcome: success ? 'success' : 'failure',
       ...(answer ? { answer } : {}),
@@ -558,26 +415,22 @@ export async function runHarnessTrialCli(rawArgs: string[] = process.argv.slice(
       ...(run.error
         ? {
             error: {
-              error_type: 'harness_run_error',
+              error_type: 'agent_loop_run_error',
               message: run.error,
             },
           }
         : {}),
-      ext: {
-        harness: 'harness-daemon',
-        mode: 'run-trial',
-      },
     };
-    writeTrialOutput(options.outputPath, output);
+    writeAgentResult(resultPath, output);
   } catch (error) {
     appendHookEvent({
       event_type: 'error',
-      error_type: 'run_trial_error',
+      error_type: 'agent_loop_run_error',
       message: error instanceof Error ? error.message : String(error),
     });
 
-    const output: TrialOutput = {
-      schema_version: 'trial_output_v1',
+    const output: AgentResult = {
+      schema_version: 'agent_result_v1',
       ids,
       outcome: 'error',
       metrics: {
@@ -590,16 +443,12 @@ export async function runHarnessTrialCli(rawArgs: string[] = process.argv.slice(
         tool_call_count: toolCallCount,
       },
       error: {
-        error_type: 'run_trial_error',
+        error_type: 'agent_loop_run_error',
         message: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
       },
-      ext: {
-        harness: 'harness-daemon',
-        mode: 'run-trial',
-      },
     };
-    writeTrialOutput(options.outputPath, output);
+    writeAgentResult(resultPath, output);
     throw error;
   } finally {
     if (client) {

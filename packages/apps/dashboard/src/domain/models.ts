@@ -52,12 +52,10 @@ export interface MemoryInjection {
   itemCount: number;
   success: boolean;
   iteration: number;
-  version?: 'v1' | 'v2';
   latencyMs?: number;
   coverage?: Record<string, number>;
   discriminatorsIncluded?: number;
   totalTokens?: number;
-  fallbackToV1?: boolean;
   timestamp: ISODateTime;
 }
 

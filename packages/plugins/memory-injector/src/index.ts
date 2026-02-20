@@ -10,10 +10,9 @@
 export { createMemoryInjector, detectQueryIntent } from './injector.js';
 export type {
   MemoryInjector,
-  InjectParams,
   InjectRecentParams,
-  InjectParamsV2,
-  InjectResultV2,
+  EvidenceInjectParams,
+  EvidenceInjectResult,
   MemoryInjectorConfig,
   MemoryQueryStrategy,
   QueryIntent,

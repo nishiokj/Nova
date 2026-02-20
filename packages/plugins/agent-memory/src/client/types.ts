@@ -592,7 +592,6 @@ export interface EvidenceRetrieveRequest {
     filters?: Record<string, unknown>
   }
   options?: {
-    forceV1Fallback?: boolean
     trace?: boolean
   }
 }

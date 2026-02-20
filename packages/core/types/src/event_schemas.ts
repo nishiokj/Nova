@@ -236,14 +236,12 @@ export const MemoryInjectedDataSchema = z.object({
   itemCount: z.number(),
   success: z.boolean(),
   iteration: z.number(),
-  version: z.enum(['v1', 'v2']).optional(),
   latencyMs: z.number().optional(),
   coverage: z.record(z.string(), z.number()).optional(),
   discriminatorsIncluded: z.number().optional(),
   totalTokens: z.number().optional(),
-  fallbackToV1: z.boolean().optional(),
   trainingSignal: MemoryInjectionTrainingSignalSchema.optional(),
-});
+}).strict();
 /**
  * Work item summary in runtime script.
  */

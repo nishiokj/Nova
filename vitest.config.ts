@@ -22,9 +22,7 @@ const packages: Record<string, string> = {
   'semantic-compiler': 'packages/plugins/semantic-compiler/src',
   'memory-injector':   'packages/plugins/memory-injector/src',
   'entity-graph':      'packages/plugins/entity-graph/src',
-  'control-plane':     'packages/apps/control-plane/src',
   'tui':               'packages/apps/tui',
-  'dashboard-control': 'packages/apps/dashboard-control/src',
 };
 
 // Array form: string find uses @rollup/plugin-alias prefix matching
@@ -34,9 +32,6 @@ const alias: Array<{ find: string | RegExp; replacement: string }> = Object.entr
   ([name, dir]) => ({ find: name, replacement: pkg(dir) })
 );
 
-// dashboard-control uses @/ alias internally — regex avoids matching @scope packages
-// resolve() strips trailing slash, so append it to preserve the path separator
-alias.push({ find: /^@\//, replacement: pkg('packages/apps/dashboard-control/src') + '/' });
 // agent-memory scripts (non-src tests)
 alias.push({ find: 'agent-memory-scripts', replacement: pkg('packages/plugins/agent-memory/scripts') });
 
@@ -51,17 +46,7 @@ export default defineConfig({
         test: {
           name: 'unit',
           include: ['tests/**/*.test.ts'],
-          exclude: ['tests/dashboard/**'],
           environment: 'node',
-        },
-      },
-      {
-        extends: true,
-        test: {
-          name: 'dashboard',
-          include: ['tests/dashboard/**/*.test.{ts,tsx}'],
-          environment: 'jsdom',
-          setupFiles: ['tests/_utils/dashboard/setup.ts'],
         },
       },
     ],

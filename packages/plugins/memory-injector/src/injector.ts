@@ -12,10 +12,9 @@ import path from 'path';
 import { SyncClient } from 'agent-memory';
 import type {
   MemoryInjector,
-  InjectParams,
   InjectRecentParams,
-  InjectParamsV2,
-  InjectResultV2,
+  EvidenceInjectParams,
+  EvidenceInjectResult,
   MemoryInjectorConfig,
   MemoryQueryStrategy,
   QueryIntent,
@@ -732,349 +731,6 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
         })),
       };
     },
-    async inject({ query, maxTokens }: InjectParams): Promise<string | null> {
-      // Validate query - return null early if empty or whitespace-only
-      if (!query || !query.trim()) {
-        return null;
-      }
-      const tokenBudget = Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 0;
-      if (tokenBudget <= 0) {
-        return null;
-      }
-
-      const queryPlan = buildQueryPlan(query, strategy);
-      if (queryPlan.queries.length === 0) {
-        return null;
-      }
-      const intent = queryPlan.intent;
-      const preferStructured = isConceptIntent(intent);
-      const shouldSearchMemory = intent === 'recall';
-      const shouldSearchStructured = intent !== 'recall';
-      const queryTokenSet = strategy.enableOverlapBoost
-        ? new Set(extractOrderedTokens(query))
-        : null;
-      const adjustScore = (baseScore: number, content: string): number => {
-        let score = baseScore;
-        if (strategy.enableOverlapBoost && queryTokenSet) {
-          score += computeOverlapBoost(content, queryTokenSet);
-        }
-        if (strategy.enableQualityFilters) {
-          score *= computeQualityMultiplier(content);
-        }
-        return score;
-      };
-
-      const queryCount = queryPlan.queries.length;
-      const preferenceLimit = queryCount === 1 ? 20 : 10;
-      const decisionLimit = queryCount === 1 ? 20 : 10;
-      const memoryLimit = queryCount === 1 ? 10 : 6;
-
-      const memorySearches = shouldSearchMemory
-        ? queryPlan.queries.map(async (spec) => {
-          if (!client.memory?.search) {
-            return {
-              spec,
-              items: [] as Array<{
-                conversation_id: string;
-                summary: string;
-                topic?: string;
-                source_timestamp?: string;
-                updated_at: string;
-              }>,
-            };
-          }
-          try {
-            const res = await client.memory.search({
-              q: spec.text,
-              limit: memoryLimit,
-              connectors: DEFAULT_MEMORY_CONNECTORS,
-            });
-            return { spec, items: res?.items ?? [] };
-          } catch (err) {
-            console.error('[MemoryInjector] Conversational memory search failed:', err);
-            return {
-              spec,
-              items: [] as Array<{
-                conversation_id: string;
-                summary: string;
-                topic?: string;
-                source_timestamp?: string;
-                updated_at: string;
-              }>,
-            };
-          }
-        })
-        : [];
-
-      const preferenceSearches = shouldSearchStructured
-        ? queryPlan.queries.map(async (spec) => {
-          try {
-            const res = await client.preferences.search({
-              q: spec.text,
-              limit: preferenceLimit,
-              mode: preferStructured ? 'trgm' : undefined,
-              minSimilarity: preferStructured ? 0.18 : undefined,
-            });
-            return { spec, preferences: res?.preferences ?? [] };
-          } catch (err) {
-            console.error('[MemoryInjector] Preferences search failed:', err);
-            return { spec, preferences: [] };
-          }
-        })
-        : [];
-
-      const decisionSearches = shouldSearchStructured
-        ? queryPlan.queries.map(async (spec) => {
-          try {
-            const res = await client.decisions.search({
-              q: spec.text,
-              limit: decisionLimit,
-              mode: preferStructured ? 'trgm' : undefined,
-              minSimilarity: preferStructured ? 0.18 : undefined,
-            });
-            return { spec, decisions: res?.decisions ?? [] };
-          } catch (err) {
-            console.error('[MemoryInjector] Decisions search failed:', err);
-            return { spec, decisions: [] };
-          }
-        })
-        : [];
-
-      const [memoryResults, preferenceResults, decisionResults] = await Promise.all([
-        Promise.all(memorySearches),
-        Promise.all(preferenceSearches),
-        Promise.all(decisionSearches),
-      ]);
-
-      const sourceCaps = (() => {
-        if (intent === 'preference' || intent === 'principle') {
-          return { memory: 2, preference: 8, decision: 4 } as const;
-        }
-        if (intent === 'decision' || intent === 'tradeoff') {
-          return { memory: 2, preference: 4, decision: 8 } as const;
-        }
-        if (intent === 'recall') {
-          return { memory: 10, preference: 0, decision: 0 } as const;
-        }
-        if (intent === 'debug') {
-          return { memory: 8, preference: 4, decision: 4 } as const;
-        }
-        return { memory: 6, preference: 6, decision: 6 } as const;
-      })();
-
-      const formatPreferenceDisplay = (pref: {
-        preference?: string;
-        entity_free_formulation?: string;
-        scope?: string;
-        failure_mode_prevented?: string;
-        confidence?: string;
-        signal_strength?: string;
-        evidence_count?: number;
-        source_timestamp?: string;
-        created_at?: string;
-      }): string => {
-        const core = clampText(pref.entity_free_formulation?.trim() || pref.preference?.trim() || '', 180);
-        const meta: string[] = [];
-        if (pref.confidence) meta.push(`conf:${pref.confidence}`);
-        if (pref.signal_strength) meta.push(`signal:${pref.signal_strength}`);
-        if (Number.isFinite(pref.evidence_count)) meta.push(`evidence:${pref.evidence_count}`);
-        const metaStr = meta.length ? ` (${meta.join(', ')})` : '';
-        const details: string[] = [];
-        if (pref.scope?.trim()) details.push(`Scope: ${clampText(pref.scope, 80)}`);
-        if (pref.failure_mode_prevented?.trim()) {
-          details.push(`Prevents: ${clampText(pref.failure_mode_prevented, 80)}`);
-        }
-        const detailStr = details.length ? ` — ${details.join(' ')}` : '';
-        const timestamp = pref.source_timestamp ?? pref.created_at;
-        return `**[Preference]** ${core}${metaStr}${detailStr}${formatDateSuffix(timestamp)}`;
-      };
-
-      const formatDecisionDisplay = (decision: {
-        decision?: string;
-        rationale?: string;
-        tradeoffs?: string;
-        alternatives_considered?: string;
-        confidence?: string;
-        signal_strength?: string;
-        reversibility?: string;
-        source_timestamp?: string;
-        created_at?: string;
-      }): string => {
-        const decisionText = clampText(decision.decision?.trim() || '', 180);
-        const details: string[] = [];
-        if (decision.rationale?.trim()) {
-          details.push(`Rationale: ${clampText(decision.rationale, 140)}`);
-        }
-        if (decision.tradeoffs?.trim()) {
-          details.push(`Tradeoffs: ${clampText(decision.tradeoffs, 140)}`);
-        }
-        if (decision.alternatives_considered?.trim()) {
-          details.push(`Alternatives: ${clampText(decision.alternatives_considered, 120)}`);
-        }
-        const meta: string[] = [];
-        if (decision.confidence) meta.push(`conf:${decision.confidence}`);
-        if (decision.signal_strength) meta.push(`signal:${decision.signal_strength}`);
-        if (decision.reversibility) meta.push(`reversible:${decision.reversibility}`);
-        const metaStr = meta.length ? ` (${meta.join(', ')})` : '';
-        const detailStr = details.length ? ` — ${details.join(' ')}` : '';
-        const timestamp = decision.source_timestamp ?? decision.created_at;
-        return `**[Decision]** ${decisionText}${metaStr}${detailStr}${formatDateSuffix(timestamp)}`;
-      };
-
-      const memoryScoredRaw: ScoredItem[] = [];
-      for (const { spec, items } of memoryResults) {
-        items.forEach((item, index) => {
-          if (!item?.summary) return;
-          const timestamp = item.source_timestamp ?? item.updated_at;
-          const baseScore = spec.weight + recencyBonus(timestamp) - index * 0.015;
-          const score = adjustScore(baseScore, item.summary) * sourceBias(intent, 'memory');
-          const details: string[] = [];
-          if (item.topic?.trim()) details.push(`Topic: ${clampText(item.topic, 80)}`);
-          if (item.conversation_id?.trim()) details.push(`Id: ${item.conversation_id}`);
-          const detailStr = details.length ? ` — ${details.join(' ')}` : '';
-          const contentKey = item.conversation_id ? `${item.conversation_id}:${item.summary}` : item.summary;
-          memoryScoredRaw.push({
-            content: contentKey,
-            display: `**[Memory]** ${item.summary}${detailStr}${formatDateSuffix(timestamp)}`,
-            score,
-            source: 'memory',
-          });
-        });
-      }
-
-      const prefScoredRaw: ScoredItem[] = [];
-      for (const { spec, preferences } of preferenceResults) {
-        for (const pref of preferences ?? []) {
-          if (!pref?.preference) continue;
-          if (pref.kind === 'ignore') continue;
-          // Prefer source_timestamp (when conversation happened) over created_at (when extracted)
-          const prefWithTs = pref as { source_timestamp?: string; created_at?: string };
-          const timestamp = prefWithTs.source_timestamp ?? prefWithTs.created_at;
-          const baseRank = safeScore(pref.rank ?? (pref as { similarity?: number }).similarity);
-          const baseScore = baseRank * spec.weight + recencyBonus(timestamp);
-          const signalBoost = confidenceBoost(pref.confidence)
-            + signalStrengthBoost(pref.signal_strength)
-            + evidenceBoost(pref.evidence_count)
-            + nonEmptyBoost(pref.failure_mode_prevented, 0.04);
-          const kindBoost = pref.kind === 'principle_candidate' ? 0.18 : pref.kind === 'local_convention' ? -0.02 : -0.15;
-          const score = adjustScore(baseScore + signalBoost + kindBoost, pref.entity_free_formulation || pref.preference)
-            * sourceBias(intent, 'preference');
-          const display = formatPreferenceDisplay(pref);
-          const contentKey = pref.entity_free_formulation?.trim() || pref.preference.trim();
-          prefScoredRaw.push({
-            content: contentKey,
-            display,
-            score,
-            source: 'preference',
-          });
-        }
-      }
-
-      const decisionScoredRaw: ScoredItem[] = [];
-      for (const { spec, decisions } of decisionResults) {
-        for (const decision of decisions ?? []) {
-          if (!decision?.decision) continue;
-          const rawScore = decision.rank ?? decision.similarity;
-          // Prefer source_timestamp (when conversation happened) over created_at (when extracted)
-          const decWithTs = decision as { source_timestamp?: string; created_at?: string };
-          const timestamp = decWithTs.source_timestamp ?? decWithTs.created_at;
-          const baseScore = safeScore(rawScore) * spec.weight + recencyBonus(timestamp);
-          const signalBoost = confidenceBoost(decision.confidence)
-            + signalStrengthBoost(decision.signal_strength)
-            + nonEmptyBoost(decision.rationale, 0.05)
-            + nonEmptyBoost(decision.tradeoffs, 0.05)
-            + nonEmptyBoost(decision.alternatives_considered, 0.04);
-          const reversibilityBoost = decision.reversibility === 'hard' ? 0.05
-            : decision.reversibility === 'moderate' ? 0.02
-              : 0;
-          const score = adjustScore(baseScore + signalBoost + reversibilityBoost, decision.decision)
-            * sourceBias(intent, 'decision');
-          const display = formatDecisionDisplay(decision);
-          decisionScoredRaw.push({
-            content: decision.decision,
-            display,
-            score,
-            source: 'decision',
-          });
-        }
-      }
-
-      const memoryScored = memoryScoredRaw
-        .filter((item) => item.content && item.content.trim().length > 0)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, sourceCaps.memory);
-
-      const prefScored = prefScoredRaw
-        .filter((item) => item.content && item.content.trim().length > 0)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, sourceCaps.preference);
-
-      const decisionScored = decisionScoredRaw
-        .filter((item) => item.content && item.content.trim().length > 0)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, sourceCaps.decision);
-
-      const items: ScoredItem[] = [...memoryScored, ...prefScored, ...decisionScored]
-        .sort((a, b) => b.score - a.score);
-
-      if (items.length === 0) {
-        return null;
-      }
-
-      // Deduplicate by normalized content (BUG #13)
-      const normalizeForDedup = (text: string): string =>
-        text.trim().replace(/\s+/g, ' ').toLowerCase();
-      const seen = new Set<string>();
-      const dedupedItems: ScoredItem[] = [];
-      for (const item of items) {
-        const key = normalizeForDedup(item.content);
-        if (!seen.has(key)) {
-          seen.add(key);
-          dedupedItems.push(item);
-        }
-      }
-
-      const renderItem = (item: ScoredItem): string => {
-        if (item.display) return item.display;
-        const label = item.source === 'memory'
-          ? 'Memory'
-          : item.source === 'preference'
-            ? 'Preference'
-            : 'Decision';
-        return `**[${label}]** ${item.content}`;
-      };
-
-      // Build output, respecting token limit (BUG #6: continue instead of break for large items)
-      const result: string[] = [];
-      let tokens = 0;
-
-      for (const item of dedupedItems) {
-        if (result.length >= MAX_INJECTED_ITEMS) {
-          break;
-        }
-        const rendered = renderItem(item);
-        const itemTokens = estimateTokens(rendered);
-        // Skip items that individually exceed maxTokens, but continue checking others
-        if (itemTokens > tokenBudget) {
-          continue;
-        }
-        if (tokens + itemTokens > tokenBudget) {
-          continue;
-        }
-        result.push(rendered);
-        tokens += itemTokens;
-      }
-
-      if (result.length === 0) {
-        return null;
-      }
-
-      const header = preferStructured && intent !== 'debug'
-        ? '## Relevant Decisions & Preferences'
-        : '## Relevant Memory';
-      return `${header}\n\n${result.join('\n\n')}`;
-    },
-
     async injectRecentConversations(params: InjectRecentParams): Promise<string | null> {
       const tokenBudget = Number.isFinite(params.maxTokens) && params.maxTokens > 0 ? params.maxTokens : 0;
       if (tokenBudget <= 0) return null;
@@ -1142,8 +798,8 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
       }
     },
 
-    async injectV2(params: InjectParamsV2): Promise<InjectResultV2 | null> {
-      const debugParams = params as InjectParamsV2 & {
+    async injectEvidence(params: EvidenceInjectParams): Promise<EvidenceInjectResult | null> {
+      const debugParams = params as EvidenceInjectParams & {
         query?: string;
         maxTokens?: number;
         connectors?: unknown;
@@ -1152,7 +808,7 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
       const task = debugParams.task;
 
       // Log request payload
-      console.log('[MemoryInjector] V2 Request:', {
+      console.log('[MemoryInjector] Evidence Request:', {
         taskObjective: task?.objective ?? null,
         touchedFiles: task?.touchedFiles?.length ?? 0,
         touchedFileNames: task?.touchedFiles?.slice(0, 5) ?? [],
@@ -1167,16 +823,11 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
         options: debugParams.options,
       });
 
-      if (debugParams.options?.forceV1Fallback) {
-        console.log('[MemoryInjector] V2 returning null: forceV1Fallback=true');
-        return null;
-      }
-
       try {
         const response = await client.evidence.retrieve(params);
 
         if (!response?.content) {
-          console.log('[MemoryInjector] V2 returning null: response or content empty', {
+          console.log('[MemoryInjector] Evidence returning null: response or content empty', {
             hasResponse: !!response,
             hasContent: !!response?.content,
             responseKeys: response ? Object.keys(response) : [],
@@ -1185,7 +836,7 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
         }
 
         // Log successful response details
-        console.log('[MemoryInjector] V2 Success:', {
+        console.log('[MemoryInjector] Evidence Success:', {
           contentLength: response.content.length,
           atomCount: response.atoms?.length ?? 0,
           metrics: response.metrics,
@@ -1201,7 +852,7 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
           name: err instanceof Error ? err.name : 'Unknown',
           stack: err instanceof Error ? err.stack : undefined,
         };
-        console.error('[MemoryInjector] V2 returning null: error caught', errorDetails);
+        console.error('[MemoryInjector] Evidence returning null: error caught', errorDetails);
         return null;
       }
     },

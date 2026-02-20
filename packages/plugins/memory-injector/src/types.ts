@@ -36,16 +36,6 @@ export interface QueryPlanSummary {
 }
 
 /**
- * Parameters for memory injection.
- */
-export interface InjectParams {
-  /** Search query built from objective + recent messages */
-  query: string;
-  /** Maximum tokens to include in injection */
-  maxTokens: number;
-}
-
-/**
  * Parameters for recent conversation summary injection.
  */
 export interface InjectRecentParams {
@@ -57,7 +47,7 @@ export interface InjectRecentParams {
   connectors?: string;
 }
 
-export interface InjectParamsV2 {
+export interface EvidenceInjectParams {
   task: {
     objective: string;
     recentMessages: string[];
@@ -75,12 +65,11 @@ export interface InjectParamsV2 {
     minCoverage?: Partial<Record<string, number>>;
   };
   options?: {
-    forceV1Fallback?: boolean;
     trace?: boolean;
   };
 }
 
-export interface InjectResultV2 {
+export interface EvidenceInjectResult {
   content: string;
   atoms: unknown[];
   trainingSignal?: {
@@ -171,12 +160,6 @@ export interface WatcherContextResult {
  */
 export interface MemoryInjector {
   /**
-   * Inject relevant memory based on query.
-   * @returns Formatted memory content, or null if no relevant memories found
-   */
-  inject(params: InjectParams): Promise<string | null>;
-
-  /**
    * Inject recent conversation summaries (no search query).
    * Intended for first-iteration priming.
    */
@@ -194,10 +177,10 @@ export interface MemoryInjector {
   explainQueryPlan?: (query: string) => QueryPlanSummary;
 
   /**
-   * Inject relevant evidence using v2 retrieval (optional).
+   * Inject relevant evidence using canonical retrieval (optional).
    * @returns Structured result with formatted content, or null if none
    */
-  injectV2?: (params: InjectParamsV2) => Promise<InjectResultV2 | null>;
+  injectEvidence?: (params: EvidenceInjectParams) => Promise<EvidenceInjectResult | null>;
 
   /**
    * Inject watcher context (salience + semantic) for a workItem.
