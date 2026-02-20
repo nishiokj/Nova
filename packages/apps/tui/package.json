@@ -14,17 +14,21 @@
   "dependencies": {
     "chalk": "^5.3.0",
     "comms-bus": "workspace:*",
+    "diff": "^7.0.0",
     "entity-graph": "workspace:*",
     "harness-client": "workspace:*",
     "ink": "^4.4.1",
+    "llm": "workspace:*",
     "marked": "^17.0.1",
     "marked-terminal": "^7.3.0",
     "react": "^18.3.1",
+    "shared": "workspace:*",
     "string-width": "^8.1.0",
     "strip-ansi": "^7.1.2",
-    "tree-sitter": "^0.22.4",
+    "web-tree-sitter": "0.25.3",
     "types": "workspace:*",
-    "wrap-ansi": "^9.0.2"
+    "wrap-ansi": "^9.0.2",
+    "yoga-wasm-web": "^0.3.3"
   },
   "devDependencies": {
     "@types/diff": "^8.0.0",

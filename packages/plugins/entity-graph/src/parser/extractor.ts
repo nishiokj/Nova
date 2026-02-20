@@ -8,8 +8,8 @@
 
 import { statSync } from 'fs'
 import path from 'path'
-import Parser from 'tree-sitter'
-import type { SyntaxNode } from 'tree-sitter'
+import type { Language, Node, Tree } from 'web-tree-sitter'
+import { Query } from 'web-tree-sitter'
 import type { Entity, Edge, ParseResult, EntityKind } from '../types.js'
 import type { SupportedLanguage } from './parser.js'
 import {
@@ -40,7 +40,7 @@ export function entityId(kind: EntityKind, filepath: string, name: string): stri
 /**
  * Check if a node is inside an export_statement (export { ... }, export default, export const, etc.)
  */
-function isExported(node: SyntaxNode): boolean {
+function isExported(node: Node): boolean {
   let parent = node.parent
   while (parent) {
     if (parent.type === 'export_statement') return true
@@ -54,7 +54,7 @@ function isExported(node: SyntaxNode): boolean {
 /**
  * Check if a function/method node has the `async` keyword.
  */
-function isAsync(node: SyntaxNode): boolean {
+function isAsync(node: Node): boolean {
   // For function_declaration, arrow_function, method_definition:
   // the "async" keyword appears as a child token
   for (let i = 0; i < node.childCount; i++) {
@@ -87,7 +87,7 @@ function stripQuotes(text: string): string {
 /**
  * Get raw text for an entity, truncated to avoid storing huge class bodies.
  */
-function getRawText(node: SyntaxNode, maxLen = 2000): string | null {
+function getRawText(node: Node, maxLen = 2000): string | null {
   const text = node.text
   if (text.length <= maxLen) return text
   return text.slice(0, maxLen) + '...'
@@ -162,15 +162,15 @@ function resolveCallTarget(
 
 interface CaptureResult {
   name: string
-  node: SyntaxNode
+  node: Node
 }
 
 /**
  * Run a tree-sitter query and return captures.
  */
-function runQuery(language: Parser.Language, queryStr: string, rootNode: SyntaxNode): CaptureResult[] {
+function runQuery(language: Language, queryStr: string, rootNode: Node): CaptureResult[] {
   try {
-    const q = new Parser.Query(language, queryStr)
+    const q = new Query(language, queryStr)
     return q.captures(rootNode)
   } catch {
     // Query construction can fail for some grammar/query combinations
@@ -189,10 +189,10 @@ function runQuery(language: Parser.Language, queryStr: string, rootNode: SyntaxN
  * @returns ParseResult with entities and edges
  */
 export function extract(
-  tree: Parser.Tree,
+  tree: Tree,
   filepath: string,
   _language: SupportedLanguage,
-  tsLanguage: Parser.Language,
+  tsLanguage: Language,
   sourceRoot: string
 ): ParseResult {
   const entities: Entity[] = []
@@ -220,7 +220,7 @@ export function extract(
   function addEntity(
     kind: EntityKind,
     name: string,
-    node: SyntaxNode,
+    node: Node,
     ownerId?: string
   ): string {
     const id = entityId(kind, filepath, name)
@@ -441,7 +441,7 @@ export function extract(
  * Returns the entity ID if found, null otherwise.
  */
 function findEnclosingEntity(
-  node: SyntaxNode,
+  node: Node,
   filepath: string,
   knownEntities: Set<string>
 ): string | null {
