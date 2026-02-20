@@ -286,9 +286,11 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     id: 'gemini',
     displayName: 'Google Gemini',
     canonicalProvider: 'openai-compat',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    responseFormat: 'none',
     models: [
-      { id: 'gemini-3.0-flash', name: 'Gemini 3.0 Flash', context_window: 1_000_000, description: 'Fast Gemini model' },
-      { id: 'gemini-3.0-pro', name: 'Gemini 3.0 Pro', context_window: 2_000_000 },
+      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', context_window: 1_000_000, description: 'Fast Gemini model' },
+      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', context_window: 2_000_000 },
     ],
     envVar: 'GOOGLE_API_KEY',
     // Gemini uses query param auth, not header

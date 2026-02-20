@@ -436,19 +436,15 @@ export type InternalHookEvent =
       success: boolean;
       /** Which iteration this was (typically 0 - first iteration only) */
       iteration: number;
-      /** Injection version */
-      version?: 'v1' | 'v2';
       /** Retrieval latency (ms) */
       latencyMs?: number;
-      /** Category coverage counts (v2 only) */
+      /** Category coverage counts */
       coverage?: Record<string, number>;
-      /** Discriminators included (v2 only) */
+      /** Discriminators included */
       discriminatorsIncluded?: number;
-      /** Total tokens injected (v2 only) */
+      /** Total tokens injected */
       totalTokens?: number;
-      /** Whether v2 fell back to v1 */
-      fallbackToV1?: boolean;
-      /** Full retrieval training signal payload (v2 only) */
+      /** Full retrieval training signal payload */
       trainingSignal?: Record<string, unknown>;
     }
   | {

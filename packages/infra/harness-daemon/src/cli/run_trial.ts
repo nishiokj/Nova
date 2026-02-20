@@ -313,6 +313,14 @@ function waitForRunResponse(
         const provider = asNonEmptyString((event.data ?? {}).provider) ?? 'unknown';
         cleanup();
         rejectPromise(new Error(`Provider key required for ${provider}`));
+        return;
+      }
+
+      // Bridge errors (e.g., "No model selected") are terminal — don't wait for timeout
+      if (event.type === 'error') {
+        const message = asNonEmptyString((event.data ?? {}).message) ?? 'bridge error';
+        cleanup();
+        rejectPromise(new Error(`Bridge error: ${message}`));
       }
     };
 
@@ -366,6 +374,7 @@ export async function runHarnessTrialCli(rawArgs: string[] = process.argv.slice(
 
   const startedAt = Date.now();
   let streamText = '';
+  const toolResults: string[] = [];
   let tokensIn = 0;
   let tokensOut = 0;
   let modelCallCount = 0;
@@ -434,6 +443,11 @@ export async function runHarnessTrialCli(rawArgs: string[] = process.argv.slice(
         const toolName = asNonEmptyString(data.tool_name);
         if (!toolName || typeof data.tool_success !== 'boolean') return;
         toolCallCount += 1;
+        // Capture tool results for answer extraction (e.g., Skill tool outputs)
+        const toolResult = asNonEmptyString(data.tool_result);
+        if (toolResult) {
+          toolResults.push(toolResult);
+        }
         appendHookEvent({
           event_type: 'tool_call_end',
           call_id: `tool_${toolCallCount}`,
@@ -506,7 +520,15 @@ export async function runHarnessTrialCli(rawArgs: string[] = process.argv.slice(
 
     const run = await responsePromise;
     const latencyMs = Date.now() - startedAt;
-    const answer = run.content ?? streamText.trim();
+    // Answer priority: streamed text > response content.
+    // For multi-turn agents (e.g., Skill-based compilation), the response content
+    // is often just a brief acknowledgment from the final turn. The streamed text
+    // contains ALL assistant output across all turns — including the actual artifact
+    // (e.g., VP JSON) produced in intermediate turns.
+    const fullStreamedText = streamText.trim();
+    const answer = fullStreamedText.length > (run.content?.length ?? 0)
+      ? fullStreamedText
+      : (run.content ?? fullStreamedText);
     const success = run.success;
 
     appendHookEvent({

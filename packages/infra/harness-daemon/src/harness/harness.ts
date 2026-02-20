@@ -359,6 +359,10 @@ class HarnessProviderKeyService implements ProviderKeyService {
     return this.getApiKey(provider) !== null;
   }
 
+  getLocalProviders(): LocalProviderManager | null {
+    return this.localProviders;
+  }
+
   close(): void {
     this.localProviders?.close();
   }
@@ -702,6 +706,14 @@ export class AgentHarness {
    */
   hasApiKey(provider: string): boolean {
     return this.providerKeyService.hasApiKey(provider);
+  }
+
+  /**
+   * Get the shared LocalProviderManager instance.
+   * BridgeGateway uses this to avoid creating a second connection to the same GraphD database.
+   */
+  getLocalProviders(): LocalProviderManager | null {
+    return this.providerKeyService.getLocalProviders();
   }
 
   /**

@@ -135,6 +135,8 @@ export interface ProgressEventData {
   tool_args?: Record<string, unknown>;
   /** Tool result success flag */
   tool_success?: boolean;
+  /** Tool result output (for completed tool calls) */
+  tool_result?: string;
 }
 
 /**

@@ -90,7 +90,6 @@ packages/
     harness-client/      #   Client library for daemon connection
     harness-daemon/      #   Main daemon: sessions, agents, permissions, hooks
     graphd/              #   Standalone SQLite datastore
-    decision-watcher/    #   Async oversight (watcher agent, decision DB, escalations)
 
   plugins/               # Optional subsystems
     agent-memory/        #   PostgreSQL + pgvector memory with connector SDK
@@ -104,10 +103,8 @@ packages/
   apps/                  # User-facing clients
     launcher/            #   Unified CLI entry point (starts daemon + TUI)
     tui/                 #   Ink (React) terminal interface
-    control-plane/       #   HTTP API + Cockpit dashboard proxy
     dashboard/           #   Vite + React GraphD explorer
     dashboard-compact/   #   Minimal dashboard variant
-    dashboard-control/   #   Cockpit UI (escalations, session oversight)
 
 config/
   defaults.json          # Default harness config (agents, budgets, tools, ports)
@@ -188,6 +185,10 @@ Source files:
 - Agent-loop entrypoint: `packages/infra/harness-daemon/src/cli/run_agent_loop.ts` (`rex run-agent-loop`)
 - Agent runtime Dockerfile: `Dockerfile.rex-harness`
 - Curated dataset: `.lab/experiments/data/swebench_lite_curated.task_boundary_v1.jsonl`
+
+Benchmark extensibility:
+- The builder now accepts `--benchmark` and resolves benchmark metadata from a profile map.
+- To add a new benchmark, add one profile entry in `scripts/agentlab/benchmark_profiles.mjs`.
 
 Run a smoke pass (2 trials total: 1 task x 2 variants):
 

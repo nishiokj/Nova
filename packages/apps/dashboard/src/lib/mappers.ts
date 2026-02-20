@@ -378,14 +378,12 @@ function createRequestFromEvents(
           itemCount: (memData.item_count as number) ?? (memData.itemCount as number) ?? 0,
           success: (memData.success as boolean) ?? false,
           iteration: (memData.iteration as number) ?? 0,
-          version: (memData.version as 'v1' | 'v2') ?? undefined,
           latencyMs: (memData.latency_ms as number) ?? (memData.latencyMs as number) ?? undefined,
           coverage: (memData.coverage as Record<string, number>) ?? undefined,
           discriminatorsIncluded: (memData.discriminators_included as number)
             ?? (memData.discriminatorsIncluded as number)
             ?? undefined,
           totalTokens: (memData.total_tokens as number) ?? (memData.totalTokens as number) ?? undefined,
-          fallbackToV1: (memData.fallback_to_v1 as boolean) ?? (memData.fallbackToV1 as boolean) ?? undefined,
           timestamp: eventTimestamp,
         })
         break

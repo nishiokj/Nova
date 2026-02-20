@@ -76,7 +76,11 @@ function createToolRegistry(): ToolRegistry {
   } as unknown as ToolRegistry;
 }
 
-function createAgent(llm: LLMAdapter, toolRegistry: ToolRegistry): Agent {
+function createAgent(
+  llm: LLMAdapter,
+  toolRegistry: ToolRegistry,
+  runtimeOverrides: Partial<ConstructorParameters<typeof Agent>[1]> = {}
+): Agent {
   const config: AgentConfig = {
     type: 'standard',
     systemPrompt: 'Test prompt',
@@ -102,6 +106,7 @@ function createAgent(llm: LLMAdapter, toolRegistry: ToolRegistry): Agent {
       model: 'mock-model',
       apiKey: 'test-key',
     },
+    ...runtimeOverrides,
   });
 }
 
@@ -204,5 +209,52 @@ describe('Agent (Effect runtime)', () => {
     expect(result.success).toBe(true);
     expect(result.metrics.toolCallsMade).toBeGreaterThan(0);
     expect(result.terminationReason).toBe('goal_state_reached');
+  });
+
+  it('uses a single evidence memory injection path', async () => {
+    const llm = createMockLLM([
+      createResponse({ action: 'done', response: 'done', goalStateReached: true }),
+    ]);
+    const toolRegistry = createToolRegistry();
+    const events: Array<Record<string, unknown>> = [];
+    const secondaryInject = vi.fn(async () => 'secondary path should not run');
+    const evidenceInject = vi.fn(async () => null);
+
+    const memoryInjector = {
+      inject: secondaryInject,
+      injectEvidence: evidenceInject,
+    } as unknown as NonNullable<ConstructorParameters<typeof Agent>[1]['memoryInjector']>;
+
+    const agent = createAgent(llm, toolRegistry, {
+      emit: (event) => {
+        events.push(event as unknown as Record<string, unknown>);
+      },
+      memoryInjector,
+    });
+
+    const result = await Effect.runPromise(
+      agent.run({
+        globalContext: new ContextWindow('session-agent-memory-evidence-only', 200_000),
+        workItem: createTestWorkItem(),
+        cwd: process.cwd(),
+      })
+    );
+
+    expect(result.success).toBe(true);
+    expect(evidenceInject).toHaveBeenCalledTimes(1);
+    expect(secondaryInject).not.toHaveBeenCalled();
+
+    const memoryEvent = events.find((event) => event.type === 'memory_injected') as
+      | { data?: Record<string, unknown> }
+      | undefined;
+    expect(memoryEvent).toBeDefined();
+    expect(memoryEvent?.data?.success).toBe(false);
+    for (const removedField of ['version', 'fallbackToV1']) {
+      expect(
+        memoryEvent?.data
+          ? Object.prototype.hasOwnProperty.call(memoryEvent.data, removedField)
+          : false
+      ).toBe(false);
+    }
   });
 });

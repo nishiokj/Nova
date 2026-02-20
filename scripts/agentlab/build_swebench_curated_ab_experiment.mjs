@@ -3,21 +3,13 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { BENCHMARK_PROFILES, DEFAULT_BENCHMARK } from './benchmark_profiles.mjs';
 
 const DEFAULTS = {
-  dataset: '.lab/experiments/data/swebench_lite_curated.task_boundary_v1.jsonl',
-  output: '.lab/experiments/swebench_lite_curated_glm5_vs_codex_spark.yaml',
-  image: 'rex-harness:swebench-lite',
+  benchmark: DEFAULT_BENCHMARK,
   replications: 1,
   seed: 42,
   maxConcurrency: 1,
-};
-
-const LONG_DEFAULT_TIMEOUT_MS = 1_800_000;
-const BENCHMARK_TIMEOUT_MS = {
-  'swebench-lite': 1_800_000,
-  swebench_lite: 1_800_000,
-  swebench_lite_curated: 1_800_000,
 };
 
 function parseArgs(argv) {
@@ -25,6 +17,11 @@ function parseArgs(argv) {
   for (let i = 2; i < argv.length; i += 1) {
     const arg = argv[i];
     const next = argv[i + 1];
+    if (arg === '--benchmark') {
+      out.benchmark = next;
+      i += 1;
+      continue;
+    }
     if (arg === '--dataset') {
       out.dataset = next;
       i += 1;
@@ -86,44 +83,34 @@ function countJsonl(path) {
     .filter((line) => line.length > 0).length;
 }
 
-function detectBenchmarkKeyFromDataset(path) {
-  const raw = readFileSync(path, 'utf8');
-  const first = raw
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  if (!first) return null;
-  try {
-    const parsed = JSON.parse(first);
-    if (parsed && typeof parsed === 'object' && typeof parsed.source === 'string') {
-      return parsed.source;
+function resolveBenchmarkProfile(raw) {
+  const requested = String(raw ?? DEFAULT_BENCHMARK).trim();
+  if (!requested) {
+    throw new Error(`--benchmark must be non-empty (available: ${Object.keys(BENCHMARK_PROFILES).join(', ')})`);
+  }
+  if (BENCHMARK_PROFILES[requested]) {
+    return {
+      key: requested,
+      profile: BENCHMARK_PROFILES[requested],
+    };
+  }
+  const lowerRequested = requested.toLowerCase();
+  for (const [key, profile] of Object.entries(BENCHMARK_PROFILES)) {
+    if (profile.aliases.some((alias) => alias.toLowerCase() === lowerRequested)) {
+      return { key, profile };
     }
-  } catch {
-    // ignore parse errors and fall back to path-based detection
   }
-  return null;
+  throw new Error(`Unknown benchmark '${requested}' (available: ${Object.keys(BENCHMARK_PROFILES).join(', ')})`);
 }
 
-function detectBenchmarkKey(datasetPath, detectedSource) {
-  if (typeof detectedSource === 'string' && detectedSource.trim().length > 0) {
-    return detectedSource.trim();
-  }
-  const lower = datasetPath.toLowerCase();
-  if (lower.includes('swebench')) {
-    return 'swebench-lite';
-  }
-  return 'unknown';
-}
-
-function resolveTimeoutMs(explicitTimeoutRaw, benchmarkKey) {
+function resolveTimeoutMs(explicitTimeoutRaw, profile) {
   if (explicitTimeoutRaw !== undefined && explicitTimeoutRaw !== null) {
     return toPositiveInt(explicitTimeoutRaw, '--timeout-ms');
   }
-  const benchmarkDefault = BENCHMARK_TIMEOUT_MS[benchmarkKey];
-  if (typeof benchmarkDefault === 'number' && benchmarkDefault > 0) {
-    return benchmarkDefault;
+  if (typeof profile.timeoutMs === 'number' && profile.timeoutMs > 0) {
+    return profile.timeoutMs;
   }
-  return LONG_DEFAULT_TIMEOUT_MS;
+  throw new Error('benchmark profile is missing timeoutMs');
 }
 
 function buildCredentialStagingEntries(homeDir) {
@@ -183,21 +170,23 @@ function resolvePath(input, cwd) {
 function main() {
   const args = parseArgs(process.argv);
   const cwd = process.cwd();
+  const { key: benchmarkKey, profile } = resolveBenchmarkProfile(args.benchmark);
+  const datasetInput = args.dataset ?? profile.defaultDataset;
+  const outputInput = args.output ?? profile.defaultOutput;
+  const image = args.image ?? profile.defaultImage;
 
-  const datasetAbs = resolvePath(args.dataset, cwd);
+  const datasetAbs = resolvePath(datasetInput, cwd);
   if (!existsSync(datasetAbs)) {
     throw new Error(`dataset not found: ${datasetAbs}`);
   }
 
-  const outputAbs = resolvePath(args.output, cwd);
+  const outputAbs = resolvePath(outputInput, cwd);
   mkdirSync(dirname(outputAbs), { recursive: true });
 
   const datasetCount = countJsonl(datasetAbs);
   const limit = args.limit ? toPositiveInt(args.limit, '--limit') : datasetCount;
   const safeLimit = Math.min(limit, datasetCount);
-  const detectedSource = detectBenchmarkKeyFromDataset(datasetAbs);
-  const benchmarkKey = detectBenchmarkKey(datasetAbs, detectedSource);
-  const timeoutMs = resolveTimeoutMs(args.timeoutMs, benchmarkKey);
+  const timeoutMs = resolveTimeoutMs(args.timeoutMs, profile);
   const replications = toPositiveInt(args.replications, '--replications');
   const seed = toPositiveInt(args.seed, '--seed');
   const maxConcurrency = toPositiveInt(args.maxConcurrency, '--max-concurrency');
@@ -214,18 +203,18 @@ function main() {
     version: '0.5',
     experiment: {
       workload_type: 'agent_loop',
-      id: 'swebench_lite_curated_glm5_vs_codex_spark',
-      name: 'SWE-bench Lite Curated: GLM-5 vs GPT-5.3 Codex Spark',
-      tags: ['swebench-lite', 'curated', 'ab-test', 'glm-5', 'gpt-5.3-codex-spark'],
-      description: 'A/B evaluation over curated SWE-bench Lite task-boundary dataset.',
+      id: profile.experiment.id,
+      name: profile.experiment.name,
+      tags: profile.experiment.tags,
+      description: profile.experiment.description,
       owner: 'jevinnishioka',
     },
     dataset: {
-      suite_id: 'swebench_lite_curated',
+      suite_id: profile.dataset.suiteId,
       provider: 'local_jsonl',
       path: datasetRel,
-      schema_version: 'task_boundary_v1',
-      split_id: 'test',
+      schema_version: profile.dataset.schemaVersion,
+      split_id: profile.dataset.splitId,
       limit: safeLimit,
     },
     design: {
@@ -307,12 +296,14 @@ function main() {
       agent: {
         mode: 'custom_image',
         custom_image: {
-          image: args.image,
+          image,
           entrypoint: ['bun', '/opt/rex/packages/infra/harness-daemon/bin/rex.js', 'run-agent-loop'],
         },
         overrides: {
           env: {
             HOME: '/agentlab/deps/home',
+            REX_EXPERIMENT_PROXY: '1',
+            REX_PROXY_ALLOW_OUTBOUND: '1',
           },
           env_from_host: [],
         },
@@ -328,7 +319,7 @@ function main() {
         },
         sandbox: {
           mode: 'container',
-          image: args.image,
+          image,
         },
       },
     },
@@ -341,7 +332,7 @@ function main() {
   writeFileSync(outputAbs, `${JSON.stringify(spec, null, 2)}\n`, 'utf8');
   console.log(`wrote experiment config: ${outputAbs}`);
   console.log(`dataset rows=${datasetCount}, limit=${safeLimit}`);
-  console.log(`image=${args.image}`);
+  console.log(`image=${image}`);
   console.log(`benchmark=${benchmarkKey}`);
   console.log(`timeout_ms=${timeoutMs}`);
   console.log(`credential staging entries=${stagingEntries.length}`);

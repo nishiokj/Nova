@@ -113,6 +113,7 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
         arguments?: Record<string, unknown>;
         phase?: 'starting' | 'completed';
         success?: boolean;
+        result?: string;
         durationMs?: number;
       };
       const phase = toolData.phase ?? 'starting';
@@ -141,6 +142,7 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
           duration_ms: isCompleted ? toolData.durationMs : undefined,
           tool_args: includeArgs ? toolData.arguments : undefined,
           tool_success: isCompleted ? toolData.success : undefined,
+          tool_result: isCompleted ? toolData.result : undefined,
         } satisfies ProgressEventData,
       };
     }

@@ -79,16 +79,16 @@
       "entry": ["src/index.ts"],
       "project": ["src/**/*.ts"]
     },
+    "packages/infra/experiment-proxy": {
+      "entry": ["src/index.ts"],
+      "project": ["src/**/*.ts"]
+    },
     "packages/infra/harness-daemon": {
       "entry": ["src/index.ts"],
       "project": ["src/**/*.ts"]
     },
     "packages/plugins/memory-injector": {
       "entry": ["src/index.ts", "src/**/*.test.ts"],
-      "project": ["src/**/*.ts"]
-    },
-    "packages/infra/decision-watcher": {
-      "entry": ["src/index.ts"],
       "project": ["src/**/*.ts"]
     },
     "packages/core/orchestrator": {
@@ -109,10 +109,6 @@
     },
     "packages/apps/dashboard-compact": {
       "entry": ["src/main.tsx"],
-      "project": ["src/**/*.{ts,tsx}"]
-    },
-    "packages/apps/dashboard-control": {
-      "entry": ["src/main.tsx", "src/**/*.test.{ts,tsx}"],
       "project": ["src/**/*.{ts,tsx}"]
     }
   }

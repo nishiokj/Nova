@@ -2,7 +2,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RUNNER_BIN="${AGENTLAB_RUNNER_BIN:-/Users/jevinnishioka/Desktop/Experiments/rust/target/release/lab-cli}"
+DEFAULT_RUNNER_BIN=""
+if [[ -n "${AGENTLAB_RUNNER_BIN:-}" ]]; then
+  DEFAULT_RUNNER_BIN="$AGENTLAB_RUNNER_BIN"
+elif command -v lab-cli >/dev/null 2>&1; then
+  DEFAULT_RUNNER_BIN="$(command -v lab-cli)"
+elif [[ -x "$ROOT_DIR/../Experiments/rust/target/release/lab-cli" ]]; then
+  DEFAULT_RUNNER_BIN="$ROOT_DIR/../Experiments/rust/target/release/lab-cli"
+fi
+RUNNER_BIN="$DEFAULT_RUNNER_BIN"
+BENCHMARK="${BENCHMARK:-swebench_lite_curated}"
 EXPERIMENT_PATH="${EXPERIMENT_PATH:-.lab/experiments/swebench_lite_curated_glm5_vs_codex_spark.yaml}"
 DATASET_PATH="${DATASET_PATH:-.lab/experiments/data/swebench_lite_curated.task_boundary_v1.jsonl}"
 IMAGE_TAG="${IMAGE_TAG:-rex-harness:swebench-lite}"
@@ -19,6 +28,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --runner-bin)
       RUNNER_BIN="$2"
+      shift 2
+      ;;
+    --benchmark)
+      BENCHMARK="$2"
       shift 2
       ;;
     --experiment)
@@ -66,6 +79,11 @@ done
 
 cd "$ROOT_DIR"
 
+if [[ -z "$RUNNER_BIN" ]]; then
+  echo "unable to locate lab-cli runner; set AGENTLAB_RUNNER_BIN or install lab-cli in PATH" >&2
+  exit 1
+fi
+
 if [[ -f ".env" ]]; then
   set -a
   # shellcheck disable=SC1091
@@ -74,6 +92,7 @@ if [[ -f ".env" ]]; then
 fi
 
 BUILD_ARGS=(
+  --benchmark "$BENCHMARK"
   --dataset "$DATASET_PATH"
   --output "$EXPERIMENT_PATH"
   --image "$IMAGE_TAG"
