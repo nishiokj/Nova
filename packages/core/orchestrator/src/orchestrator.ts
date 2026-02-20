@@ -244,6 +244,14 @@ type WorkExecutionResult = {
   result: AgentResult;
 };
 
+type StopHookDecisionEventType =
+  | 'goal_state_reached'
+  | 'bounds_exceeded'
+  | 'user_input_required'
+  | 'cadence_audit'
+  | 'agent_error'
+  | 'work_item_completed';
+
 interface CallStopHookParams {
   context: ContextWindow;
   terminationReason: TerminationReason;
@@ -2276,6 +2284,18 @@ export class Orchestrator {
    * Call control-plane hooks and return a stop-style decision.
    * Returns null if no hook registry configured or if hooks fail.
    */
+  private async runMappedStopHookDecision<E extends StopHookDecisionEventType>(params: {
+    event: EventFor<E>;
+    hookContext: HookContext;
+    context: ContextWindow;
+    runtime: OrchestratorRuntime;
+    mapper: (decision: DecisionFor<E>) => StopHookResult;
+  }): Promise<StopHookResult | null> {
+    const { event, hookContext, context, runtime, mapper } = params;
+    const hookResult = await this.runControlHooks<E>(event, hookContext, context, runtime);
+    return this.resolveHookDecision(event.type, hookResult, mapper);
+  }
+
   private async callStopHook(params: CallStopHookParams): Promise<StopHookResult | null> {
     const { context, terminationReason, response, iteration, agentType, runtime, userPrompt, agentResult, workId, objective, totalLlmCalls, totalToolCalls, cadence, controlEventType } = params;
     if (!runtime?.hookRegistry) return null;
@@ -2315,30 +2335,54 @@ export class Orchestrator {
 
     try {
       switch (event.type) {
-        case 'goal_state_reached': {
-          const hookResult = await this.runControlHooks<'goal_state_reached'>(event, hookContext, context, runtime);
-          return this.resolveHookDecision(event.type, hookResult, mapQualityDecisionToStopResult);
-        }
-        case 'bounds_exceeded': {
-          const hookResult = await this.runControlHooks<'bounds_exceeded'>(event, hookContext, context, runtime);
-          return this.resolveHookDecision(event.type, hookResult, mapBoundsDecisionToStopResult);
-        }
-        case 'user_input_required': {
-          const hookResult = await this.runControlHooks<'user_input_required'>(event, hookContext, context, runtime);
-          return this.resolveHookDecision(event.type, hookResult, mapPromptDecisionToStopResult);
-        }
-        case 'cadence_audit': {
-          const hookResult = await this.runControlHooks<'cadence_audit'>(event, hookContext, context, runtime);
-          return this.resolveHookDecision(event.type, hookResult, mapCadenceDecisionToStopResult);
-        }
-        case 'agent_error': {
-          const hookResult = await this.runControlHooks<'agent_error'>(event, hookContext, context, runtime);
-          return this.resolveHookDecision(event.type, hookResult, mapAgentErrorDecisionToStopResult);
-        }
-        case 'work_item_completed': {
-          const hookResult = await this.runControlHooks<'work_item_completed'>(event, hookContext, context, runtime);
-          return this.resolveHookDecision(event.type, hookResult, mapWorkItemDecisionToStopResult);
-        }
+        case 'goal_state_reached':
+          return this.runMappedStopHookDecision<'goal_state_reached'>({
+            event,
+            hookContext,
+            context,
+            runtime,
+            mapper: mapQualityDecisionToStopResult,
+          });
+        case 'bounds_exceeded':
+          return this.runMappedStopHookDecision<'bounds_exceeded'>({
+            event,
+            hookContext,
+            context,
+            runtime,
+            mapper: mapBoundsDecisionToStopResult,
+          });
+        case 'user_input_required':
+          return this.runMappedStopHookDecision<'user_input_required'>({
+            event,
+            hookContext,
+            context,
+            runtime,
+            mapper: mapPromptDecisionToStopResult,
+          });
+        case 'cadence_audit':
+          return this.runMappedStopHookDecision<'cadence_audit'>({
+            event,
+            hookContext,
+            context,
+            runtime,
+            mapper: mapCadenceDecisionToStopResult,
+          });
+        case 'agent_error':
+          return this.runMappedStopHookDecision<'agent_error'>({
+            event,
+            hookContext,
+            context,
+            runtime,
+            mapper: mapAgentErrorDecisionToStopResult,
+          });
+        case 'work_item_completed':
+          return this.runMappedStopHookDecision<'work_item_completed'>({
+            event,
+            hookContext,
+            context,
+            runtime,
+            mapper: mapWorkItemDecisionToStopResult,
+          });
         case 'user_stopped':
         case 'transient_error':
           return null;
