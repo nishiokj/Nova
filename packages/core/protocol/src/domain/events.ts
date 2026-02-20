@@ -102,7 +102,7 @@ export interface CadenceAuditEvent extends ControlEventBase {
 
 export interface AgentErrorEvent extends ControlEventBase {
   type: 'agent_error';
-  errorType: 'exception' | 'invalid_action' | 'no_action' | 'stagnation';
+  errorType: 'exception' | 'invalid_action' | 'no_action';
   error: string;
   stack?: string;
   metrics: ExecutionMetrics;
@@ -361,7 +361,7 @@ export function createCadenceAuditEvent(
 export function createAgentErrorEvent(
   sessionKey: string,
   workId: string,
-  errorType: 'exception' | 'invalid_action' | 'no_action' | 'stagnation',
+  errorType: 'exception' | 'invalid_action' | 'no_action',
   error: string,
   metrics: ExecutionMetrics,
   stack?: string

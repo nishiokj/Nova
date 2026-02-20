@@ -23,7 +23,7 @@ import {
   getAgentPrompt,
   buildAgentConfig,
 } from 'agent';
-import { Effect } from 'effect';
+import { Effect, Layer, ManagedRuntime } from 'effect';
 import os from 'os';
 import { execSync } from 'child_process';
 import { randomUUID } from 'crypto';
@@ -1575,7 +1575,7 @@ export class AgentHarness {
     };
 
     try {
-      await Effect.runPromise(publishRuntimeControl(active.controlQueue, {
+      await active.executionRuntime.runPromise(publishRuntimeControl(active.controlQueue, {
         action: 'cancel',
         runId: active.requestId,
         cancellation,
@@ -1733,13 +1733,14 @@ export class AgentHarness {
     this.pruneSessionStores('run');
     const store = this.ensureSessionHydrated(sessionKey, { workingDir, includeUserPreferences: true });
     const controlQueue = Effect.runSync(makeRuntimeControlQueue());
+    const executionRuntime = ManagedRuntime.make(Layer.empty);
 
     const sendingMessage = 'Processing request...';
     eventQueue.push(createStatusEvent('sending', sendingMessage));
     emit(createEvent('harness_status', { state: 'sending', message: sendingMessage }));
 
     // Attempt to mark execution as started; if another run is active, queue instead.
-    if (!store.startExecution(requestId, controlQueue)) {
+    if (!store.startExecution(requestId, controlQueue, executionRuntime)) {
       this.logger.info('Message received during active execution, queueing for agent', {
         sessionKey,
         requestId,
@@ -1885,7 +1886,8 @@ export class AgentHarness {
           effectiveWorkingDir,
           store,
           hookRegistry,
-          controlQueue
+          controlQueue,
+          executionRuntime
         );
         const responseContent = result.finalText.trim().length > 0
           ? result.finalText
@@ -2391,7 +2393,8 @@ export class AgentHarness {
     workingDir?: string,
     store?: SessionStore,
     hookRegistry?: UnifiedHookRegistry,
-    controlQueue?: RuntimeControlQueue
+    controlQueue?: RuntimeControlQueue,
+    executionRuntime?: ManagedRuntime.ManagedRuntime<never, never>
   ): Promise<AgentRunResult> {
     const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
     const hooks = this.createAgentHooks(context.sessionKey, requestId, effectiveWorkingDir, emit);
@@ -2465,6 +2468,7 @@ export class AgentHarness {
       agentType,
       cwd: effectiveWorkingDir,
       runtime,
+      executionRuntime,
     });
     profiler.asyncEnd(`orchestrator:${agentType}`, asyncId, 'orchestrator', { toolCalls: result.metrics.totalToolCalls });
 

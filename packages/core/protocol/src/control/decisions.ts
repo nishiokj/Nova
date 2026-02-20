@@ -123,7 +123,7 @@ export function isCadenceStopWorkItem(
 }
 
 // ============================================
-// AGENT ERROR (agent_error, invalid_action, no_action, stagnation)
+// AGENT ERROR (agent_error, invalid_action, no_action)
 // ============================================
 
 /**

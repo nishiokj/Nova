@@ -2,6 +2,7 @@ import { ContextWindow } from 'context';
 import type { GraphDManager } from 'graphd';
 import type { ContextWindowSnapshot, RunControlMetadata, SessionPermissionState } from 'types';
 import type { ModelSelection } from 'agent';
+import type { ManagedRuntime } from 'effect';
 import type { RuntimeControlQueue } from 'runtime';
 import { PermissionChecker } from './permissions.js';
 import path from 'path';
@@ -90,6 +91,7 @@ export interface AsyncRunInfo {
 export interface SessionExecutionHandle {
   requestId: string;
   controlQueue: RuntimeControlQueue;
+  executionRuntime: ManagedRuntime.ManagedRuntime<never, never>;
   runControl: RunControlMetadata;
   startedAt: number;
   completion: Promise<void>;
@@ -112,6 +114,7 @@ export class SessionStore {
   private executingRequestId: string | null = null;
   private queuedUserMessages: Array<{ requestId: string; message: string }> = [];
   private executionControlQueue: RuntimeControlQueue | null = null;
+  private executionRuntime: ManagedRuntime.ManagedRuntime<never, never> | null = null;
   private executionRunControl: RunControlMetadata = { state: 'running' };
   private executionCompletion: Promise<void> | null = null;
   private executionCompletionResolver: (() => void) | null = null;
@@ -390,6 +393,8 @@ export class SessionStore {
     this.executionCompletionResolver = null;
     this.executionCompletion = null;
     this.executionControlQueue = null;
+    this.executionRuntime?.dispose();
+    this.executionRuntime = null;
     this.executionRunControl = { state: 'running' };
     this.executingRequestId = null;
   }
@@ -509,12 +514,13 @@ export class SessionStore {
    * Mark that an orchestrator is executing for this session.
    * Returns false if there's already an active execution (caller should queue message instead).
    */
-  startExecution(requestId: string, controlQueue: RuntimeControlQueue): boolean {
+  startExecution(requestId: string, controlQueue: RuntimeControlQueue, executionRuntime: ManagedRuntime.ManagedRuntime<never, never>): boolean {
     if (this.executingRequestId !== null) {
       return false;
     }
     this.executingRequestId = requestId;
     this.executionControlQueue = controlQueue;
+    this.executionRuntime = executionRuntime;
     this.executionRunControl = { state: 'running' };
     this.executionCompletion = new Promise((resolve) => {
       this.executionCompletionResolver = resolve;
@@ -540,6 +546,7 @@ export class SessionStore {
     if (
       this.executingRequestId === null ||
       this.executionControlQueue === null ||
+      this.executionRuntime === null ||
       this.executionCompletion === null
     ) {
       return null;
@@ -547,6 +554,7 @@ export class SessionStore {
     return {
       requestId: this.executingRequestId,
       controlQueue: this.executionControlQueue,
+      executionRuntime: this.executionRuntime,
       runControl: {
         state: this.executionRunControl.state,
         cancellation: this.executionRunControl.cancellation
@@ -615,6 +623,8 @@ export class SessionStore {
     this.executionCompletionResolver = null;
     this.executionCompletion = null;
     this.executionControlQueue = null;
+    this.executionRuntime?.dispose();
+    this.executionRuntime = null;
     this.executionRunControl = { state: 'running' };
     this.executingRequestId = null;
     const queued = this.queuedUserMessages;
