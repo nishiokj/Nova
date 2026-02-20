@@ -260,7 +260,7 @@ function main() {
         mode: 'custom_image',
         custom_image: {
           image: args.image,
-          entrypoint: ['node', '/opt/rex/scripts/agentlab/run_agent_loop_trial.mjs'],
+          entrypoint: ['bun', '/opt/rex/packages/infra/harness-daemon/bin/rex.js', 'run-agent-loop'],
         },
         overrides: {
           env: {

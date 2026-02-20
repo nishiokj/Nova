@@ -185,7 +185,7 @@ Source files:
 - Experiment builder: `scripts/agentlab/build_swebench_curated_ab_experiment.mjs`
 - Run script: `scripts/agentlab/run_swebench_curated_ab.sh`
 - Agent image build script: `scripts/agentlab/build_agent_image.sh`
-- Agent-loop entrypoint adapter: `scripts/agentlab/run_agent_loop_trial.mjs`
+- Agent-loop entrypoint: `packages/infra/harness-daemon/src/cli/run_agent_loop.ts` (`rex run-agent-loop`)
 - Agent runtime Dockerfile: `Dockerfile.rex-harness`
 - Curated dataset: `.lab/experiments/data/swebench_lite_curated.task_boundary_v1.jsonl`
 

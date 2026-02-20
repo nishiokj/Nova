@@ -500,13 +500,7 @@ export class Orchestrator {
     let error: string | undefined;
     try {
       await Effect.runPromise(
-        Effect.tryPromise({
-          try: () => params.handler(params.signal),
-          catch: (err) =>
-            err instanceof Error
-              ? err
-              : new Error(String(err)),
-        }).pipe(
+        Effect.promise(() => params.handler(params.signal)).pipe(
           Effect.timeoutFail({
             duration: timeoutMs,
             onTimeout: () => new Error('hook_timeout'),
@@ -576,43 +570,34 @@ export class Orchestrator {
     runtime?: OrchestratorRuntime
   ): Effect.Effect<OrchestratorResult, never> {
     const startedAt = Date.now();
-    return Effect.gen(this, function* () {
-      const executionOutcome = yield* Effect.either(
+    return Effect.acquireUseRelease(
+      Effect.sync(() => runtime?.onStart?.(context)),
+      () =>
         Effect.tryPromise({
-          try: async () => {
-            const cleanup = runtime?.onStart?.(context as ContextWindow);
-            try {
-              return await this.executeInner(context, goal, agentType, cwd, runtime);
-            } finally {
-              if (typeof cleanup === 'function') {
-                cleanup();
-              }
-            }
-          },
+          try: () => this.executeInner(context, goal, agentType, cwd, runtime),
           catch: (error) => error,
-        })
-      );
-
-      if (executionOutcome._tag === 'Right') {
-        return executionOutcome.right;
-      }
-
-      const error = executionOutcome.left;
-      const message = error instanceof Error ? error.message : String(error);
-      this.log('error', 'Orchestrator execution failed', { goal, agentType, error: message });
-      return this.createResult({
-        success: false,
-        response: '',
-        error: message,
-        terminationReason: 'agent_error',
-        metrics: {
-          iterations: 0,
-          totalLlmCalls: 0,
-          totalToolCalls: 0,
-          durationMs: Date.now() - startedAt,
-        },
-      });
-    });
+        }),
+      (cleanup) => Effect.sync(() => {
+        if (typeof cleanup === 'function') cleanup();
+      })
+    ).pipe(
+      Effect.catchAll((error) => Effect.sync(() => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.log('error', 'Orchestrator execution failed', { goal, agentType, error: message });
+        return this.createResult({
+          success: false,
+          response: '',
+          error: message,
+          terminationReason: 'agent_error',
+          metrics: {
+            iterations: 0,
+            totalLlmCalls: 0,
+            totalToolCalls: 0,
+            durationMs: Date.now() - startedAt,
+          },
+        });
+      }))
+    );
   }
 
   /**
