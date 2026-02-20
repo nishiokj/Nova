@@ -2229,8 +2229,7 @@ export class Orchestrator {
       }
       case 'agent_error':
       case 'invalid_action':
-      case 'no_action':
-      case 'stagnation': {
+      case 'no_action': {
         const errorType = terminationReason === 'agent_error'
           ? 'exception'
           : terminationReason;
@@ -2653,10 +2652,9 @@ export class Orchestrator {
       return this.handleObserverWorkItemStopped(params);
     }
 
-    // --- Continuable errors: no_action, invalid_action, stagnation ---
+    // --- Continuable errors: no_action, invalid_action ---
     if (result.terminationReason === 'no_action' ||
-        result.terminationReason === 'invalid_action' ||
-        result.terminationReason === 'stagnation') {
+        result.terminationReason === 'invalid_action') {
       return this.handleContinuableError(params, result.terminationReason);
     }
 
@@ -2881,7 +2879,7 @@ export class Orchestrator {
   }
 
   /**
-   * Handle continuable errors (no_action, invalid_action, stagnation) - unique: inline deferred work check.
+   * Handle continuable errors (no_action, invalid_action) - unique: inline deferred work check.
    */
   private async handleContinuableError(
     params: CheckTerminationParams,

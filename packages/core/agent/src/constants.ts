@@ -8,8 +8,6 @@
  * Tool execution limits and thresholds.
  */
 export const TOOL_LIMITS = {
-  /** Max identical tool calls before stagnation detection */
-  MAX_IDENTICAL_CALLS: 2,
   /** Max output length for general tools (chars) */
   MAX_OUTPUT_LENGTH: 8000,
   /** Max output length for file reads (chars) - higher to accommodate large files */

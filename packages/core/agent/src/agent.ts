@@ -41,7 +41,7 @@ import type {
 } from './types.js';
 import { noopEmit, noopHookQueue } from './types.js';
 import type { AgentRegistry } from './agent-registry.js';
-import { TOOL_LIMITS, truncateToolOutput, isRefusal } from './constants.js';
+import { truncateToolOutput, isRefusal } from './constants.js';
 import { DEFAULT_AGENT_BUDGET } from './types.js';
 
 /**
@@ -1082,11 +1082,6 @@ export class Agent {
       );
 
       const localReadFiles = new Set(globalContext.getReadFilesArray());
-      const toolRepeatState = {
-        lastKey: '',
-        lastOutput: '',
-        repeats: 0,
-      };
 
       // Auto-read target files
       if (workItem.targetPaths && workItem.targetPaths.length > 0) {
@@ -1309,7 +1304,6 @@ export class Agent {
             workItem,
             cwd,
             workItem.workId,
-            toolRepeatState,
             signal,
             runControl
           )
@@ -1952,7 +1946,6 @@ export class Agent {
     workItem: WorkItem,
     cwd: string,
     workItemId?: string,
-    toolRepeatState?: { lastKey: string; lastOutput: string; repeats: number },
     signal?: AbortSignal,
     runControl?: AgentRunParams['runControl']
   ): Promise<void> {
@@ -2059,29 +2052,6 @@ export class Agent {
         timestamp: Date.now(),
         workItemId: itemWorkId,
       });
-
-      if (toolRepeatState) {
-        const argsKey = JSON.stringify(call.arguments ?? {});
-        const outputKey = toolResult.isSuccess
-          ? (toolResult.output ?? '')
-          : `error:${toolResult.error ?? ''}`;
-        const signature = `${call.name}:${argsKey}`;
-        const outputSample = outputKey.slice(0, 2000);
-
-        if (signature === toolRepeatState.lastKey && outputSample === toolRepeatState.lastOutput) {
-          toolRepeatState.repeats += 1;
-        } else {
-          toolRepeatState.lastKey = signature;
-          toolRepeatState.lastOutput = outputSample;
-          toolRepeatState.repeats = 0;
-        }
-
-        if (toolRepeatState.repeats >= TOOL_LIMITS.MAX_IDENTICAL_CALLS) {
-          result.terminationReason = 'stagnation';
-          result.error = `Repeated identical tool call without progress: ${call.name}`;
-          return true;
-        }
-      }
 
       // Don't propagate sub-agent user input requests
       if (isAgentTool && result.needsUserInput) {

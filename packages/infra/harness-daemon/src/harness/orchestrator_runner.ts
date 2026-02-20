@@ -1,6 +1,6 @@
 import type { AgentHooks, AgentRegistry, EventEmitCallback, ModelSelection } from 'agent';
 import type { ContextWindow } from 'context';
-import { Effect } from 'effect';
+import { Effect, type ManagedRuntime } from 'effect';
 import type { LLMAdapter } from 'llm';
 import {
   Orchestrator,
@@ -26,6 +26,7 @@ export interface OrchestratorRunParams {
   agentType: string;
   cwd: string;
   runtime?: OrchestratorRuntime;
+  executionRuntime?: ManagedRuntime.ManagedRuntime<never, never>;
 }
 
 export interface OrchestratorRunner {
@@ -53,6 +54,8 @@ export class DefaultOrchestratorRunner implements OrchestratorRunner {
       params.cwd,
       params.runtime
     ) as Effect.Effect<OrchestratorResult, never>;
-    return Effect.runPromise(executeEffect);
+    return params.executionRuntime
+      ? params.executionRuntime.runPromise(executeEffect)
+      : Effect.runPromise(executeEffect);
   }
 }

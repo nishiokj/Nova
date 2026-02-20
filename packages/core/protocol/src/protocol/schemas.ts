@@ -25,7 +25,6 @@ export const TerminationReasonSchema = z.enum([
   'invalid_action',
   'no_action',
   'refusal',
-  'stagnation',
   'observer_stopped',
   'observer_work_item_stopped',
   'cadence_audit',

@@ -34,7 +34,6 @@ export type TerminationReason =
   | 'invalid_action'
   | 'no_action'
   | 'refusal'
-  | 'stagnation'
 
   // Observer intervention
   | 'observer_stopped'
@@ -79,7 +78,6 @@ export function getTerminationCategory(reason: TerminationReason): TerminationCa
     case 'invalid_action':
     case 'no_action':
     case 'refusal':
-    case 'stagnation':
       return 'agent_error';
 
     case 'observer_stopped':
@@ -106,7 +104,6 @@ export function isBlockable(reason: TerminationReason): boolean {
     case 'user_input_required':
     case 'agent_error':
     case 'cadence_audit':
-    case 'stagnation':
       return true;
 
     // Non-blockable - must be honored
@@ -135,7 +132,6 @@ export function isRetryable(reason: TerminationReason): boolean {
     case 'circuit_open':
     case 'timeout':
     case 'agent_error':
-    case 'stagnation':
       return true;
 
     case 'goal_state_reached':
@@ -174,7 +170,6 @@ export const ALL_TERMINATION_REASONS: readonly TerminationReason[] = [
   'invalid_action',
   'no_action',
   'refusal',
-  'stagnation',
   'observer_stopped',
   'observer_work_item_stopped',
   'cadence_audit',

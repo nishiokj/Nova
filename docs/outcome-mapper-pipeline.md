@@ -98,7 +98,7 @@ bun scripts/agentlab/grade_cli.ts \
 ```
 
 Per trial:
-1. Read `trial_input.json` (task data)
+1. Read the task payload artifact (`task.json` / runner task input file)
 2. Read `out/trial_emissions.json` (raw emissions)
 3. `mapper.map(emissions, task)` → `MappedOutcome`
 4. `grader.grade(outcome, task)` → `GradeResult`
@@ -141,7 +141,7 @@ Major changes:
 - **Capture workspace diff**: After harness completes, run `git diff` (and `git diff <base_commit>..HEAD` for committed changes) in the workspace directory
 - **Write `trial_emissions.json`**: Full structured emissions as a trial artifact
 - **Write `model.patch`**: The workspace diff as a standalone artifact file
-- **Enriched `trial_output.json`**: Populate the `metrics` object with real data (filesModifiedCount, diffLinesAdded, diffLinesDeleted, cachedTokens, uniqueToolsUsed), populate `artifacts` array, use `ext` for grading hooks
+- **Enriched `result.json`**: Populate the `metrics` object with real data (filesModifiedCount, diffLinesAdded, diffLinesDeleted, cachedTokens, uniqueToolsUsed), populate `artifacts` array, use `ext` for grading hooks
 
 ### 10. `scripts/agentlab/run_swebench_lite_experiment_sdk.mjs` — Wire new metrics
 
@@ -177,7 +177,7 @@ Steps 1-2 have no dependencies and can be parallel. Step 3 depends on 1+2. Steps
 
 **Why grading is a separate CLI, not part of the runner**: The runner executes in a container with the agent. The grader may need a different environment (Python for SWE-bench, network for LLM judge). Separation also enables re-grading without re-running trials.
 
-**Why `trial_emissions.json` is separate from `trial_output.json`**: The SDK expects `trial_output.json` in a fixed schema. Emissions are our internal rich format. Keeping them separate means the SDK contract is maintained while we have arbitrarily rich data for mappers.
+**Why `trial_emissions.json` is separate from `result.json`**: The runner expects `result.json` (`agent_result_v1`) in a fixed schema. Emissions are our internal rich format. Keeping them separate means the contract is maintained while we have arbitrarily rich data for mappers.
 
 **Why workspace diff captures both committed and uncommitted changes**: The agent may or may not commit. `git diff` captures unstaged changes. `git diff <base_commit>..HEAD` captures committed changes. The runner captures both concatenated.
 
@@ -185,7 +185,7 @@ Steps 1-2 have no dependencies and can be parallel. Step 3 depends on 1+2. Steps
 
 ## Verification
 
-1. **Token bug fix**: Run a trial, verify `trial_output.json` has non-zero `tokens_in`/`tokens_out`
+1. **Token bug fix**: Run a trial, verify `result.json` has non-zero `tokens_in`/`tokens_out`
 2. **Full collection**: Run a trial, verify `out/trial_emissions.json` contains populated `llmCalls`, `toolCalls`, `filesModified` arrays
 3. **Workspace diff**: Run a trial against a SWE-bench task, verify `out/model.patch` contains the agent's diff
 4. **Mapper**: Run `grade_cli.ts --mapper swebench` on a completed run, verify `mapped_outcome.json` has correct `instance_id` and `model_patch`
