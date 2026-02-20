@@ -12,7 +12,7 @@
  * - bridge command round trip
  * - event streaming (SSE connect frame)
  * - session operations
- * - permissions + escalation route flow
+ * - permissions route flow
  */
 
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
@@ -312,17 +312,6 @@ async function main(): Promise<void> {
       },
     });
     assertOk(permissionResponse.data.success === true, 'Permission response forwarding failed');
-
-    // Escalation flow route
-    const missingEscalation = await fetchJson(
-      `${controlPlaneBase}/control-plane/cockpit/escalations/smoke-missing/resolve`,
-      {
-        method: 'POST',
-        body: { resolvedBy: 'user', freeformResponse: 'smoke check' },
-        expectedStatus: 404,
-      }
-    );
-    assertOk(missingEscalation.data.success === false, 'Missing escalation resolve should fail with 404');
 
     // Event streaming (SSE)
     const sseResponse = await fetch(`${controlPlaneBase}/control-plane/cockpit/events/stream`);

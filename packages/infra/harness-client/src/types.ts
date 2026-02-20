@@ -211,7 +211,7 @@ export interface ControlPlaneDispatchCommandData extends CommandDataBase {
 export interface ControlPlaneStopCommandData extends CommandDataBase {
   session_key: string;
   note?: string;
-  action?: 'pause' | 'resume' | 'cancel';
+  action?: 'cancel';
   timeout_ms?: number;
   working_dir?: string;
 }

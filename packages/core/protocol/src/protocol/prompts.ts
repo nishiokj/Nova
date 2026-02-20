@@ -89,7 +89,7 @@ Periodic audit of agent progress. Choose one action:
 - { "action": "inject_guidance", "message": "..." } - Add helpful guidance
 - { "action": "realign", "guidance": "..." } - Redirect the agent
 - { "action": "split", "workItems": [...] } - Split the work
-- { "action": "stop_work_item", "reason": "...", "escalationId"?: "..." } - Stop only this work item
+- { "action": "stop_work_item", "reason": "..." } - Stop only this work item
 - { "action": "stop", "reason": "..." } - Stop the full session
 
 Consider:

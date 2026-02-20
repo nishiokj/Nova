@@ -16,6 +16,7 @@ import {
   type HookPolicy,
   type StatePatch,
 } from 'protocol';
+import { Effect } from 'effect';
 import { isBlockableEffectEvent, type DecisionEventType, type EffectEventType } from './catalog.js';
 import type {
   EffectOutcomeFor,
@@ -25,6 +26,8 @@ import type {
   UnifiedEffectHookRegistration,
 } from './contracts.js';
 import type { SessionScopedUnifiedHookRegistry, UnifiedHookRegistry } from './registry.js';
+
+const HOOK_TIMEOUT_SENTINEL = '__unified_hook_timeout__';
 
 export interface UnifiedHookFailure {
   hookId: string;
@@ -89,324 +92,330 @@ export interface UnifiedEffectExecutionResult<E extends EffectEventType> {
   audit: UnifiedEffectAuditEntry[];
 }
 
-export async function runUnifiedDecisionHooks<E extends DecisionEventType>(
+export function runUnifiedDecisionHooks<E extends DecisionEventType>(
   event: EventFor<E>,
   context: HookContext,
   registry: UnifiedHookRegistry
-): Promise<UnifiedDecisionExecutionResult<DecisionFor<E>>> {
+): Effect.Effect<UnifiedDecisionExecutionResult<DecisionFor<E>>, never> {
   const hooks = registry.getDecisionHooks(event.type as E);
   if (hooks.length === 0) {
-    return {
+    return Effect.succeed({
       status: 'no_hooks',
       decision: null,
       patches: [],
       failures: [],
       hasCriticalFailure: false,
       audit: [],
-    };
+    });
   }
 
   const groups = groupByPriority(hooks);
   const priorities = Array.from(groups.keys()).sort((a, b) => a - b);
 
-  let decision: DecisionFor<E> | null = null;
-  const patches: StatePatch[] = [];
-  const failures: UnifiedHookFailure[] = [];
-  const audit: UnifiedDecisionAuditEntry[] = [];
-  let hasCriticalFailure = false;
+  return Effect.gen(function* () {
+    let decision: DecisionFor<E> | null = null;
+    const patches: StatePatch[] = [];
+    const failures: UnifiedHookFailure[] = [];
+    const audit: UnifiedDecisionAuditEntry[] = [];
+    let hasCriticalFailure = false;
 
-  for (const priority of priorities) {
-    const group = groups.get(priority)!;
-    const results = await Promise.all(
-      group.map((hook) => executeDecisionHookWithPolicy(hook, event, context))
-    );
+    for (const priority of priorities) {
+      const group = groups.get(priority)!;
+      const results = yield* Effect.forEach(
+        group,
+        (hook) => executeDecisionHookWithPolicy(hook, event, context),
+        { concurrency: 'unbounded' }
+      );
 
-    for (const result of results) {
-      audit.push(result.audit);
+      for (const result of results) {
+        audit.push(result.audit);
 
-      if (isSuccess(result.outcome)) {
-        if (decision === null) {
-          decision = result.outcome.decision as DecisionFor<E>;
+        if (isSuccess(result.outcome)) {
+          if (decision === null) {
+            decision = result.outcome.decision as DecisionFor<E>;
+          }
+          if (result.outcome.patches) {
+            patches.push(...result.outcome.patches);
+          }
+          continue;
         }
-        if (result.outcome.patches) {
-          patches.push(...result.outcome.patches);
+
+        if (isSkip(result.outcome)) {
+          continue;
         }
-        continue;
+
+        if (isDeny(result.outcome) || isFailed(result.outcome) || isTimeout(result.outcome)) {
+          const error = isDeny(result.outcome)
+            ? result.outcome.reason
+            : isFailed(result.outcome)
+              ? result.outcome.error
+              : 'timeout';
+
+          failures.push({
+            hookId: result.hook.id,
+            source: result.hook.source,
+            error,
+            policy: result.hook.policy,
+          });
+
+          if (result.hook.criticality === 'critical' || isCriticalPolicy(result.hook.policy)) {
+            hasCriticalFailure = true;
+          }
+        }
       }
 
-      if (isSkip(result.outcome)) {
-        continue;
-      }
-
-      if (isDeny(result.outcome) || isFailed(result.outcome) || isTimeout(result.outcome)) {
-        const error = isDeny(result.outcome)
-          ? result.outcome.reason
-          : isFailed(result.outcome)
-            ? result.outcome.error
-            : 'timeout';
-
-        failures.push({
-          hookId: result.hook.id,
-          source: result.hook.source,
-          error,
-          policy: result.hook.policy,
-        });
-
-        if (result.hook.criticality === 'critical' || isCriticalPolicy(result.hook.policy)) {
-          hasCriticalFailure = true;
-        }
+      if (hasCriticalFailure) {
+        break;
       }
     }
 
-    if (hasCriticalFailure) {
-      break;
+    if (decision !== null) {
+      return {
+        status: 'decision' as const,
+        decision,
+        patches,
+        failures,
+        hasCriticalFailure,
+        audit,
+      };
     }
-  }
 
-  if (decision !== null) {
     return {
-      status: 'decision',
-      decision,
+      status: 'no_decision' as const,
+      decision: null,
       patches,
       failures,
       hasCriticalFailure,
       audit,
     };
-  }
-
-  return {
-    status: 'no_decision',
-    decision: null,
-    patches,
-    failures,
-    hasCriticalFailure,
-    audit,
-  };
+  });
 }
 
-export async function runUnifiedDecisionHooksForSession<E extends DecisionEventType>(
+export function runUnifiedDecisionHooksForSession<E extends DecisionEventType>(
   sessionKey: string,
   event: EventFor<E>,
   context: HookContext,
   sessionRegistry: SessionScopedUnifiedHookRegistry
-): Promise<UnifiedDecisionExecutionResult<DecisionFor<E>>> {
+): Effect.Effect<UnifiedDecisionExecutionResult<DecisionFor<E>>, never> {
   const registry = sessionRegistry.getSessionRegistry(sessionKey);
   if (!registry) {
-    return {
+    return Effect.succeed({
       status: 'no_hooks',
       decision: null,
       patches: [],
       failures: [],
       hasCriticalFailure: false,
       audit: [],
-    };
+    });
   }
+
   return runUnifiedDecisionHooks(event, context, registry);
 }
 
-export async function runUnifiedEffectHooks<E extends EffectEventType>(
+export function runUnifiedEffectHooks<E extends EffectEventType>(
   event: { type: E } & Record<string, unknown>,
   context: UnifiedEffectContext,
   registry: UnifiedHookRegistry
-): Promise<UnifiedEffectExecutionResult<E>> {
+): Effect.Effect<UnifiedEffectExecutionResult<E>, never> {
   const hooks = registry.getEffectHooks(event.type);
   if (hooks.length === 0) {
-    return {
+    return Effect.succeed({
       status: 'completed',
       outcomes: [],
       failures: [],
       audit: [],
-    };
+    });
   }
 
   const groups = groupByPriority(hooks);
   const priorities = Array.from(groups.keys()).sort((a, b) => a - b);
 
-  const outcomes: UnifiedEffectExecutionResult<E>['outcomes'] = [];
-  const failures: UnifiedHookFailure[] = [];
-  const audit: UnifiedEffectAuditEntry[] = [];
-  let blockedBy: UnifiedEffectExecutionResult<E>['blockedBy'];
+  return Effect.gen(function* () {
+    const outcomes: UnifiedEffectExecutionResult<E>['outcomes'] = [];
+    const failures: UnifiedHookFailure[] = [];
+    const audit: UnifiedEffectAuditEntry[] = [];
+    let blockedBy: UnifiedEffectExecutionResult<E>['blockedBy'];
 
-  for (const priority of priorities) {
-    const group = groups.get(priority)!;
-    const results = await Promise.all(
-      group.map((hook) => executeEffectHookWithPolicy(hook, event, context))
-    );
+    for (const priority of priorities) {
+      const group = groups.get(priority)!;
+      const results = yield* Effect.forEach(
+        group,
+        (hook) => executeEffectHookWithPolicy(hook, event, context),
+        { concurrency: 'unbounded' }
+      );
 
-    for (const result of results) {
-      audit.push(result.audit);
+      for (const result of results) {
+        audit.push(result.audit);
 
-      if (result.error) {
-        failures.push({
+        if (result.error) {
+          failures.push({
+            hookId: result.hook.id,
+            source: result.hook.source,
+            error: result.error,
+            policy: result.policy,
+          });
+
+          if (!blockedBy && isCriticalPolicy(result.policy)) {
+            blockedBy = {
+              hookId: result.hook.id,
+              source: result.hook.source,
+              reason: result.error,
+            };
+          }
+          continue;
+        }
+
+        outcomes.push({
           hookId: result.hook.id,
           source: result.hook.source,
-          error: result.error,
-          policy: result.policy,
+          outcome: result.outcome,
         });
 
-        if (!blockedBy && isCriticalPolicy(result.policy)) {
+        if (
+          !blockedBy
+          && isBlockableEffectEvent(event.type)
+          && result.outcome.kind === 'block'
+        ) {
           blockedBy = {
             hookId: result.hook.id,
             source: result.hook.source,
-            reason: result.error,
+            reason: result.outcome.reason,
           };
         }
-        continue;
       }
 
-      outcomes.push({
-        hookId: result.hook.id,
-        source: result.hook.source,
-        outcome: result.outcome,
-      });
-
-      if (
-        !blockedBy
-        && isBlockableEffectEvent(event.type)
-        && result.outcome.kind === 'block'
-      ) {
-        blockedBy = {
-          hookId: result.hook.id,
-          source: result.hook.source,
-          reason: result.outcome.reason,
-        };
+      if (blockedBy) {
+        break;
       }
     }
 
-    if (blockedBy) {
-      break;
-    }
-  }
-
-  return {
-    status: blockedBy ? 'blocked' : 'completed',
-    outcomes,
-    blockedBy,
-    failures,
-    audit,
-  };
+    return {
+      status: blockedBy ? 'blocked' : 'completed',
+      outcomes,
+      blockedBy,
+      failures,
+      audit,
+    };
+  });
 }
 
-export async function runUnifiedEffectHooksForSession<E extends EffectEventType>(
+export function runUnifiedEffectHooksForSession<E extends EffectEventType>(
   sessionKey: string,
   event: { type: E } & Record<string, unknown>,
   context: UnifiedEffectContext,
   sessionRegistry: SessionScopedUnifiedHookRegistry
-): Promise<UnifiedEffectExecutionResult<E>> {
+): Effect.Effect<UnifiedEffectExecutionResult<E>, never> {
   const registry = sessionRegistry.getSessionRegistry(sessionKey);
   if (!registry) {
-    return {
+    return Effect.succeed({
       status: 'completed',
       outcomes: [],
       failures: [],
       audit: [],
-    };
+    });
   }
+
   return runUnifiedEffectHooks(event, context, registry);
 }
 
-async function executeDecisionHookWithPolicy<E extends DecisionEventType>(
+function executeDecisionHookWithPolicy<E extends DecisionEventType>(
   hook: RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>,
   event: EventFor<E>,
   context: HookContext
-): Promise<{
+): Effect.Effect<{
   hook: RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>;
   outcome: HookOutcome<DecisionFor<E>>;
   audit: UnifiedDecisionAuditEntry;
-}> {
-  const startedAt = Date.now();
-  const maxRetries = hook.idempotency === 'idempotent' ? getMaxRetries(hook.policy) : 0;
-  const policyBackoffMs = getBackoffMs(hook.policy);
+}, never> {
+  return Effect.gen(function* () {
+    const startedAt = Date.now();
+    const maxRetries = hook.idempotency === 'idempotent' ? getMaxRetries(hook.policy) : 0;
+    const policyBackoffMs = getBackoffMs(hook.policy);
 
-  let retriesAttempted = 0;
-  let outcome: HookOutcome<DecisionFor<E>> = failed('unknown error');
+    let retriesAttempted = 0;
+    let outcome: HookOutcome<DecisionFor<E>> = failed('unknown error');
 
-  while (true) {
-    try {
-      outcome = await withTimeout(
-        hook.callback(event, context),
-        hook.timeoutMs,
-        () => timeout() as HookOutcome<DecisionFor<E>>
-      );
-    } catch (error) {
-      outcome = failed(error instanceof Error ? error.message : String(error));
-    }
+    while (true) {
+      outcome = yield* executeDecisionHookAttemptEffect(hook, event, context);
 
-    if (isSuccess(outcome) || isSkip(outcome)) {
+      if (isSuccess(outcome) || isSkip(outcome)) {
+        break;
+      }
+
+      if (retriesAttempted < maxRetries) {
+        retriesAttempted += 1;
+        const backoff =
+          'backoffMs' in outcome
+            ? outcome.backoffMs
+            : policyBackoffMs * retriesAttempted;
+        yield* Effect.sleep(backoff);
+        continue;
+      }
+
       break;
     }
 
-    if (retriesAttempted < maxRetries) {
-      retriesAttempted += 1;
-      const backoff = 'backoffMs' in outcome ? outcome.backoffMs : policyBackoffMs * retriesAttempted;
-      await sleep(backoff);
-      continue;
-    }
-
-    break;
-  }
-
-  return {
-    hook,
-    outcome,
-    audit: {
-      hookId: hook.id,
-      source: hook.source,
-      priority: hook.priority,
-      retriesAttempted,
-      startedAt,
-      completedAt: Date.now(),
+    return {
+      hook,
       outcome,
-    },
-  };
+      audit: {
+        hookId: hook.id,
+        source: hook.source,
+        priority: hook.priority,
+        retriesAttempted,
+        startedAt,
+        completedAt: Date.now(),
+        outcome,
+      },
+    };
+  });
 }
 
-async function executeEffectHookWithPolicy<E extends EffectEventType>(
+function executeEffectHookWithPolicy<E extends EffectEventType>(
   hook: RegisteredUnifiedHook<UnifiedEffectHookRegistration<E>>,
   event: { type: E } & Record<string, unknown>,
   context: UnifiedEffectContext
-): Promise<{
+): Effect.Effect<{
   hook: RegisteredUnifiedHook<UnifiedEffectHookRegistration<E>>;
   outcome: EffectOutcomeFor<E>;
   policy: HookPolicy;
   error?: string;
   audit: UnifiedEffectAuditEntry;
-}> {
-  const startedAt = Date.now();
-  const policy = hook.policy ?? { kind: 'fire_and_forget' };
-  const maxRetries = getMaxRetries(policy);
-  const backoffMs = getBackoffMs(policy);
+}, never> {
+  return Effect.gen(function* () {
+    const startedAt = Date.now();
+    const policy = hook.policy ?? { kind: 'fire_and_forget' };
+    const maxRetries = getMaxRetries(policy);
+    const backoffMs = getBackoffMs(policy);
 
-  let retriesAttempted = 0;
+    let retriesAttempted = 0;
 
-  while (true) {
-    try {
-      const outcome = await withTimeout(
-        hook.callback(event as never, context),
-        hook.timeoutMs,
-        () => ({ kind: 'skip', reason: 'timeout' } as EffectOutcomeFor<E>)
-      );
+    while (true) {
+      const attempt = yield* executeEffectHookAttemptEffect(hook, event, context);
+      if (!attempt.error) {
+        const outcome = attempt.outcome;
 
-      return {
-        hook,
-        outcome,
-        policy,
-        audit: {
-          hookId: hook.id,
-          source: hook.source,
-          priority: hook.priority,
-          retriesAttempted,
-          startedAt,
-          completedAt: Date.now(),
-          status: 'ok',
-          outcomeKind: outcome.kind,
-        },
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+        return {
+          hook,
+          outcome,
+          policy,
+          audit: {
+            hookId: hook.id,
+            source: hook.source,
+            priority: hook.priority,
+            retriesAttempted,
+            startedAt,
+            completedAt: Date.now(),
+            status: 'ok',
+            outcomeKind: outcome.kind,
+          },
+        };
+      }
+
+      const message = attempt.error;
       if (retriesAttempted < maxRetries) {
         retriesAttempted += 1;
-        await sleep(backoffMs * retriesAttempted);
+        yield* Effect.sleep(backoffMs * retriesAttempted);
         continue;
       }
 
@@ -427,7 +436,7 @@ async function executeEffectHookWithPolicy<E extends EffectEventType>(
         },
       };
     }
-  }
+  });
 }
 
 function groupByPriority<T extends { priority: number }>(items: T[]): Map<number, T[]> {
@@ -441,26 +450,60 @@ function groupByPriority<T extends { priority: number }>(items: T[]): Map<number
   return grouped;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function executeDecisionHookAttemptEffect<E extends DecisionEventType>(
+  hook: RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>,
+  event: EventFor<E>,
+  context: HookContext
+): Effect.Effect<HookOutcome<DecisionFor<E>>, never> {
+  const runEffect: Effect.Effect<HookOutcome<DecisionFor<E>>, Error> = Effect.suspend(() =>
+    hook.callback(event, context).pipe(Effect.mapError(toError))
+  ).pipe(
+    Effect.catchAllDefect((defect) => Effect.fail(toError(defect)))
+  );
+
+  return runEffect.pipe(
+    Effect.timeoutFail({
+      duration: hook.timeoutMs,
+      onTimeout: () => new Error(HOOK_TIMEOUT_SENTINEL),
+    }),
+    Effect.catchAll((error): Effect.Effect<HookOutcome<DecisionFor<E>>, never> => {
+      if (error.message === HOOK_TIMEOUT_SENTINEL) {
+        return Effect.succeed(timeout() as HookOutcome<DecisionFor<E>>);
+      }
+      return Effect.succeed(failed(error.message));
+    })
+  );
 }
 
-function withTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  onTimeout: () => T
-): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timeoutId = setTimeout(() => resolve(onTimeout()), timeoutMs);
+function executeEffectHookAttemptEffect<E extends EffectEventType>(
+  hook: RegisteredUnifiedHook<UnifiedEffectHookRegistration<E>>,
+  event: { type: E } & Record<string, unknown>,
+  context: UnifiedEffectContext
+): Effect.Effect<{ outcome: EffectOutcomeFor<E>; error?: string }, never> {
+  const runEffect: Effect.Effect<EffectOutcomeFor<E>, Error> = Effect.suspend(() =>
+    hook.callback(event as never, context).pipe(Effect.mapError(toError))
+  ).pipe(
+    Effect.catchAllDefect((defect) => Effect.fail(toError(defect)))
+  );
 
-    promise
-      .then((value) => {
-        clearTimeout(timeoutId);
-        resolve(value);
-      })
-      .catch((error) => {
-        clearTimeout(timeoutId);
-        reject(error);
+  return runEffect.pipe(
+    Effect.timeoutFail({
+      duration: hook.timeoutMs,
+      onTimeout: () => new Error(HOOK_TIMEOUT_SENTINEL),
+    }),
+    Effect.map((outcome) => ({ outcome })),
+    Effect.catchAll((error): Effect.Effect<{ outcome: EffectOutcomeFor<E>; error?: string }, never> => {
+      if (error.message === HOOK_TIMEOUT_SENTINEL) {
+        return Effect.succeed({ outcome: { kind: 'skip', reason: 'timeout' } as EffectOutcomeFor<E> });
+      }
+      return Effect.succeed({
+        outcome: { kind: 'skip', reason: error.message } as EffectOutcomeFor<E>,
+        error: error.message,
       });
-  });
+    })
+  );
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }

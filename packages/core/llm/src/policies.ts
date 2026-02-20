@@ -109,8 +109,8 @@ export function calculateBackoff(
   return Math.max(0, delay + jitter);
 }
 
-export function sleep(ms: number): Promise<void> {
-  return Effect.runPromise(Effect.sleep(ms));
+export function sleep(ms: number): Effect.Effect<void, never> {
+  return Effect.sleep(ms);
 }
 
 export class TimeoutError extends Error {
@@ -124,20 +124,17 @@ export class TimeoutError extends Error {
 }
 
 export function withTimeout<T>(
-  promise: Promise<T>,
+  effect: Effect.Effect<T, unknown>,
   timeoutMs: number,
   operationName: string = 'Operation'
-): Promise<T> {
-  const effect = Effect.tryPromise({
-    try: () => promise,
-    catch: (error) => error instanceof Error ? error : new Error(String(error)),
-  }).pipe(
+): Effect.Effect<T, Error | TimeoutError> {
+  return effect.pipe(
+    Effect.mapError((error) => error instanceof Error ? error : new Error(String(error))),
     Effect.timeoutFail({
       duration: timeoutMs,
       onTimeout: () => new TimeoutError(`${operationName} timed out after ${timeoutMs}ms`, timeoutMs),
     })
   );
-  return Effect.runPromise(effect);
 }
 
 export function isRetryableError(error: unknown): boolean {
@@ -300,10 +297,10 @@ export interface ResilientCallOptions {
   onRetry?: (attempt: number, error: Error, delayMs: number) => void;
 }
 
-export async function resilientCall<T>(
-  fn: () => Promise<T>,
+export function resilientCall<T, E>(
+  effect: Effect.Effect<T, E>,
   options: ResilientCallOptions = {}
-): Promise<T> {
+): Effect.Effect<T, Error | CircuitOpenError | TimeoutError | RetriesExhaustedError> {
   const config: ResilienceConfig = {
     ...DEFAULT_RESILIENCE_CONFIG,
     ...options.config,
@@ -314,7 +311,7 @@ export async function resilientCall<T>(
   const { timeoutMs, operationName = 'LLM call' } = options;
 
   if (!shouldAllowRequest(state, config)) {
-    throw new CircuitOpenError(key);
+    return Effect.fail(new CircuitOpenError(key));
   }
 
   let retryCount = 0;
@@ -324,12 +321,11 @@ export async function resilientCall<T>(
       Duration.millis(calculateBackoff(typeof attempt === 'number' ? attempt : retryCount, config))
   );
 
-  const baseEffect = Effect.tryPromise({
-    try: () => fn(),
-    catch: (error) => error instanceof Error ? error : new Error(String(error)),
-  });
+  const baseEffect: Effect.Effect<T, Error> = effect.pipe(
+    Effect.mapError((error) => error instanceof Error ? error : new Error(String(error)))
+  );
 
-  const timedEffect = timeoutMs
+  const timedEffect: Effect.Effect<T, Error | TimeoutError> = timeoutMs
     ? baseEffect.pipe(
         Effect.timeoutFail({
           duration: timeoutMs,
@@ -338,36 +334,35 @@ export async function resilientCall<T>(
       )
     : baseEffect;
 
-  try {
-    const result = await Effect.runPromise(
-      timedEffect.pipe(
-        Effect.retry({
-          schedule: retryPolicy,
-          while: (error: Error) => {
-            const retryable = isRetryableError(error) || error instanceof TimeoutError;
-            if (retryable && retryCount < config.maxRetries) {
-              const delayMs = calculateBackoff(retryCount, config);
-              options.onRetry?.(retryCount + 1, error, delayMs);
-            }
-            retryCount++;
-            return retryable;
-          },
-        })
-      )
-    );
-    recordSuccess(state, config);
-    return result;
-  } catch (error) {
-    const lastError = error instanceof Error ? error : new Error(String(error));
-    recordFailure(state, config);
-    const exhaustedRetryable = lastError instanceof TimeoutError || isRetryableError(lastError);
-    if (!exhaustedRetryable) {
-      throw lastError;
-    }
-    throw new RetriesExhaustedError(
-      'All retries failed',
-      lastError,
-      config.maxRetries + 1
-    );
-  }
+  return timedEffect.pipe(
+    Effect.retry({
+      schedule: retryPolicy,
+      while: (error: Error) => {
+        const retryable = isRetryableError(error) || error instanceof TimeoutError;
+        if (retryable && retryCount < config.maxRetries) {
+          const delayMs = calculateBackoff(retryCount, config);
+          options.onRetry?.(retryCount + 1, error, delayMs);
+        }
+        retryCount++;
+        return retryable;
+      },
+    }),
+    Effect.tap(() => Effect.sync(() => {
+      recordSuccess(state, config);
+    })),
+    Effect.catchAll((error) => {
+      recordFailure(state, config);
+      const exhaustedRetryable = error instanceof TimeoutError || isRetryableError(error);
+      if (!exhaustedRetryable) {
+        return Effect.fail(error);
+      }
+      return Effect.fail(
+        new RetriesExhaustedError(
+          'All retries failed',
+          error instanceof Error ? error : new Error(String(error)),
+          config.maxRetries + 1
+        )
+      );
+    })
+  );
 }

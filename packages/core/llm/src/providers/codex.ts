@@ -22,6 +22,12 @@ import { Effect, Stream } from 'effect';
 import type { ProviderContext, LLMProviderAdapter } from './types.js';
 import { PartialStreamError, toLLMExecutionError } from './types.js';
 import { compileSchemaForCodex } from './schema_compiler.js';
+import {
+  CODEX_TO_REX,
+  REX_TO_CODEX,
+  formatToolForOpenAI,
+  translateCodexArgsToRex,
+} from './tool_skins.js';
 
 const DEFAULT_CODEX_REQUEST_TIMEOUT_MS = 120_000;
 const DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_MS = 600_000;
@@ -45,6 +51,8 @@ const CODEX_STREAM_IDLE_TIMEOUT_MS = parsePositiveTimeoutMs(
   process.env.CODEX_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_MS
 );
+const CODEX_TOOL_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
+const FUNCTION_PREFIX = 'functions.';
 
 // ============================================
 // CODEX PROVIDER
@@ -162,7 +170,7 @@ export class CodexProvider implements LLMProviderAdapter {
       }
     }
 
-    if (tools?.length) body.tools = this.formatTools(tools);
+    if (tools?.length) body.tools = this.formatTools(tools, config.model);
 
     // Endpoint is /responses relative to baseUrl (https://chatgpt.com/backend-api/codex)
     const url = `${config.baseUrl}/responses`;
@@ -280,11 +288,9 @@ export class CodexProvider implements LLMProviderAdapter {
 
     const addToolCall = (callId: string | undefined, name: string | undefined, args: unknown) => {
       if (!callId || !name) return;
-      toolCallsById.set(callId, {
-        id: callId,
-        name,
-        arguments: this.parseArguments(args),
-      });
+      const translated = this.parseToolCall(callId, name, args);
+      if (!translated) return;
+      toolCallsById.set(callId, translated);
     };
 
     const appendText = (text: string | undefined, itemId?: string): string | null => {
@@ -592,18 +598,21 @@ export class CodexProvider implements LLMProviderAdapter {
     };
   }
 
-  formatTools(tools: ToolDefinition[]): Record<string, unknown>[] {
-    return tools.map((tool) => ({
-      type: 'function',
-      name: tool.name,
-      description: tool.description,
-      parameters: {
-        type: 'object',
-        properties: tool.parameters.properties,
-        required: tool.parameters.required,
-        additionalProperties: tool.parameters.additionalProperties,
-      },
-    }));
+  formatTools(tools: ToolDefinition[], model?: string): Record<string, unknown>[] {
+    const effectiveModel = model ?? '';
+    const formatted: Record<string, unknown>[] = [];
+    for (const tool of tools) {
+      const skinned = formatToolForOpenAI(tool, effectiveModel);
+      if (!skinned) continue;
+      // Codex backend expects function tools in this path; keep apply_patch in JSON mode.
+      if (tool.name === 'apply_patch' && skinned.type === 'custom') {
+        const fallback = formatToolForOpenAI(tool, 'gpt-3.5-turbo');
+        if (fallback) formatted.push(fallback);
+        continue;
+      }
+      formatted.push(skinned);
+    }
+    return formatted;
   }
 
   // ============================================
@@ -622,13 +631,33 @@ export class CodexProvider implements LLMProviderAdapter {
 
       if (type === 'function_call') {
         const callId = this.pickFirstString(item.call_id, item.callId, item.id);
-        const name = typeof item.name === 'string' ? item.name : undefined;
+        const rawName = this.pickFirstString(item.name);
+        const mappedName = rawName ? (REX_TO_CODEX[rawName] ?? rawName) : undefined;
+        const name = this.normalizeCodexToolName(mappedName);
         if (!callId || !name) continue;
+        let args = item.arguments as string | Record<string, unknown> | undefined;
+
+        if (name === 'apply_patch' && typeof args === 'string') {
+          try {
+            const parsed = JSON.parse(args) as Record<string, unknown>;
+            if (parsed && typeof parsed.input === 'string') {
+              args = parsed.input;
+            }
+          } catch {
+            // Keep raw patch text as-is.
+          }
+        } else if (name === 'apply_patch' && typeof args === 'object' && args !== null) {
+          const argsObj = args as Record<string, unknown>;
+          if (typeof argsObj.input === 'string') {
+            args = argsObj.input;
+          }
+        }
+
         input.push({
           type: 'function_call',
           call_id: callId,
           name,
-          arguments: item.arguments as string | Record<string, unknown> | undefined,
+          arguments: args,
         });
         continue;
       }
@@ -693,6 +722,68 @@ export class CodexProvider implements LLMProviderAdapter {
       return args as Record<string, unknown>;
     }
     return {};
+  }
+
+  private normalizeCodexToolName(name: string | undefined): string | undefined {
+    if (!name) return undefined;
+    let normalized = name.trim();
+    if (!normalized) return undefined;
+
+    if (normalized.startsWith(FUNCTION_PREFIX)) {
+      normalized = normalized.slice(FUNCTION_PREFIX.length);
+    }
+
+    if (normalized === 'exec_command') {
+      normalized = 'shell_command';
+    }
+
+    if (!CODEX_TOOL_NAME_PATTERN.test(normalized)) {
+      normalized = normalized.replace(/[^A-Za-z0-9_-]+/g, '_');
+    }
+
+    if (!CODEX_TOOL_NAME_PATTERN.test(normalized)) {
+      return undefined;
+    }
+
+    return normalized;
+  }
+
+  private parseToolCall(callId: string, name: string, argsRaw: unknown): ToolCall | null {
+    const codexName = this.normalizeCodexToolName(name);
+    if (!codexName) return null;
+
+    if (codexName === 'apply_patch') {
+      if (typeof argsRaw === 'string') {
+        return {
+          id: callId,
+          name: 'apply_patch',
+          arguments: { input: argsRaw },
+        };
+      }
+      if (argsRaw && typeof argsRaw === 'object' && !Array.isArray(argsRaw)) {
+        const argsObj = argsRaw as Record<string, unknown>;
+        if (typeof argsObj.input === 'string') {
+          return {
+            id: callId,
+            name: 'apply_patch',
+            arguments: { input: argsObj.input },
+          };
+        }
+      }
+      return {
+        id: callId,
+        name: 'apply_patch',
+        arguments: { input: '' },
+      };
+    }
+
+    let args = this.parseArguments(argsRaw);
+    if (CODEX_TO_REX[codexName]) {
+      args = translateCodexArgsToRex(codexName, args);
+    }
+    const rexName = CODEX_TO_REX[codexName] ?? codexName;
+
+    return { id: callId, name: rexName, arguments: args };
   }
 
   private parseOutputItemText(item: Record<string, unknown>): string {
@@ -811,14 +902,12 @@ export class CodexProvider implements LLMProviderAdapter {
 
       if (this.isFunctionCallItemType(item.type)) {
         const callId = this.pickFirstString(item.call_id, item.id, item.tool_call_id);
-        const name = typeof item.name === 'string' ? item.name : undefined;
+        const name = this.pickFirstString(item.name);
         if (!callId || !name) continue;
-
-        toolCalls.push({
-          id: callId,
-          name,
-          arguments: this.parseArguments(item.arguments ?? item.input ?? item.params),
-        });
+        const translated = this.parseToolCall(callId, name, item.arguments ?? item.input ?? item.params);
+        if (translated) {
+          toolCalls.push(translated);
+        }
         continue;
       }
 
@@ -827,13 +916,12 @@ export class CodexProvider implements LLMProviderAdapter {
         for (const call of explicitCalls) {
           if (!call || typeof call !== 'object') continue;
           const callId = this.pickFirstString(call.call_id, call.id, call.tool_call_id);
-          const name = typeof call.name === 'string' ? call.name : undefined;
+          const name = this.pickFirstString(call.name);
           if (!callId || !name) continue;
-          toolCalls.push({
-            id: callId,
-            name,
-            arguments: this.parseArguments(call.arguments ?? call.input ?? call.params),
-          });
+          const translated = this.parseToolCall(callId, name, call.arguments ?? call.input ?? call.params);
+          if (translated) {
+            toolCalls.push(translated);
+          }
         }
       }
 
@@ -843,13 +931,12 @@ export class CodexProvider implements LLMProviderAdapter {
         const block = contentBlocks;
         if (this.isFunctionCallItemType(block.type)) {
           const callId = this.pickFirstString(block.call_id, block.id, block.tool_call_id);
-          const name = typeof block.name === 'string' ? block.name : undefined;
+          const name = this.pickFirstString(block.name);
           if (callId && name) {
-            toolCalls.push({
-              id: callId,
-              name,
-              arguments: this.parseArguments(block.arguments ?? block.input ?? block.params),
-            });
+            const translated = this.parseToolCall(callId, name, block.arguments ?? block.input ?? block.params);
+            if (translated) {
+              toolCalls.push(translated);
+            }
           }
         }
       }
@@ -858,14 +945,12 @@ export class CodexProvider implements LLMProviderAdapter {
       for (const block of contentBlocks) {
         if (!this.isFunctionCallItemType(block.type)) continue;
         const callId = this.pickFirstString(block.call_id, block.id, block.tool_call_id);
-        const name = typeof block.name === 'string' ? block.name : undefined;
+        const name = this.pickFirstString(block.name);
         if (!callId || !name) continue;
-
-        toolCalls.push({
-          id: callId,
-          name,
-          arguments: this.parseArguments(block.arguments ?? block.input ?? block.params),
-        });
+        const translated = this.parseToolCall(callId, name, block.arguments ?? block.input ?? block.params);
+        if (translated) {
+          toolCalls.push(translated);
+        }
       }
     }
 

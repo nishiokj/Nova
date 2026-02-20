@@ -130,11 +130,13 @@ describe('Agent (Effect runtime)', () => {
     const toolRegistry = createToolRegistry();
     const agent = createAgent(llm, toolRegistry);
 
-    const result = await agent.run({
-      globalContext: new ContextWindow('session-agent-1', 200_000),
-      workItem: createTestWorkItem(),
-      cwd: process.cwd(),
-    });
+    const result = await Effect.runPromise(
+      agent.run({
+        globalContext: new ContextWindow('session-agent-1', 200_000),
+        workItem: createTestWorkItem(),
+        cwd: process.cwd(),
+      })
+    );
 
     expect(result.success).toBe(true);
     expect(result.terminationReason).toBe('goal_state_reached');
@@ -148,28 +150,30 @@ describe('Agent (Effect runtime)', () => {
     const toolRegistry = createToolRegistry();
     const agent = createAgent(llm, toolRegistry);
 
-    const result = await agent.run({
-      globalContext: new ContextWindow('session-agent-2', 200_000),
-      workItem: createTestWorkItem(),
-      cwd: process.cwd(),
-      runControl: {
-        execution: {
-          requestId: 'req-agent-cancel',
-          runId: 'req-agent-cancel',
-          workItemId: 'work-agent-cancel',
-          attempt: 1,
-        },
-        control: {
-          state: 'cancelling',
-          cancellation: {
-            requestedAt: Date.now(),
-            requestedBy: 'system',
-            reason: 'cancel for test',
-            scope: 'run',
+    const result = await Effect.runPromise(
+      agent.run({
+        globalContext: new ContextWindow('session-agent-2', 200_000),
+        workItem: createTestWorkItem(),
+        cwd: process.cwd(),
+        runControl: {
+          execution: {
+            requestId: 'req-agent-cancel',
+            runId: 'req-agent-cancel',
+            workItemId: 'work-agent-cancel',
+            attempt: 1,
+          },
+          control: {
+            state: 'cancelling',
+            cancellation: {
+              requestedAt: Date.now(),
+              requestedBy: 'system',
+              reason: 'cancel for test',
+              scope: 'run',
+            },
           },
         },
-      },
-    });
+      })
+    );
 
     expect(result.success).toBe(false);
     expect(result.terminationReason).toBe('user_stopped');
@@ -189,11 +193,13 @@ describe('Agent (Effect runtime)', () => {
     const toolRegistry = createToolRegistry();
     const agent = createAgent(llm, toolRegistry);
 
-    const result = await agent.run({
-      globalContext: new ContextWindow('session-agent-3', 200_000),
-      workItem: createTestWorkItem(),
-      cwd: process.cwd(),
-    });
+    const result = await Effect.runPromise(
+      agent.run({
+        globalContext: new ContextWindow('session-agent-3', 200_000),
+        workItem: createTestWorkItem(),
+        cwd: process.cwd(),
+      })
+    );
 
     expect(result.success).toBe(true);
     expect(result.metrics.toolCallsMade).toBeGreaterThan(0);

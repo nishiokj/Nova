@@ -360,7 +360,7 @@ Return exactly ONE \`observerAction\`:
 | \`split\` | Decompose into smaller units | \`workItems[]\` with goal, objective, agent, dependencies, targetPaths, bounds |
 | \`create_work_item\` | Add one or more new work items | \`workItems[]\` with goal, objective, agent, dependencies, targetPaths, bounds |
 | \`quality_gate\` | Evaluate goal_state_reached | \`qualityGate.passed\`, \`qualityGate.issues[]\` if failed |
-| \`stop_work_item\` | Stop only the current work item | \`reason\`, optional \`escalationId\` |
+| \`stop_work_item\` | Stop only the current work item | \`reason\` |
 | \`allow\` | No intervention needed | \`reason\` |
 | \`continue\` | Equivalent to \`allow\` | \`reason\` |
 

@@ -122,13 +122,6 @@ const effectCatalog: readonly UnifiedHookCatalogEntry[] = [
   },
   {
     mode: 'effect',
-    event: 'escalation_raised',
-    allowedScopes: ['orchestrator', 'harness'],
-    stateControl: false,
-    description: 'Side-effect event fired when escalation is raised.',
-  },
-  {
-    mode: 'effect',
     event: 'observer_agent_stopped',
     allowedScopes: ['orchestrator', 'harness'],
     stateControl: false,

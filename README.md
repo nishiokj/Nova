@@ -173,49 +173,34 @@ bun run clean                  # Clean all build artifacts
 bun run lint                   # Typecheck all packages
 ```
 
-## AgentLab Zero-Glue Experiment
+## AgentLab Experiment (Curated A/B)
 
-`/jesus` includes a sidecar-first, image-declared harness setup for SWE-bench Lite:
+`/jesus` includes a Dockerized SWE-bench Lite curated A/B experiment between:
 
-- Experiment: `.lab/experiments/swebench_lite_v2_zero_glue.yaml`
-- Harness metadata: `config/agentlab/harness.swebench-lite-v2.json`
-- Harness image build file: `Dockerfile.rex-harness.v2`
-- Benchmark mapper: `scripts/agentlab/map_swebench_lite_to_task_boundary.mjs`
+- `glm-5` (`z.ai-coder`)
+- `gpt-5.3-codex-spark` (`codex`)
 
-Prepare mapped benchmark input:
+Source files:
 
-```bash
-bun scripts/agentlab/map_swebench_lite_to_task_boundary.mjs \
-  --input bench/agentlab/swebench_lite_smoke_1.jsonl \
-  --output .lab/experiments/data/swebench_lite_smoke_1.task_boundary_v1.jsonl \
-  --limit 1
-```
+- Experiment builder: `scripts/agentlab/build_swebench_curated_ab_experiment.mjs`
+- Run script: `scripts/agentlab/run_swebench_curated_ab.sh`
+- Agent image build script: `scripts/agentlab/build_agent_image.sh`
+- Agent-loop entrypoint adapter: `scripts/agentlab/run_agent_loop_trial.mjs`
+- Agent runtime Dockerfile: `Dockerfile.rex-harness`
+- Curated dataset: `.lab/experiments/data/swebench_lite_curated.task_boundary_v1.jsonl`
 
-Build harness image:
-
-```bash
-docker build -f Dockerfile.rex-harness.v2 -t rex-harness:swebench-lite-v2 .
-```
-
-Run experiment:
-
-```bash
-cd /Users/jevinnishioka/Desktop/Experiments/rust
-cargo run -p lab-cli -- run /Users/jevinnishioka/Desktop/jesus/.lab/experiments/swebench_lite_v2_zero_glue.yaml --executor local_docker --materialize outputs_only
-```
-
-Observe run state (live):
+Run a smoke pass (2 trials total: 1 task x 2 variants):
 
 ```bash
 cd /Users/jevinnishioka/Desktop/jesus
-bash scripts/agentlab/observe_run.sh --latest
+bash scripts/agentlab/run_swebench_curated_ab.sh --limit 1
 ```
 
-Observe a specific run once:
+Run against all curated tasks:
 
 ```bash
 cd /Users/jevinnishioka/Desktop/jesus
-bash scripts/agentlab/observe_run.sh --run-id run_20260214_051636 --once
+bash scripts/agentlab/run_swebench_curated_ab.sh --limit 50
 ```
 
 ## Key Design Principles

@@ -104,7 +104,6 @@ export {
   RunControlActionSchema,
   RunControlScopeSchema,
   RunControlSourceSchema,
-  RunPauseMetadataSchema,
   RunCancellationMetadataSchema,
   RunControlTargetSchema,
   RunControlRequestedDataSchema,
@@ -169,7 +168,6 @@ export type {
   StructuredOutputSchema,
   FallbackConfig,
   RunControlState,
-  RunPauseMetadata,
   RunCancellationMetadata,
   RunControlMetadata,
   RunExecutionMetadata,
@@ -328,28 +326,6 @@ export {
   rfc3339Timestamp,
   generateTraceId,
 } from './agent_trace.js';
-
-// ============================================
-// ESCALATION (Cockpit control plane)
-// ============================================
-export type {
-  EscalationType,
-  EscalationStatus,
-  EscalationOption,
-  EscalationReference,
-  EscalationResolution,
-  Escalation,
-  EscalationCreateInput,
-  EscalationResolveInput,
-} from './escalation.js';
-
-export {
-  isEscalationPending,
-  isEscalationTerminal,
-  isEscalationBlocking,
-  ALL_ESCALATION_TYPES,
-  ALL_ESCALATION_STATUSES,
-} from './escalation.js';
 
 // ============================================
 // WORKITEM TEMPLATES

@@ -10,7 +10,6 @@ export {
 
 export type {
   RuntimeControlAction,
-  RuntimePauseMetadata,
   RuntimeCancellationMetadata,
   RuntimeControlMessage,
   RuntimeControlQueue,
@@ -22,19 +21,6 @@ export {
   takeAllRuntimeControl,
   shutdownRuntimeControlQueue,
 } from './control.js';
-
-export type {
-  RuntimeFiber,
-  RuntimeFiberSet,
-} from './supervision.js';
-export {
-  makeRuntimeFiberSet,
-  registerFiber,
-  unregisterFiber,
-  forkSupervised,
-  joinAllSupervised,
-  interruptAllSupervised,
-} from './supervision.js';
 
 export type {
   RuntimeCancellationSignal,

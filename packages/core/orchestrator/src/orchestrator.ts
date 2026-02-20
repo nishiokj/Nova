@@ -7,7 +7,7 @@
  * - Context is truth - no separate state machine
  */
 
-import { Effect, Fiber } from 'effect';
+import { Effect } from 'effect';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
 import { ContextWindow } from 'context';
@@ -34,13 +34,9 @@ import type {
   RunCancellationMetadata,
   RunControlMetadata,
   RunExecutionMetadata,
-  RunPauseMetadata,
 } from 'types';
 import { buildLLMRequestConfig, profiler } from 'shared';
 import {
-  forkSupervised,
-  joinAllSupervised,
-  makeRuntimeFiberSet,
   takeAllRuntimeControl,
   type RuntimeControlMessage,
   type RuntimeControlQueue,
@@ -70,8 +66,13 @@ import {
   type TerminationReason,
 } from 'protocol';
 import { applyPatches } from './hookRunner/applyPatches.js';
-import { runHooksForEvent, type HookExecutionResult } from './hookRunner/runHooksForEvent.js';
-import type { HookRegistry } from './hookRegistry/index.js';
+import {
+  runUnifiedDecisionHooks,
+  type UnifiedDecisionAuditEntry,
+  type UnifiedDecisionExecutionResult,
+  type UnifiedHookFailure,
+} from './unifiedHooks/runner.js';
+import type { UnifiedHookRegistry } from './unifiedHooks/registry.js';
 import {
   mapQualityDecisionToStopResult,
   mapBoundsDecisionToStopResult,
@@ -139,7 +140,7 @@ export interface IterationState {
 
 export interface OrchestratorRuntime {
   /** Control-plane hook registry (orchestrator-owned) */
-  hookRegistry?: HookRegistry;
+  hookRegistry?: UnifiedHookRegistry;
   /**
    * Session-scoped effect hook executor (harness-owned runtime path).
    * Orchestrator enqueues internal hook events and delegates execution to this callback.
@@ -156,8 +157,7 @@ export interface OrchestratorRuntime {
    */
   checkInterruption?: () => boolean;
   /**
-   * Optional runtime control queue for pause/resume/cancel orchestration control.
-   * This is the preferred control path.
+   * Optional runtime control queue for cancel orchestration control.
    */
   controlQueue?: RuntimeControlQueue;
   /**
@@ -206,8 +206,6 @@ export interface OrchestratorResult {
   success: boolean;
   response: string;
   error?: string;
-  paused: boolean;
-  pauseMetadata?: RunPauseMetadata;
   cancellationMetadata?: RunCancellationMetadata;
   runControl: RunControlMetadata;
   userPrompt?: UserPromptInfo;
@@ -262,6 +260,17 @@ interface CallStopHookParams {
   cadence?: { elapsedMs: number; toolCallsSinceLastAudit: number; recentActivity: string; workIds?: string[] };
   controlEventType?: 'goal_state_reached' | 'work_item_completed';
 }
+
+type ControlHookExecutionResult<D> =
+  | (UnifiedDecisionExecutionResult<D> & { status: 'decision' | 'no_decision' | 'no_hooks' })
+  | {
+      status: 'no_registry';
+      decision: null;
+      patches: StatePatch[];
+      failures: UnifiedHookFailure[];
+      hasCriticalFailure: boolean;
+      audit: UnifiedDecisionAuditEntry[];
+    };
 
 interface WorkQueueAdapter {
   enqueue(item: WorkItem): string;
@@ -551,21 +560,51 @@ export class Orchestrator {
    * @param agentType - The type of agent to use
    * @param cwd - Working directory for tool execution (required for concurrent-safe operation)
    */
-  async execute(
+  execute(
     context: ContextWindow,
     goal: string,
     agentType: string = 'standard',
     cwd: string,
     runtime?: OrchestratorRuntime
-  ): Promise<OrchestratorResult> {
-    const cleanup = runtime?.onStart?.(context as ContextWindow);
-    try {
-      return await this.executeInner(context, goal, agentType, cwd, runtime);
-    } finally {
-      if (typeof cleanup === 'function') {
-        cleanup();
+  ): Effect.Effect<OrchestratorResult, never> {
+    const startedAt = Date.now();
+    return Effect.gen(this, function* () {
+      const executionOutcome = yield* Effect.either(
+        Effect.tryPromise({
+          try: async () => {
+            const cleanup = runtime?.onStart?.(context as ContextWindow);
+            try {
+              return await this.executeInner(context, goal, agentType, cwd, runtime);
+            } finally {
+              if (typeof cleanup === 'function') {
+                cleanup();
+              }
+            }
+          },
+          catch: (error) => error,
+        })
+      );
+
+      if (executionOutcome._tag === 'Right') {
+        return executionOutcome.right;
       }
-    }
+
+      const error = executionOutcome.left;
+      const message = error instanceof Error ? error.message : String(error);
+      this.log('error', 'Orchestrator execution failed', { goal, agentType, error: message });
+      return this.createResult({
+        success: false,
+        response: '',
+        error: message,
+        terminationReason: 'agent_error',
+        metrics: {
+          iterations: 0,
+          totalLlmCalls: 0,
+          totalToolCalls: 0,
+          durationMs: Date.now() - startedAt,
+        },
+      });
+    });
   }
 
   /**
@@ -804,9 +843,6 @@ export class Orchestrator {
     }
     return {
       state: control.state,
-      pause: control.pause
-        ? { ...control.pause }
-        : undefined,
       cancellation: control.cancellation
         ? {
             ...control.cancellation,
@@ -846,7 +882,6 @@ export class Orchestrator {
     if (message.action === 'continue') {
       this.runtimeRunControl = {
         state: 'running',
-        pause: this.runtimeRunControl.pause,
         cancellation: this.runtimeRunControl.cancellation,
       };
       return;
@@ -854,131 +889,72 @@ export class Orchestrator {
 
     const stateBefore = this.runtimeRunControl.state;
     const target = this.buildRunControlTarget(message);
-    const source = message.pause?.requestedBy ?? message.cancellation?.requestedBy ?? 'system';
+    const source = message.cancellation?.requestedBy ?? 'system';
 
     this.emit(createEvent('run_control_requested', {
       action: message.action,
       source,
       target,
       stateBefore,
-      pause: message.pause,
       cancellation: message.cancellation,
     }, message.workItemId, this.requestId));
 
-    switch (message.action) {
-      case 'pause': {
-        if (stateBefore === 'cancelled') {
-          this.emit(createEvent('run_control_rejected', {
-            action: message.action,
-            source,
-            target,
-            stateBefore,
-            reason: 'run_already_cancelled',
-            pause: message.pause,
-            cancellation: message.cancellation,
-          }, message.workItemId, this.requestId));
-          return;
-        }
-        const pause = message.pause ?? {
-          requestedAt: Date.now(),
-          requestedBy: source,
-          reason: 'Execution paused by runtime control',
-        };
-        this.runtimeRunControl = {
-          state: 'paused',
-          pause,
-          cancellation: this.runtimeRunControl.cancellation,
-        };
-        this.emit(createEvent('run_control_applied', {
-          action: message.action,
-          source,
-          target,
-          stateBefore,
-          stateAfter: this.runtimeRunControl.state,
-          pause: this.runtimeRunControl.pause,
-          cancellation: this.runtimeRunControl.cancellation,
-        }, message.workItemId, this.requestId));
-        return;
-      }
-      case 'resume': {
-        this.runtimeRunControl = {
-          state: 'running',
-          pause: this.runtimeRunControl.pause,
-          cancellation: this.runtimeRunControl.cancellation,
-        };
-        this.emit(createEvent('run_control_applied', {
-          action: message.action,
-          source,
-          target,
-          stateBefore,
-          stateAfter: this.runtimeRunControl.state,
-          pause: this.runtimeRunControl.pause,
-          cancellation: this.runtimeRunControl.cancellation,
-        }, message.workItemId, this.requestId));
-        return;
-      }
-      case 'cancel': {
-        const cancellation = message.cancellation ?? {
-          requestedAt: Date.now(),
-          requestedBy: source,
-          reason: 'Execution cancelled by runtime control',
-          scope: target.scope,
-          targetWorkIds: target.workItemIds,
-        };
-        const cancellationScope = cancellation.scope ?? target.scope;
-        const targetIds = cancellation.targetWorkIds;
-        if (cancellationScope !== 'run' && (!targetIds || targetIds.length === 0)) {
-          this.emit(createEvent('run_control_rejected', {
-            action: message.action,
-            source,
-            target,
-            stateBefore,
-            reason: 'missing_target_work_items',
-            pause: message.pause,
-            cancellation,
-          }, message.workItemId, this.requestId));
-          return;
-        }
-
-        if (cancellationScope === 'run') {
-          this.runtimeRunControl = {
-            state: 'cancelling',
-            pause: this.runtimeRunControl.pause,
-            cancellation,
-          };
-        } else {
-          this.runtimeRunControl = {
-            state: this.runtimeRunControl.state === 'cancelled' ? 'cancelled' : this.runtimeRunControl.state,
-            pause: this.runtimeRunControl.pause,
-            cancellation: undefined,
-          };
-        }
-
-        const cancelReason = cancellation.reason ?? 'Execution cancelled by runtime control';
-        if (targetIds && targetIds.length > 0) {
-          for (const workId of targetIds) {
-            this.cancelInProgressWork(workId, cancelReason);
-          }
-        } else if (cancellationScope === 'run' && this.activeInProgress) {
-          for (const workId of this.activeInProgress.keys()) {
-            this.cancelInProgressWork(workId, cancelReason);
-          }
-        }
-
-        this.emit(createEvent('run_control_applied', {
-          action: message.action,
-          source,
-          target,
-          stateBefore,
-          stateAfter: this.runtimeRunControl.state,
-          pause: this.runtimeRunControl.pause,
-          cancellation,
-        }, message.workItemId, this.requestId));
-        return;
-      }
-      default:
-        return;
+    if (message.action !== 'cancel') {
+      return;
     }
+
+    const cancellation = message.cancellation ?? {
+      requestedAt: Date.now(),
+      requestedBy: source,
+      reason: 'Execution cancelled by runtime control',
+      scope: target.scope,
+      targetWorkIds: target.workItemIds,
+    };
+    const cancellationScope = cancellation.scope ?? target.scope;
+    const targetIds = cancellation.targetWorkIds;
+    if (cancellationScope !== 'run' && (!targetIds || targetIds.length === 0)) {
+      this.emit(createEvent('run_control_rejected', {
+        action: message.action,
+        source,
+        target,
+        stateBefore,
+        reason: 'missing_target_work_items',
+        cancellation,
+      }, message.workItemId, this.requestId));
+      return;
+    }
+
+    if (cancellationScope === 'run') {
+      this.runtimeRunControl = {
+        state: 'cancelling',
+        cancellation,
+      };
+    } else {
+      this.runtimeRunControl = {
+        state: this.runtimeRunControl.state === 'cancelled' ? 'cancelled' : this.runtimeRunControl.state,
+        cancellation: undefined,
+      };
+    }
+
+    const cancelReason = cancellation.reason ?? 'Execution cancelled by runtime control';
+    if (targetIds && targetIds.length > 0) {
+      for (const workId of targetIds) {
+        this.cancelInProgressWork(workId, cancelReason);
+      }
+    } else if (cancellationScope === 'run' && this.activeInProgress) {
+      for (const workId of this.activeInProgress.keys()) {
+        this.cancelInProgressWork(workId, cancelReason);
+      }
+    }
+
+    this.emit(createEvent('run_control_applied', {
+      action: message.action,
+      source,
+      target,
+      stateBefore,
+      stateAfter: this.runtimeRunControl.state,
+      cancellation,
+    }, message.workItemId, this.requestId));
   }
 
   private async syncRuntimeControlState(runtime?: OrchestratorRuntime): Promise<void> {
@@ -1074,13 +1050,14 @@ export class Orchestrator {
       }
       const agentAsyncId = profiler.asyncBegin(`agent:${item.agent}`, 'agent');
       const workContext = this.resolveWorkItemContext(workId, context);
-      const result = await agent.run({
+      const runEffect = agent.run({
         globalContext: workContext,
         workItem: item,
         cwd,
         signal: abortController?.signal,
         runControl: this.buildAgentRunControl(workId, iteration),
-      });
+      }) as Effect.Effect<AgentResult, never>;
+      const result = await Effect.runPromise(runEffect);
       profiler.asyncEnd(`agent:${item.agent}`, agentAsyncId, 'agent', {
         llmCalls: result.metrics.llmCallsMade,
         toolCalls: result.metrics.toolCallsMade,
@@ -1107,40 +1084,9 @@ export class Orchestrator {
       return [];
     }
 
-    return Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(this, function* () {
-          const fiberSet = yield* makeRuntimeFiberSet();
-          const fibers = yield* Effect.forEach(
-            entries,
-            ([workId, inProgress]) =>
-              forkSupervised(
-                fiberSet,
-                Effect.promise(() =>
-                  this.executeSingleWorkItem({
-                    workId,
-                    inProgress,
-                    context,
-                    cwd,
-                    iteration,
-                  })
-                )
-              ),
-            { concurrency: 'unbounded' }
-          );
-
-          const results = yield* Effect.forEach(
-            fibers,
-            (fiber) =>
-              Fiber.join(fiber).pipe(
-                Effect.map((value) => value as WorkExecutionResult)
-              ),
-            { concurrency: 'unbounded' }
-          );
-
-          yield* joinAllSupervised(fiberSet);
-          return results;
-        })
+    return Promise.all(
+      entries.map(([workId, inProgress]) =>
+        this.executeSingleWorkItem({ workId, inProgress, context, cwd, iteration })
       )
     );
   }
@@ -1170,10 +1116,7 @@ export class Orchestrator {
       while (!settled) {
         await this.syncRuntimeControlState(runtime);
 
-        if (this.runtimeRunControl.state === 'paused') {
-          const reason = this.runtimeRunControl.pause?.reason ?? 'Execution paused by runtime control';
-          this.quiesceInProgressWork(state, reason);
-        } else if (this.isRunScopedCancellation(this.runtimeRunControl)) {
+        if (this.isRunScopedCancellation(this.runtimeRunControl)) {
           const reason = this.runtimeRunControl.cancellation?.reason ?? 'Execution cancelled by runtime control';
           this.quiesceInProgressWork(state, reason);
         }
@@ -1181,7 +1124,7 @@ export class Orchestrator {
         if (settled) {
           break;
         }
-        await Effect.runPromise(Effect.sleep(20));
+        await new Promise(resolve => setTimeout(resolve, 20));
       }
     })();
 
@@ -1198,45 +1141,16 @@ export class Orchestrator {
     goal: string;
   }): OrchestratorResult | null {
     const { state, goal } = params;
-    const controlState = this.runtimeRunControl.state;
-    if (controlState !== 'paused' && !this.isRunScopedCancellation(this.runtimeRunControl)) {
+    if (!this.isRunScopedCancellation(this.runtimeRunControl)) {
       return null;
     }
 
     const now = Date.now();
-    if (controlState === 'paused') {
-      const reason = this.runtimeRunControl.pause?.reason ?? 'Execution paused by runtime control';
-      this.quiesceInProgressWork(state, reason);
-      return this.createResult({
-        success: false,
-        response: state.initialWorkResponse,
-        paused: true,
-        userPrompt: {
-          question: 'Execution paused. Send a message to resume.',
-          context: reason,
-        },
-        pauseMetadata: this.runtimeRunControl.pause,
-        runControl: this.cloneRunControlMetadata({
-          state: 'paused',
-          pause: this.runtimeRunControl.pause,
-          cancellation: this.runtimeRunControl.cancellation,
-        }),
-        terminationReason: 'user_input_required',
-        metrics: {
-          iterations: state.iteration,
-          totalLlmCalls: state.totalLlmCalls,
-          totalToolCalls: state.totalToolCalls,
-          durationMs: now - state.startTime,
-        },
-      });
-    }
-
     const cancellationReason = this.runtimeRunControl.cancellation?.reason ?? 'Execution cancelled by runtime control';
     const harvestedResponse = this.harvestCompletedWork(state.inProgress, 'user_stopped');
     this.quiesceInProgressWork(state, cancellationReason);
     this.runtimeRunControl = {
       state: 'cancelled',
-      pause: this.runtimeRunControl.pause,
       cancellation: this.runtimeRunControl.cancellation,
     };
     const response = state.initialWorkResponse || harvestedResponse;
@@ -1407,8 +1321,7 @@ export class Orchestrator {
           continue;
         }
 
-        const controlState = this.runtimeRunControl.state;
-        if (controlState === 'paused' || this.isRunScopedCancellation(this.runtimeRunControl)) {
+        if (this.isRunScopedCancellation(this.runtimeRunControl)) {
           this.completedWork.set(workId, result);
           state.inProgress.delete(workId);
           continue;
@@ -1463,6 +1376,15 @@ export class Orchestrator {
               state.initialWorkCompleted = false;
               state.initialWorkResponse = '';
               state.initialWorkId = this.resetWorkTracking(checkResult.newItem);
+              state.startTime = Date.now();
+            } else if (this.initialWorkId !== state.initialWorkId) {
+              // Some continuation paths (e.g. user_input hook answers) enqueue via
+              // handleStopHookBlock and update orchestrator-level tracking directly.
+              // Keep execution-state tracking aligned with that canonical initial work id.
+              state.initialWorkCompleted = false;
+              state.initialWorkResponse = '';
+              state.initialWorkResult = undefined;
+              state.initialWorkId = this.initialWorkId;
               state.startTime = Date.now();
             }
             if (checkResult.itemToRequeue) {
@@ -1827,7 +1749,6 @@ export class Orchestrator {
                     action: 'stop',
                     systemMessage: decision.reason,
                     terminationReason: 'observer_work_item_stopped',
-                    escalationId: decision.escalationId,
                     reason: decision.reason,
                   };
                 case 'stop':
@@ -1850,7 +1771,6 @@ export class Orchestrator {
               });
               break;
             case 'no_hooks':
-            case 'all_skipped':
             case 'no_registry':
               break;
             default:
@@ -1941,8 +1861,6 @@ export class Orchestrator {
       success: partial.success ?? false,
       response: partial.response ?? '',
       error: partial.error,
-      paused: partial.paused ?? false,
-      pauseMetadata: partial.pauseMetadata ?? runControl.pause,
       cancellationMetadata: partial.cancellationMetadata ?? runControl.cancellation,
       runControl,
       userPrompt: partial.userPrompt,
@@ -1958,13 +1876,6 @@ export class Orchestrator {
       return partial.runControl;
     }
     const base = this.cloneRunControlMetadata(this.runtimeRunControl);
-    if (partial.paused) {
-      return {
-        state: 'paused',
-        pause: partial.pauseMetadata ?? base.pause,
-        cancellation: partial.cancellationMetadata ?? base.cancellation,
-      };
-    }
 
     const cancellationReasons = new Set<TerminationReason>([
       'user_stopped',
@@ -1975,14 +1886,12 @@ export class Orchestrator {
     if (partial.terminationReason && cancellationReasons.has(partial.terminationReason)) {
       return {
         state: 'cancelled',
-        pause: partial.pauseMetadata ?? base.pause,
         cancellation: partial.cancellationMetadata ?? base.cancellation,
       };
     }
 
     return {
       state: base.state,
-      pause: partial.pauseMetadata ?? base.pause,
       cancellation: partial.cancellationMetadata ?? base.cancellation,
     };
   }
@@ -2193,7 +2102,7 @@ export class Orchestrator {
     ctx: HookContext,
     context: ContextWindow,
     runtime?: OrchestratorRuntime
-  ): Promise<HookExecutionResult<DecisionFor<E>>> {
+  ): Promise<ControlHookExecutionResult<DecisionFor<E>>> {
     const registry = runtime?.hookRegistry;
     if (!registry) {
       return {
@@ -2205,7 +2114,7 @@ export class Orchestrator {
         audit: [],
       };
     }
-    const result = await runHooksForEvent(event, ctx, registry);
+    const result = await Effect.runPromise(runUnifiedDecisionHooks(event, ctx, registry));
     if (result.patches.length > 0) {
       this.applyHookPatches(context, result.patches, `hooks:${event.type}`);
     }
@@ -2282,7 +2191,9 @@ export class Orchestrator {
       }
       case 'user_input_required': {
         if (!userPrompt) return null;
-        const options = userPrompt.options?.map(option => {
+        const firstQuestion = userPrompt.questions?.[0];
+        if (!firstQuestion?.question) return null;
+        const options = firstQuestion.options?.map(option => {
           if (typeof option === 'string') {
             return { label: option };
           }
@@ -2291,10 +2202,10 @@ export class Orchestrator {
         return createUserInputRequiredEvent(
           context.sessionKey,
           workId,
-          userPrompt.question,
+          firstQuestion.question,
           options,
-          userPrompt.context,
-          userPrompt.multiSelect ?? false
+          firstQuestion.context,
+          firstQuestion.multiSelect ?? false
         );
       }
       case 'cadence_audit': {
@@ -2340,7 +2251,7 @@ export class Orchestrator {
 
   private resolveHookDecision<D>(
     eventType: string,
-    result: HookExecutionResult<D>,
+    result: ControlHookExecutionResult<D>,
     map: (decision: D) => StopHookResult
   ): StopHookResult | null {
     switch (result.status) {
@@ -2355,7 +2266,6 @@ export class Orchestrator {
         return null;
       case 'no_registry':
       case 'no_hooks':
-      case 'all_skipped':
         return null;
       default:
         return assertNever(result);
@@ -2832,7 +2742,7 @@ export class Orchestrator {
   }
 
   /**
-   * Handle user_input_required termination - unique: interruption check, paused=true.
+   * Handle user_input_required termination - unique: interruption check.
    */
   private async handleUserInputRequired(params: CheckTerminationParams): Promise<TerminationCheckResult> {
     const { result, workId, item, iteration, totalLlmCalls, totalToolCalls, now, startTime, context, agentType, runtime } = params;
@@ -2843,7 +2753,12 @@ export class Orchestrator {
       return this.createInterruptionResult(agentType);
     }
 
-    this.log('info', 'Pausing for user input', { workId, question: result.userPrompt!.question, questionType: result.userPrompt!.questionType });
+    const firstPromptQuestion = result.userPrompt?.questions?.[0];
+    this.log('info', 'Awaiting user input', {
+      workId,
+      question: firstPromptQuestion?.question,
+      questionType: firstPromptQuestion?.questionType,
+    });
     this.mergeAgentResultContext(context, workId, result);
 
     const stopResult = await this.callStopHook({
@@ -2868,7 +2783,6 @@ export class Orchestrator {
       terminal: this.createResult({
         success: false,
         response: result.response ?? '',
-        paused: true,
         userPrompt: result.userPrompt,
         terminationReason: 'user_input_required',
         metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
@@ -2912,7 +2826,6 @@ export class Orchestrator {
       sessionKey: context.sessionKey,
       workId,
       reason,
-      escalationId: result.observerStop?.escalationId,
       agentType: item.agent,
     }, {
       workId,

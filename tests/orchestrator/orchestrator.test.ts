@@ -146,12 +146,12 @@ describe('Orchestrator (Effect runtime)', () => {
     ]);
     const orchestrator = createOrchestrator(llm);
 
-    const result = await orchestrator.execute(
+    const result = await Effect.runPromise(orchestrator.execute(
       new ContextWindow('orch-session-1', 200_000),
       'complete goal',
       'standard',
       CWD
-    );
+    ));
 
     expect(result.success).toBe(true);
     expect(result.terminationReason).toBe('goal_state_reached');
@@ -183,13 +183,13 @@ describe('Orchestrator (Effect runtime)', () => {
       },
     };
 
-    const result = await orchestrator.execute(
+    const result = await Effect.runPromise(orchestrator.execute(
       new ContextWindow('orch-session-2', 200_000),
       'pause goal',
       'standard',
       CWD,
       runtime
-    );
+    ));
 
     expect(result.paused).toBe(true);
     expect(result.terminationReason).toBe('user_input_required');
@@ -228,13 +228,13 @@ describe('Orchestrator (Effect runtime)', () => {
       },
     };
 
-    const result = await orchestrator.execute(
+    const result = await Effect.runPromise(orchestrator.execute(
       new ContextWindow('orch-session-3', 200_000),
       'cancel goal',
       'standard',
       CWD,
       runtime
-    );
+    ));
 
     expect(result.terminationReason).toBe('user_stopped');
     expect(result.runControl.state).toBe('cancelled');

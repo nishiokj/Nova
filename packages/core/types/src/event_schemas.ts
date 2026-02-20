@@ -74,20 +74,13 @@ export const BaseEventFieldsSchema = z.object({
 
 export const RunControlStateSchema = z.enum([
   'running',
-  'paused',
   'cancelling',
   'cancelled',
 ]);
 
-export const RunControlActionSchema = z.enum(['pause', 'resume', 'cancel']);
+export const RunControlActionSchema = z.enum(['cancel']);
 export const RunControlScopeSchema = z.enum(['run', 'work_item', 'tool']);
 export const RunControlSourceSchema = z.enum(['user', 'system', 'policy']);
-
-export const RunPauseMetadataSchema = z.object({
-  requestedAt: z.number(),
-  requestedBy: RunControlSourceSchema.optional(),
-  reason: z.string().optional(),
-});
 
 export const RunCancellationMetadataSchema = z.object({
   requestedAt: z.number(),
@@ -108,7 +101,6 @@ export const RunControlRequestedDataSchema = z.object({
   source: RunControlSourceSchema,
   target: RunControlTargetSchema,
   stateBefore: RunControlStateSchema,
-  pause: RunPauseMetadataSchema.optional(),
   cancellation: RunCancellationMetadataSchema.optional(),
 });
 
@@ -512,7 +504,6 @@ export type LLMCallData = z.infer<typeof LLMCallDataSchema>;
 export type LLMErrorData = z.infer<typeof LLMErrorDataSchema>;
 export type MemoryInjectionTrainingSignal = z.infer<typeof MemoryInjectionTrainingSignalSchema>;
 export type MemoryInjectedData = z.infer<typeof MemoryInjectedDataSchema>;
-export type RunPauseMetadata = z.infer<typeof RunPauseMetadataSchema>;
 export type RunCancellationMetadata = z.infer<typeof RunCancellationMetadataSchema>;
 export type RunControlTarget = z.infer<typeof RunControlTargetSchema>;
 export type RunControlRequestedData = z.infer<typeof RunControlRequestedDataSchema>;

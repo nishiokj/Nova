@@ -8,6 +8,7 @@
  */
 
 import { ContextWindow } from 'context/context-window.js';
+import { Effect } from 'effect';
 import { Agent } from 'agent/agent.js';
 import type { AgentConfig } from 'agent/types.js';
 import type { LLMAdapter, LLMResponse } from 'llm/index.js';
@@ -315,7 +316,9 @@ describe('Tool Output Truncation (Fix #3)', () => {
     const context = new ContextWindow('test-session', 200_000);
     const workItem = createWorkItem({ goal: 'test', objective: 'test' });
 
-    const result = await agent.run({ globalContext: context, workItem, cwd: process.cwd() });
+    const result = await Effect.runPromise(
+      agent.run({ globalContext: context, workItem, cwd: process.cwd() })
+    );
 
     // Check that the output was truncated in local context
     if (result.localContext) {
@@ -411,7 +414,9 @@ describe('Tool Output Truncation (Fix #3)', () => {
     const context = new ContextWindow('test-session', 200_000);
     const workItem = createWorkItem({ goal: 'test', objective: 'test' });
 
-    const result = await agent.run({ globalContext: context, workItem, cwd: process.cwd() });
+    const result = await Effect.runPromise(
+      agent.run({ globalContext: context, workItem, cwd: process.cwd() })
+    );
 
     if (result.localContext) {
       const outputs = result.localContext.items.filter(

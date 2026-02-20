@@ -152,12 +152,12 @@ describe('Orchestrator invariants (Effect runtime)', () => {
       (event) => events.push(event)
     );
 
-    const result = await orchestrator.execute(
+    const result = await Effect.runPromise(orchestrator.execute(
       new ContextWindow('invariant-lifecycle', 200_000),
       'lifecycle goal',
       'standard',
       CWD
-    );
+    ));
 
     expect(result.success).toBe(true);
 
@@ -186,7 +186,7 @@ describe('Orchestrator invariants (Effect runtime)', () => {
     let sentCancel = false;
 
     const startedAt = Date.now();
-    const result = await orchestrator.execute(
+    const result = await Effect.runPromise(orchestrator.execute(
       new ContextWindow('invariant-cancel', 200_000),
       'cancel invariant goal',
       'standard',
@@ -207,7 +207,7 @@ describe('Orchestrator invariants (Effect runtime)', () => {
           }));
         },
       }
-    );
+    ));
     const durationMs = Date.now() - startedAt;
 
     expect(result.terminationReason).toBe('user_stopped');

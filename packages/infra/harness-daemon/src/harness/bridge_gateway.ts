@@ -28,7 +28,7 @@ import {
 import type { AuthService } from './auth_service.js';
 import { LocalProviderManager } from './local_providers.js';
 import { getAllModels, isOpenAICompatProvider, toGatewayModel } from 'types';
-import { type HookRegistry } from 'orchestrator';
+import { type UnifiedHookRegistry } from 'orchestrator';
 import type { AgentType } from 'agent';
 import type { PermissionChecker } from './permissions.js';
 import { deleteSession, getTokenUsage, listSessions } from './session_queries.js';
@@ -58,7 +58,7 @@ interface HarnessLike {
     sessionKey: string;
     workingDir: string;
     context?: string;
-    hookRegistry?: HookRegistry;
+    hookRegistry?: UnifiedHookRegistry;
   }): AgentRunHandle;
   createReadyEvent(sessionKey: string): BridgeEvent;
   getConfig(): FullHarnessConfig;
@@ -72,7 +72,6 @@ interface HarnessLike {
   getAllSessionSelectedModels?(sessionKey: string): Map<string, import('agent').ModelSelection>;
   clearAllSessionSelectedModels?(sessionKey: string): void;
   getSessionHistory?(sessionKey: string): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }>;
-  isSessionPaused?(sessionKey: string): boolean;
   getAsyncModeStatus?(): { ok: boolean; issues: string[] };
   ensureSessionHydrated?(sessionKey: string, options?: { workingDir?: string; dangerousMode?: boolean; includeUserPreferences?: boolean }): {
     getPermissionState?: () => unknown;
@@ -807,13 +806,6 @@ export class BridgeGateway {
       }
     }
 
-    // Also clear legacy preferences if they match
-    const selectedModel = graphd.getUserPreference<{ provider?: string; model?: string }>('user_prefs:selected_model');
-    if (selectedModel?.model && selectedModel.model.trim().toLowerCase() === normalizedModelId) {
-      graphd.deleteUserPreference('user_prefs:selected_model');
-      graphd.deleteUserPreference('user_prefs:last_model');
-    }
-
     // Clear session selections if they match the deleted model
     if (sessionKey) {
       const inMemorySelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
@@ -1513,8 +1505,6 @@ export class BridgeGateway {
     if (graphd) {
       graphd.sessionUpdateMetadata(sessionKey, { model_selections: null });
       graphd.deleteUserPreference('user_prefs:model_selections');
-      graphd.deleteUserPreference('user_prefs:selected_model');
-      graphd.deleteUserPreference('user_prefs:last_model');
     }
 
     return clearedAgentTypes;
@@ -2124,11 +2114,6 @@ export class BridgeGateway {
       return;
     }
 
-    if (this.harness.isSessionPaused?.(sessionKey)) {
-      sendFailure('Session is paused awaiting user input. Resume or close the session before starting async mode.');
-      return;
-    }
-
     // For connection-scoped async starts we require an explicit valid model selection.
     // Control-plane starts can proceed with defaults, but we still sync companion selections
     // when a standard selection already exists.
@@ -2195,11 +2180,6 @@ export class BridgeGateway {
       });
 
       this.streamRunEvents(requestId, handle, (result) => {
-        // Only clean up async state when the run actually completes (success or failure),
-        // NOT when it pauses for user input. Paused runs should resume with async mode still on.
-        if (result?.paused) {
-          return;
-        }
         const currentAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
         if (currentAsyncRun?.requestId === requestId) {
           this.harness.clearSessionAsyncRun?.(sessionKey);

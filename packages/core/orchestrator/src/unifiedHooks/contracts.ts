@@ -1,4 +1,5 @@
 import type { InternalHookContext, InternalHookEvent } from 'agent';
+import type { Effect } from 'effect';
 import type {
   DecisionFor,
   EventFor,
@@ -180,7 +181,10 @@ export interface UnifiedDecisionHookRegistration<E extends DecisionEventType>
   policy: HookPolicy;
   criticality: HookCriticality;
   idempotency: HookIdempotency;
-  callback: (payload: EventFor<E>, context: Readonly<HookContext>) => Promise<HookOutcome<DecisionFor<E>>>;
+  callback: (
+    payload: EventFor<E>,
+    context: Readonly<HookContext>
+  ) => Effect.Effect<HookOutcome<DecisionFor<E>>, unknown>;
 }
 
 export interface UnifiedEffectContext {
@@ -197,7 +201,10 @@ export interface UnifiedEffectContext {
 export interface UnifiedEffectHookRegistration<E extends EffectEventType>
   extends UnifiedHookBase<E, 'effect'> {
   policy?: HookPolicy;
-  callback: (payload: EffectPayloadFor<E>, context: Readonly<UnifiedEffectContext>) => Promise<EffectOutcomeFor<E>>;
+  callback: (
+    payload: EffectPayloadFor<E>,
+    context: Readonly<UnifiedEffectContext>
+  ) => Effect.Effect<EffectOutcomeFor<E>, unknown>;
 }
 
 export type UnifiedHookRegistration =

@@ -116,7 +116,6 @@ export function mapCadenceDecisionToStopResult(decision: CadenceDecision): StopH
         decision: 'allow',
         systemMessage: decision.reason,
         terminationReason: 'observer_work_item_stopped',
-        escalationId: decision.escalationId,
       };
     case 'stop':
       return { decision: 'allow', systemMessage: decision.reason, terminationReason: 'observer_stopped' };

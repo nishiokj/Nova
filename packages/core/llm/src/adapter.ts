@@ -125,130 +125,138 @@ class LLMRouterAdapter implements LLMAdapter {
    * Resolve request configuration from LLMRequestConfig.
    * Returns all information needed to make a request to a provider.
    */
-  private async resolveRequestConfig(llm: LLMRequestConfig): Promise<ResolvedRequestConfig> {
-    if (!llm?.model) {
-      throw new Error('LLM request missing model');
-    }
-
-    let provider = llm.provider;
-    if (!provider && llm.model.includes('/')) {
-      provider = 'vercel-gateway';
-    }
-
-    if (!provider) {
-      throw new Error(`Provider must be specified for model '${llm.model}'`);
-    }
-
-    // Special handling for Codex OAuth tokens
-    if (provider === 'codex') {
-      const tokenManager = getCodexTokenManager();
-      await tokenManager.initialize();
-      const token = await tokenManager.getAccessToken();
-      if (!token) {
-        throw new Error(
-          'Codex OAuth not configured. Run the authentication flow first with /providers codex login'
-        );
+  private resolveRequestConfig(llm: LLMRequestConfig): Effect.Effect<ResolvedRequestConfig, Error> {
+    return Effect.gen(this, function* () {
+      if (!llm?.model) {
+        return yield* Effect.fail(new Error('LLM request missing model'));
       }
-      const accountId = tokenManager.getAccountId();
-      if (!accountId) {
-        throw new Error(
-          'Codex account ID not found. Please re-authenticate with /providers codex login'
-        );
+
+      let provider = llm.provider;
+      if (!provider && llm.model.includes('/')) {
+        provider = 'vercel-gateway';
       }
+
+      if (!provider) {
+        return yield* Effect.fail(new Error(`Provider must be specified for model '${llm.model}'`));
+      }
+
+      // Special handling for Codex OAuth tokens
+      if (provider === 'codex') {
+        const tokenManager = getCodexTokenManager();
+        yield* Effect.tryPromise({
+          try: () => tokenManager.initialize(),
+          catch: toError,
+        });
+        const token = yield* Effect.tryPromise({
+          try: () => tokenManager.getAccessToken(),
+          catch: toError,
+        });
+        if (!token) {
+          return yield* Effect.fail(new Error(
+            'Codex OAuth not configured. Run the authentication flow first with /providers codex login'
+          ));
+        }
+        const accountId = tokenManager.getAccountId();
+        if (!accountId) {
+          return yield* Effect.fail(new Error(
+            'Codex account ID not found. Please re-authenticate with /providers codex login'
+          ));
+        }
+        return {
+          provider: 'codex',
+          displayProvider: 'codex',
+          model: llm.model,
+          apiKey: token,
+          baseUrl: getProviderBaseUrl('codex') ?? 'https://api.openai.com',
+          maxTokens: llm.maxTokens,
+          temperature: llm.temperature,
+          reasoning: llm.reasoning,
+          chatgptAccountId: accountId,
+        };
+      }
+
+      // displayProvider is the user-facing name (e.g., 'z.ai-coder') for error messages
+      // Falls back to canonical provider if not specified
+      const displayProvider = (llm as { displayProvider?: string }).displayProvider ?? provider;
+      const keyProvider = provider === 'openai-compat' ? displayProvider : provider;
+
+      let model = llm.model;
+      if (provider === 'vercel-gateway' && !model.includes('/')) {
+        const gatewayHint =
+          displayProvider !== 'vercel-gateway' && displayProvider !== 'openai-compat'
+            ? displayProvider
+            : undefined;
+        model = toGatewayModel(model, gatewayHint);
+      }
+
+      let baseUrl = llm.baseUrl;
+      if (!baseUrl && provider === 'openai-compat' && displayProvider !== 'openai-compat') {
+        if (isSupportedProvider(displayProvider)) {
+          baseUrl = getProviderBaseUrl(displayProvider);
+        }
+      }
+      // Resolve base URL: per-request > provider registry (openai-compat) > client config > default
+      baseUrl = baseUrl ?? this.baseUrls[provider] ?? DEFAULT_PROVIDER_BASE_URLS[provider];
+
+      // Validate baseUrl is present
+      if (!baseUrl) {
+        if (provider === 'openai-compat') {
+          return yield* Effect.fail(new Error(
+            `Provider '${displayProvider}' requires baseUrl to be specified. `
+            + 'openai-compat is an adapter type, not a provider - each provider needs its own URL.'
+          ));
+        }
+        return yield* Effect.fail(new Error(`Base URL not configured for provider '${displayProvider}'`));
+      }
+
+      // API key resolution priority:
+      // 1. Per-request apiKey (explicit)
+      // 2. Provider key service (dynamic - from GraphD/config at runtime)
+      // 3. Stored apiKeys (static - from constructor)
+      let apiKey = llm.apiKey;
+      let keySource = 'per-request';
+
+      if (!apiKey && this.providerKeyService) {
+        apiKey = this.providerKeyService.getApiKey(keyProvider) ?? undefined;
+        if (apiKey) keySource = 'provider-service';
+      }
+
+      if (!apiKey) {
+        apiKey = this.apiKeys[provider];
+        if (apiKey) keySource = 'stored';
+      }
+
+      // Debug logging for API key resolution
+      const keyPreview = apiKey ? `${apiKey.slice(0, 8)}...` : 'MISSING';
+      this.logger.debug('Resolving request config', {
+        model,
+        provider,
+        displayProvider,
+        keyProvider,
+        baseUrl,
+        keySource,
+        keyPreview,
+        hasProviderService: !!this.providerKeyService,
+        hasStoredKey: !!this.apiKeys[provider],
+      });
+
+      if (!apiKey && providerRequiresAuth(keyProvider)) {
+        return yield* Effect.fail(new Error(
+          `API key not configured for provider '${keyProvider}'. Use /providers to add your API key.`
+        ));
+      }
+
       return {
-        provider: 'codex',
-        displayProvider: 'codex',
-        model: llm.model,
-        apiKey: token, // OAuth access token
-        baseUrl: getProviderBaseUrl('codex') ?? 'https://api.openai.com',
+        provider,
+        displayProvider,
+        model,
+        apiKey,
+        baseUrl,
         maxTokens: llm.maxTokens,
         temperature: llm.temperature,
         reasoning: llm.reasoning,
-        chatgptAccountId: accountId,
       };
-    }
-
-    // displayProvider is the user-facing name (e.g., 'z.ai-coder') for error messages
-    // Falls back to canonical provider if not specified
-    const displayProvider = (llm as { displayProvider?: string }).displayProvider ?? provider;
-    const keyProvider = provider === 'openai-compat' ? displayProvider : provider;
-
-    let model = llm.model;
-    if (provider === 'vercel-gateway' && !model.includes('/')) {
-      const gatewayHint =
-        displayProvider !== 'vercel-gateway' && displayProvider !== 'openai-compat'
-          ? displayProvider
-          : undefined;
-      model = toGatewayModel(model, gatewayHint);
-    }
-
-    let baseUrl = llm.baseUrl;
-    if (!baseUrl && provider === 'openai-compat' && displayProvider !== 'openai-compat') {
-      if (isSupportedProvider(displayProvider)) {
-        baseUrl = getProviderBaseUrl(displayProvider);
-      }
-    }
-    // Resolve base URL: per-request > provider registry (openai-compat) > client config > default
-    baseUrl = baseUrl ?? this.baseUrls[provider] ?? DEFAULT_PROVIDER_BASE_URLS[provider];
-
-    // Validate baseUrl is present
-    if (!baseUrl) {
-      if (provider === 'openai-compat') {
-        throw new Error(
-          `Provider '${displayProvider}' requires baseUrl to be specified. ` +
-            `openai-compat is an adapter type, not a provider - each provider needs its own URL.`
-        );
-      }
-      throw new Error(`Base URL not configured for provider '${displayProvider}'`);
-    }
-
-    // API key resolution priority:
-    // 1. Per-request apiKey (explicit)
-    // 2. Provider key service (dynamic - from GraphD/config at runtime)
-    // 3. Stored apiKeys (static - from constructor)
-    let apiKey = llm.apiKey;
-    let keySource = 'per-request';
-
-    if (!apiKey && this.providerKeyService) {
-      apiKey = this.providerKeyService.getApiKey(keyProvider) ?? undefined;
-      if (apiKey) keySource = 'provider-service';
-    }
-
-    if (!apiKey) {
-      apiKey = this.apiKeys[provider];
-      if (apiKey) keySource = 'stored';
-    }
-
-    // Debug logging for API key resolution
-    const keyPreview = apiKey ? `${apiKey.slice(0, 8)}...` : 'MISSING';
-    this.logger.debug('Resolving request config', {
-      model,
-      provider,
-      displayProvider,
-      keyProvider,
-      baseUrl,
-      keySource,
-      keyPreview,
-      hasProviderService: !!this.providerKeyService,
-      hasStoredKey: !!this.apiKeys[provider],
     });
-
-    if (!apiKey && providerRequiresAuth(keyProvider)) {
-      throw new Error(
-        `API key not configured for provider '${keyProvider}'. Use /providers to add your API key.`
-      );
-    }
-
-    return {
-      provider,
-      displayProvider,
-      model,
-      apiKey,
-      baseUrl,
-      maxTokens: llm.maxTokens,
-      temperature: llm.temperature,
-      reasoning: llm.reasoning,
-    };
   }
 
   /**
@@ -257,10 +265,11 @@ class LLMRouterAdapter implements LLMAdapter {
    */
   respond(params: RespondParams): Effect.Effect<LLMResponse, LLMExecutionError> {
     return Effect.gen(this, function* () {
-      const resolved = yield* Effect.tryPromise({
-        try: () => this.resolveRequestConfig(params.llm),
-        catch: (error) => toLLMExecutionError(error, params.llm.provider ?? 'unknown', params.llm.model),
-      });
+      const resolved = yield* this.resolveRequestConfig(params.llm).pipe(
+        Effect.mapError((error) =>
+          toLLMExecutionError(error, params.llm.provider ?? 'unknown', params.llm.model)
+        )
+      );
 
       const provider = getProvider(resolved.provider);
       const context: ProviderContext = {
@@ -291,10 +300,11 @@ class LLMRouterAdapter implements LLMAdapter {
   stream(params: StreamParams): Stream.Stream<string, LLMExecutionError> {
     return Stream.unwrap(
       Effect.gen(this, function* () {
-        const resolved = yield* Effect.tryPromise({
-          try: () => this.resolveRequestConfig(params.llm),
-          catch: (error) => toLLMExecutionError(error, params.llm.provider ?? 'unknown', params.llm.model),
-        });
+        const resolved = yield* this.resolveRequestConfig(params.llm).pipe(
+          Effect.mapError((error) =>
+            toLLMExecutionError(error, params.llm.provider ?? 'unknown', params.llm.model)
+          )
+        );
 
         const provider = getProvider(resolved.provider);
         const context: ProviderContext = {
@@ -332,6 +342,10 @@ class LLMRouterAdapter implements LLMAdapter {
       })
     );
   }
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 /**

@@ -41,8 +41,6 @@ import { createAgentGoalsRepository } from '../db/repositories/agent-goals.js'
 import { createAgentActionsRepository } from '../db/repositories/agent-actions.js'
 import { createAgentTracesRepository } from '../db/repositories/agent-traces.js'
 import type { AgentTracesRepository } from '../db/repositories/agent-traces.js'
-import { createEscalationsRepository } from '../db/repositories/escalations.js'
-import type { EscalationsRepository } from '../db/repositories/escalations.js'
 import { createAgenticTaskRepository } from '../db/repositories/agentic-task.js'
 import type { AgenticTaskRepository } from '../db/repositories/agentic-task.js'
 import { createAgenticRunRepository } from '../db/repositories/agentic-run.js'
@@ -154,7 +152,6 @@ export class SyncDaemon {
   readonly goalsRepo: AgentGoalsRepository
   readonly actionsRepo: AgentActionsRepository
   readonly tracesRepo: AgentTracesRepository
-  readonly escalationsRepo: EscalationsRepository
   readonly agenticTaskRepo: AgenticTaskRepository
   readonly agenticRunRepo: AgenticRunRepository
   readonly agenticIntegration: AgenticTaskIntegration
@@ -190,7 +187,6 @@ export class SyncDaemon {
     goalsRepo: AgentGoalsRepository,
     actionsRepo: AgentActionsRepository,
     tracesRepo: AgentTracesRepository,
-    escalationsRepo: EscalationsRepository,
     agenticTaskRepo: AgenticTaskRepository,
     agenticRunRepo: AgenticRunRepository,
     agenticIntegration: AgenticTaskIntegration,
@@ -219,7 +215,6 @@ export class SyncDaemon {
     this.goalsRepo = goalsRepo
     this.actionsRepo = actionsRepo
     this.tracesRepo = tracesRepo
-    this.escalationsRepo = escalationsRepo
     this.agenticTaskRepo = agenticTaskRepo
     this.agenticRunRepo = agenticRunRepo
     this.agenticIntegration = agenticIntegration
@@ -255,7 +250,6 @@ export class SyncDaemon {
     const goalsRepo = createAgentGoalsRepository(ctx)
     const actionsRepo = createAgentActionsRepository(ctx)
     const tracesRepo = createAgentTracesRepository(ctx)
-    const escalationsRepo = createEscalationsRepository(ctx)
     const agenticTaskRepo = createAgenticTaskRepository(ctx)
     const agenticRunRepo = createAgenticRunRepository(ctx)
     const researchRepo = createResearchRepository(ctx)
@@ -340,7 +334,6 @@ export class SyncDaemon {
       goalsRepo,
       actionsRepo,
       tracesRepo,
-      escalationsRepo,
       agenticTaskRepo,
       agenticRunRepo,
       agenticIntegration,

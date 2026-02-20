@@ -93,7 +93,6 @@ export const CadenceDecisionSchema = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('stop_work_item'),
     reason: z.string(),
-    escalationId: z.string().optional(),
   }),
 ]);
 

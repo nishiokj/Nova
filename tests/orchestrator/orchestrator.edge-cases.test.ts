@@ -7,8 +7,10 @@ import {
   Orchestrator,
   type OrchestratorRuntime,
 } from 'orchestrator/orchestrator.js';
-import { createHookRegistry, type HookRegistry } from 'orchestrator/hookRegistry/index.js';
-import { getProtocolId } from 'protocol';
+import {
+  createUnifiedHookRegistry,
+  type UnifiedHookRegistry,
+} from 'orchestrator/unifiedHooks/registry.js';
 import { getOutputSchemaJson } from 'shared';
 import { successResult, type AgentEvent } from 'types';
 import type { ToolRegistry } from 'tools';
@@ -16,7 +18,6 @@ import { makeRuntimeControlQueue, publishRuntimeControl } from 'runtime';
 
 const REQUEST_ID = 'req-orch-edge';
 const CWD = process.cwd();
-const HOOK_META = { source: 'edge-tests', protocolId: getProtocolId() };
 
 function createResponse(params: {
   action: 'done' | 'continue';
@@ -152,17 +153,20 @@ function createOrchestrator(params: {
   );
 }
 
-function registerQualityGateBlockOnce(registry: HookRegistry): { wasUsed: () => boolean } {
+function registerQualityGateBlockOnce(registry: UnifiedHookRegistry): { wasUsed: () => boolean } {
   let used = false;
   registry.register({
     id: 'block-first-goal',
+    mode: 'decision',
+    scope: 'orchestrator',
+    source: 'edge-tests',
     event: 'goal_state_reached',
     policy: { kind: 'fire_and_forget' },
     criticality: 'non_critical',
     idempotency: 'idempotent',
     priority: 100,
     timeoutMs: 3_000,
-    run: async () => {
+    callback: () => Effect.sync(() => {
       if (used) {
         return { kind: 'success', decision: { verdict: 'passed' } };
       }
@@ -174,22 +178,25 @@ function registerQualityGateBlockOnce(registry: HookRegistry): { wasUsed: () => 
           issues: ['Continue execution once before terminating'],
         },
       };
-    },
-  } as never, HOOK_META);
+    }),
+  } as never);
   return { wasUsed: () => used };
 }
 
-function registerBoundsSplitOnce(registry: HookRegistry): { wasUsed: () => boolean } {
+function registerBoundsSplitOnce(registry: UnifiedHookRegistry): { wasUsed: () => boolean } {
   let used = false;
   registry.register({
     id: 'split-on-bounds',
+    mode: 'decision',
+    scope: 'orchestrator',
+    source: 'edge-tests',
     event: 'bounds_exceeded',
     policy: { kind: 'fire_and_forget' },
     criticality: 'non_critical',
     idempotency: 'idempotent',
     priority: 100,
     timeoutMs: 3_000,
-    run: async () => {
+    callback: () => Effect.sync(() => {
       if (used) {
         return { kind: 'skip', reason: 'already split' };
       }
@@ -214,8 +221,8 @@ function registerBoundsSplitOnce(registry: HookRegistry): { wasUsed: () => boole
           ],
         },
       };
-    },
-  } as never, HOOK_META);
+    }),
+  } as never);
   return { wasUsed: () => used };
 }
 
@@ -231,7 +238,7 @@ describe('Orchestrator edge cases (Effect runtime)', () => {
       createResponse({ action: 'done', response: 'third pass', goalStateReached: true }),
     ]);
 
-    const registry = createHookRegistry();
+    const registry = createUnifiedHookRegistry();
     const qualityGate = registerQualityGateBlockOnce(registry);
 
     const controlQueue = Effect.runSync(makeRuntimeControlQueue());
@@ -278,13 +285,13 @@ describe('Orchestrator edge cases (Effect runtime)', () => {
       },
     };
 
-    const result = await orchestrator.execute(
+    const result = await Effect.runPromise(orchestrator.execute(
       new ContextWindow('edge-hook-cancel', 200_000),
       'hook cancellation goal',
       'standard',
       CWD,
       runtime
-    );
+    ));
 
     expect(hookStarted).toBe(true);
     expect(hookAborted).toBe(true);
@@ -310,7 +317,7 @@ describe('Orchestrator edge cases (Effect runtime)', () => {
       createResponse({ action: 'continue', response: 'loop', goalStateReached: false }),
     ]);
 
-    const registry = createHookRegistry();
+    const registry = createUnifiedHookRegistry();
     const split = registerBoundsSplitOnce(registry);
 
     let abortedChildren = 0;
@@ -327,7 +334,7 @@ describe('Orchestrator edge cases (Effect runtime)', () => {
       agentRegistry: createAgentRegistry(1),
     });
 
-    const result = await orchestrator.execute(
+    const result = await Effect.runPromise(orchestrator.execute(
       new ContextWindow('edge-tree-cancel', 200_000),
       'tree cancellation goal',
       'standard',
@@ -351,7 +358,7 @@ describe('Orchestrator edge cases (Effect runtime)', () => {
           }));
         },
       }
-    );
+    ));
 
     expect(split.wasUsed()).toBe(true);
     expect(cancelSent).toBe(true);

@@ -32,79 +32,6 @@ export type SessionPermissionStateWithFlags = SessionPermissionState & {
   restrictWriteToPaths?: string[];
 };
 
-export interface PausedState {
-  goal: string;
-  agentType: string;
-  workingDir: string;
-  userPromptType?: string;
-  pausedAt: number; // Timestamp when session entered paused state
-}
-
-export type PausedWorkItemStatus = 'pending' | 'resolved' | 'cancelled';
-
-export interface PausedWorkItemState {
-  workId: string;
-  agentType: string;
-  objective?: string;
-  reason: string;
-  escalationId?: string;
-  status: PausedWorkItemStatus;
-  createdAt: number;
-  updatedAt: number;
-  resolvedAt?: number;
-  resolutionSummary?: string;
-}
-
-function asNonEmptyString(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function asPositiveTimestamp(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
-}
-
-function normalizePausedWorkItemStatus(value: unknown): PausedWorkItemStatus {
-  switch (value) {
-    case 'pending':
-    case 'resolved':
-    case 'cancelled':
-      return value;
-    default:
-      return 'pending';
-  }
-}
-
-function normalizePausedWorkItem(value: unknown): PausedWorkItemState | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  const input = value as Record<string, unknown>;
-  const workId = asNonEmptyString(input.workId);
-  const agentType = asNonEmptyString(input.agentType);
-  const reason = asNonEmptyString(input.reason);
-  if (!workId || !agentType || !reason) return null;
-  const objective = asNonEmptyString(input.objective);
-  const escalationId = asNonEmptyString(input.escalationId);
-
-  const createdAt = asPositiveTimestamp(input.createdAt) ?? Date.now();
-  const updatedAt = asPositiveTimestamp(input.updatedAt) ?? createdAt;
-  const resolvedAt = asPositiveTimestamp(input.resolvedAt);
-  const resolutionSummary = asNonEmptyString(input.resolutionSummary);
-
-  return {
-    workId,
-    agentType,
-    ...(objective ? { objective } : {}),
-    reason,
-    ...(escalationId ? { escalationId } : {}),
-    status: normalizePausedWorkItemStatus(input.status),
-    createdAt,
-    updatedAt,
-    ...(resolvedAt ? { resolvedAt } : {}),
-    ...(resolutionSummary ? { resolutionSummary } : {}),
-  };
-}
-
 /**
  * Build an interruption directive that wraps the user's message with guidance.
  * This helps the agent understand the message arrived mid-execution and how to handle it.
@@ -178,8 +105,6 @@ export class SessionStore {
   private readonly permissionChecker: PermissionChecker;
   private context: ContextWindow | null = null;
   private readonly contextFilePath: string;
-  private pausedState: PausedState | null = null;
-  private pausedWorkItems = new Map<string, PausedWorkItemState>();
   private modelSelections = new Map<string, ModelSelection>();
   private asyncModeEnabled = false;
 
@@ -264,8 +189,8 @@ export class SessionStore {
       return this.context;
     }
 
-    // First, recover paused state from GraphD metadata if it exists
-    this.recoverPausedState();
+    // Recover session state (model selections, permissions) from GraphD metadata
+    this.recoverSessionState();
 
     const hadLocalContextFile = existsSync(this.contextFilePath);
     if (hadLocalContextFile) {
@@ -310,10 +235,10 @@ export class SessionStore {
   }
 
   /**
-   * Recover paused state from GraphD session metadata.
-   * Called during context hydration to restore session pause state.
+   * Recover session state (model selections, permissions) from GraphD metadata.
+   * Called during context hydration.
    */
-  private recoverPausedState(): void {
+  private recoverSessionState(): void {
     if (!this.isGraphDReady() || !this.graphd) {
       return;
     }
@@ -321,41 +246,12 @@ export class SessionStore {
     try {
       const session = this.graphd.sessionGet(this.sessionKey);
       const metadata = session?.metadata as Record<string, unknown> | undefined;
-      const pausedStateMetadata = metadata?.paused_state as Omit<PausedState, 'pausedAt'> | undefined;
 
-      if (pausedStateMetadata) {
-        this.pausedState = {
-          ...pausedStateMetadata,
-          pausedAt: Date.now(),
-        };
-        this.logger.debug('Recovered paused state from GraphD', {
-          sessionKey: this.sessionKey,
-          goal: this.pausedState.goal,
-          agentType: this.pausedState.agentType,
-        });
-      }
-
-      const pausedWorkItemsRaw = metadata?.paused_work_items;
-      const pausedWorkItems = Array.isArray(pausedWorkItemsRaw)
-        ? pausedWorkItemsRaw.map((entry) => normalizePausedWorkItem(entry)).filter((entry): entry is PausedWorkItemState => entry !== null)
-        : [];
-      if (pausedWorkItems.length > 0) {
-        this.pausedWorkItems.clear();
-        for (const item of pausedWorkItems) {
-          this.pausedWorkItems.set(item.workId, item);
-        }
-        this.logger.debug('Recovered paused work items from GraphD', {
-          sessionKey: this.sessionKey,
-          count: pausedWorkItems.length,
-        });
-      }
-
-      // Hydrate session state (model selections, permissions) from metadata
       if (metadata) {
         this.hydrateSessionState(metadata);
       }
     } catch (error) {
-      this.logger.warning('Failed to recover paused state from GraphD', {
+      this.logger.warning('Failed to recover session state from GraphD', {
         sessionKey: this.sessionKey,
         error: String(error),
       });
@@ -485,131 +381,9 @@ export class SessionStore {
     this.graphd.sessionTouch(this.sessionKey, workingDir);
   }
 
-  setPausedState(state: Omit<PausedState, 'pausedAt'>): void {
-    this.pausedState = { ...state, pausedAt: Date.now() };
-    // Persist paused state to GraphD session metadata for recovery
-    if (this.isGraphDReady() && this.graphd) {
-      try {
-        this.graphd.sessionUpdateMetadata(this.sessionKey, { paused_state: state });
-        this.logger.debug('Persisted paused state to GraphD', {
-          sessionKey: this.sessionKey,
-          goal: state.goal,
-          agentType: state.agentType,
-        });
-      } catch (error) {
-        this.logger.warning('Failed to persist paused state to GraphD', {
-          sessionKey: this.sessionKey,
-          error: String(error),
-        });
-      }
-    }
-  }
-
-  getPausedState(): PausedState | null {
-    return this.pausedState;
-  }
-
-  upsertPausedWorkItem(input: {
-    workId: string;
-    agentType: string;
-    objective?: string;
-    reason: string;
-    escalationId?: string;
-    status?: PausedWorkItemStatus;
-    timestamp?: number;
-  }): PausedWorkItemState {
-    const now = input.timestamp ?? Date.now();
-    const existing = this.pausedWorkItems.get(input.workId);
-    const next: PausedWorkItemState = {
-      workId: input.workId,
-      agentType: input.agentType,
-      ...(input.objective ? { objective: input.objective } : existing?.objective ? { objective: existing.objective } : {}),
-      reason: input.reason,
-      ...(input.escalationId ? { escalationId: input.escalationId } : existing?.escalationId ? { escalationId: existing.escalationId } : {}),
-      status: input.status ?? 'pending',
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-      ...(existing?.resolvedAt ? { resolvedAt: existing.resolvedAt } : {}),
-      ...(existing?.resolutionSummary ? { resolutionSummary: existing.resolutionSummary } : {}),
-    };
-    this.pausedWorkItems.set(input.workId, next);
-    this.persistPausedWorkItems();
-    return next;
-  }
-
-  listPausedWorkItems(): PausedWorkItemState[] {
-    return Array.from(this.pausedWorkItems.values()).sort((a, b) => b.updatedAt - a.updatedAt);
-  }
-
-  resolvePausedWorkItem(workId: string, resolutionSummary?: string, timestamp: number = Date.now()): PausedWorkItemState | null {
-    const existing = this.pausedWorkItems.get(workId);
-    if (!existing) return null;
-    if (existing.status === 'resolved' || existing.status === 'cancelled') return existing;
-
-    const next: PausedWorkItemState = {
-      ...existing,
-      status: 'resolved',
-      updatedAt: timestamp,
-      resolvedAt: timestamp,
-      ...(resolutionSummary ? { resolutionSummary } : {}),
-    };
-    this.pausedWorkItems.set(workId, next);
-    this.persistPausedWorkItems();
-    return next;
-  }
-
-  cancelPausedWorkItem(workId: string, resolutionSummary?: string, timestamp: number = Date.now()): PausedWorkItemState | null {
-    const existing = this.pausedWorkItems.get(workId);
-    if (!existing) return null;
-    if (existing.status === 'resolved' || existing.status === 'cancelled') return existing;
-
-    const next: PausedWorkItemState = {
-      ...existing,
-      status: 'cancelled',
-      updatedAt: timestamp,
-      resolvedAt: timestamp,
-      ...(resolutionSummary ? { resolutionSummary } : {}),
-    };
-    this.pausedWorkItems.set(workId, next);
-    this.persistPausedWorkItems();
-    return next;
-  }
-
-  private persistPausedWorkItems(): void {
-    if (!this.isGraphDReady() || !this.graphd) return;
-    try {
-      this.graphd.sessionUpdateMetadata(this.sessionKey, {
-        paused_work_items: Array.from(this.pausedWorkItems.values()),
-      });
-    } catch (error) {
-      this.logger.warning('Failed to persist paused work items to GraphD', {
-        sessionKey: this.sessionKey,
-        error: String(error),
-      });
-    }
-  }
-
-  clearPausedState(): void {
-    this.pausedState = null;
-    // Clear paused state from GraphD session metadata
-    if (this.isGraphDReady() && this.graphd) {
-      try {
-        this.graphd.sessionUpdateMetadata(this.sessionKey, { paused_state: null });
-        this.logger.debug('Cleared paused state from GraphD', { sessionKey: this.sessionKey });
-      } catch (error) {
-        this.logger.warning('Failed to clear paused state from GraphD', {
-          sessionKey: this.sessionKey,
-          error: String(error),
-        });
-      }
-    }
-  }
-
   close(): void {
     this.persistContext();
     this.context = null;
-    this.pausedState = null;
-    this.pausedWorkItems.clear();
     this.modelSelections.clear();
     this.asyncRun = null;
     this.executionCompletionResolver?.();
@@ -775,7 +549,6 @@ export class SessionStore {
       controlQueue: this.executionControlQueue,
       runControl: {
         state: this.executionRunControl.state,
-        pause: this.executionRunControl.pause ? { ...this.executionRunControl.pause } : undefined,
         cancellation: this.executionRunControl.cancellation
           ? {
               ...this.executionRunControl.cancellation,
@@ -793,7 +566,6 @@ export class SessionStore {
   updateExecutionRunControl(control: RunControlMetadata): void {
     this.executionRunControl = {
       state: control.state,
-      pause: control.pause ? { ...control.pause } : undefined,
       cancellation: control.cancellation
         ? {
             ...control.cancellation,
@@ -808,7 +580,6 @@ export class SessionStore {
   getExecutionRunControl(): RunControlMetadata {
     return {
       state: this.executionRunControl.state,
-      pause: this.executionRunControl.pause ? { ...this.executionRunControl.pause } : undefined,
       cancellation: this.executionRunControl.cancellation
         ? {
             ...this.executionRunControl.cancellation,

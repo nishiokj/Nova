@@ -97,7 +97,7 @@ export type CadenceDecision =
   | { action: 'realign'; guidance: string; newWork?: WorkItemSpec }
   | { action: 'split'; workItems: WorkItemSpec[] }
   | { action: 'stop'; reason: string }
-  | { action: 'stop_work_item'; reason: string; escalationId?: string };
+  | { action: 'stop_work_item'; reason: string };
 
 /**
  * Type guard for continue action.
@@ -118,7 +118,7 @@ export function isCadenceStop(d: CadenceDecision): d is { action: 'stop'; reason
  */
 export function isCadenceStopWorkItem(
   d: CadenceDecision
-): d is { action: 'stop_work_item'; reason: string; escalationId?: string } {
+): d is { action: 'stop_work_item'; reason: string } {
   return d.action === 'stop_work_item';
 }
 

@@ -1,13 +1,7 @@
 import { Effect, Queue } from 'effect';
 import { RuntimeExecutionError } from './errors.js';
 
-export type RuntimeControlAction = 'continue' | 'pause' | 'resume' | 'cancel';
-
-export interface RuntimePauseMetadata {
-  reason?: string;
-  requestedBy?: 'user' | 'system' | 'policy';
-  requestedAt: number;
-}
+export type RuntimeControlAction = 'continue' | 'cancel';
 
 export interface RuntimeCancellationMetadata {
   reason?: string;
@@ -21,7 +15,6 @@ export interface RuntimeControlMessage {
   action: RuntimeControlAction;
   runId?: string;
   workItemId?: string;
-  pause?: RuntimePauseMetadata;
   cancellation?: RuntimeCancellationMetadata;
   metadata?: Record<string, unknown>;
 }
@@ -29,7 +22,7 @@ export interface RuntimeControlMessage {
 export type RuntimeControlQueue = Queue.Queue<RuntimeControlMessage>;
 
 /**
- * Create an unbounded control channel for pause/resume/cancel flow.
+ * Create an unbounded control channel for cancel flow.
  */
 export function makeRuntimeControlQueue(): Effect.Effect<RuntimeControlQueue> {
   return Queue.unbounded<RuntimeControlMessage>();

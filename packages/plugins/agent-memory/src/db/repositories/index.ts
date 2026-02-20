@@ -251,13 +251,6 @@ export {
 } from './agent-traces.js'
 
 export {
-  createEscalationsRepository,
-  type EscalationsRepository,
-  type EscalationRow,
-  type EscalationListOptions,
-} from './escalations.js'
-
-export {
   createWorkItemTemplatesRepository,
   type WorkItemTemplatesRepository,
   type WorkItemTemplateRow,

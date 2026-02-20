@@ -7,7 +7,6 @@
 import type {
   RunCancellationMetadata,
   RunControlState,
-  RunPauseMetadata,
 } from './llm.js';
 
 // AgentType is just a string identifier for agent types (e.g., 'routing', 'explorer', 'standard')
@@ -70,7 +69,7 @@ export type AgentType = CoreAgentType | 'orchestrator';
 // RUN CONTROL TYPES
 // ============================================
 
-export type RunControlAction = 'pause' | 'resume' | 'cancel';
+export type RunControlAction = 'cancel';
 export type RunControlScope = 'run' | 'work_item' | 'tool';
 export type RunControlSource = 'user' | 'system' | 'policy';
 
@@ -85,7 +84,6 @@ export interface RunControlRequestedData {
   source: RunControlSource;
   target: RunControlTarget;
   stateBefore: RunControlState;
-  pause?: RunPauseMetadata;
   cancellation?: RunCancellationMetadata;
 }
 
@@ -95,7 +93,6 @@ export interface RunControlAppliedData {
   target: RunControlTarget;
   stateBefore: RunControlState;
   stateAfter: RunControlState;
-  pause?: RunPauseMetadata;
   cancellation?: RunCancellationMetadata;
 }
 
@@ -105,7 +102,6 @@ export interface RunControlRejectedData {
   target: RunControlTarget;
   stateBefore: RunControlState;
   reason: string;
-  pause?: RunPauseMetadata;
   cancellation?: RunCancellationMetadata;
 }
 
@@ -507,7 +503,7 @@ export interface GitCommitData {
 
 /**
  * Data for run_control_requested event.
- * Emitted when pause/resume/cancel is requested.
+ * Emitted when cancel is requested.
  */
 export interface RunControlRequestedEventData extends RunControlRequestedData {}
 

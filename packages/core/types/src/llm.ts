@@ -237,16 +237,10 @@ export interface LLMResponse {
 }
 
 // ============================================
-// EFFECT RUNTIME CONTROL
+// RUNTIME CONTROL
 // ============================================
 
-export type RunControlState = 'running' | 'paused' | 'cancelling' | 'cancelled';
-
-export interface RunPauseMetadata {
-  requestedAt: number;
-  requestedBy?: 'user' | 'system' | 'policy';
-  reason?: string;
-}
+export type RunControlState = 'running' | 'cancelling' | 'cancelled';
 
 export interface RunCancellationMetadata {
   requestedAt: number;
@@ -258,7 +252,6 @@ export interface RunCancellationMetadata {
 
 export interface RunControlMetadata {
   state: RunControlState;
-  pause?: RunPauseMetadata;
   cancellation?: RunCancellationMetadata;
 }
 
@@ -277,7 +270,6 @@ export interface LLMExecutionContext {
 export interface LLMExecutionError {
   type:
     | 'cancelled'
-    | 'paused'
     | 'timeout'
     | 'provider_error'
     | 'schema_error'

@@ -60,8 +60,7 @@ export async function executeWrite(
   args: Record<string, unknown>,
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
-  // Accept both camelCase and snake_case parameter names for compatibility
-  const path = (args.path ?? args.file_path) as string;
+  const path = args.path as string;
   const cwd = context?.workdirOverride ?? process.cwd();
   const content = args.content as string;
 
@@ -127,12 +126,11 @@ export async function executeEdit(
   args: Record<string, unknown>,
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
-  // Accept both camelCase and snake_case parameter names for compatibility
-  const path = (args.path ?? args.file_path) as string;
+  const path = args.path as string;
   const cwd = context?.workdirOverride ?? process.cwd();
-  const oldString = (args.oldString ?? args.old_string) as string;
-  const newString = (args.newString ?? args.new_string) as string;
-  const replaceAll = ((args.replaceAll ?? args.replace_all) as boolean) ?? false;
+  const oldString = args.oldString as string;
+  const newString = args.newString as string;
+  const replaceAll = (args.replaceAll as boolean) ?? false;
 
   if (!oldString || newString === undefined) {
     return errorResult(
@@ -173,7 +171,7 @@ export async function executeEdit(
     if (count === 0) {
       return errorResult(
         'Edit',
-        `old_string not found in ${resolvedPath}. Verify the exact text including whitespace.`,
+        `oldString not found in ${resolvedPath}. Verify the exact text including whitespace.`,
         Date.now() - startTime,
         { path: resolvedPath, action: 'edit' }
       );
@@ -191,7 +189,7 @@ export async function executeEdit(
 
       return errorResult(
         'Edit',
-        `old_string found ${count} times - not unique. ` +
+        `oldString found ${count} times - not unique. ` +
           `Add surrounding context to make unique, or use replaceAll=true. ` +
           `First occurrence near: ...${snippet}...`,
         Date.now() - startTime,
@@ -326,30 +324,6 @@ interface EditOperation {
   replaceAll?: boolean;
 }
 
-// Raw edit operation from LLM (may use snake_case)
-interface RawEditOperation {
-  path?: string;
-  file_path?: string;
-  oldString?: string;
-  old_string?: string;
-  newString?: string;
-  new_string?: string;
-  replaceAll?: boolean;
-  replace_all?: boolean;
-}
-
-/**
- * Normalize edit operation to camelCase.
- */
-function normalizeEditOperation(raw: RawEditOperation): EditOperation {
-  return {
-    path: (raw.path ?? raw.file_path) as string,
-    oldString: (raw.oldString ?? raw.old_string) as string,
-    newString: (raw.newString ?? raw.new_string) as string,
-    replaceAll: (raw.replaceAll ?? raw.replace_all) ?? false,
-  };
-}
-
 interface ValidationError {
   index: number;
   path: string;
@@ -374,14 +348,11 @@ export async function executeBatchEdit(
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
   const cwd = context?.workdirOverride ?? process.cwd();
-  const rawEdits = args.edits as RawEditOperation[];
+  const edits = args.edits as EditOperation[];
 
-  if (!rawEdits || !Array.isArray(rawEdits) || rawEdits.length === 0) {
+  if (!edits || !Array.isArray(edits) || edits.length === 0) {
     return errorResult('BatchEdit', 'Must provide non-empty edits array', 0);
   }
-
-  // Normalize all edits to camelCase
-  const edits = rawEdits.map(normalizeEditOperation);
 
   const startTime = Date.now();
 
@@ -516,7 +487,7 @@ export function executeWriteEffect(
     catch: (error) =>
       toToolExecutionError(error, 'execution_error', {
         toolName: 'Write',
-        path: args.path ?? args.file_path,
+        path: args.path,
       }),
   });
 }
@@ -530,7 +501,7 @@ export function executeEditEffect(
     catch: (error) =>
       toToolExecutionError(error, 'execution_error', {
         toolName: 'Edit',
-        path: args.path ?? args.file_path,
+        path: args.path,
       }),
   });
 }
