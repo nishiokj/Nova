@@ -28,11 +28,24 @@ export const RoutingOutputSchema = z.object({
 // Base action outputs (explicit state handling)
 // --------------------------------------------
 
-const DoneOutputSchema = z.object({
+// NOTE: `action` is loop control; `goalStateReached` is objective completion.
+// The two are intentionally not equivalent:
+// - action="done" + goalStateReached=true  => objective complete
+// - action="done" + goalStateReached=false => agent is blocked (must be awaitingUserInput=true)
+// - action="continue"                      => keep working
+
+const DoneGoalReachedOutputSchema = z.object({
   action: z.literal('done'),
   response: z.string(),
   goalStateReached: z.literal(true),
   awaitingUserInput: z.literal(false),
+}).strict();
+
+const DoneAwaitingUserInputOutputSchema = z.object({
+  action: z.literal('done'),
+  response: z.string(),
+  goalStateReached: z.literal(false),
+  awaitingUserInput: z.literal(true),
 }).strict();
 
 const ContinueOutputSchema = z.object({
@@ -47,7 +60,8 @@ const ContinueOutputSchema = z.object({
  * Explicitly enumerates all valid state combinations.
  */
 export const AgentActionOutputSchema = z.union([
-  DoneOutputSchema,
+  DoneGoalReachedOutputSchema,
+  DoneAwaitingUserInputOutputSchema,
   ContinueOutputSchema,
 ]);
 
@@ -55,7 +69,8 @@ export const AgentActionOutputSchema = z.union([
  * Goal-driven agent output - extends agent action with work tracking.
  */
 export const GoalDrivenOutputSchema = z.union([
-  DoneOutputSchema.extend({ work_done: z.string() }).strict(),
+  DoneGoalReachedOutputSchema.extend({ work_done: z.string() }).strict(),
+  DoneAwaitingUserInputOutputSchema.extend({ work_done: z.string() }).strict(),
   ContinueOutputSchema.extend({ work_done: z.string() }).strict(),
 ]);
 
@@ -98,7 +113,14 @@ export const ArtifactSchema = z.object({
  * Explorer agent output - discovers codebase structure and artifacts.
  */
 export const ExplorerOutputSchema = z.union([
-  DoneOutputSchema.extend({
+  DoneGoalReachedOutputSchema.extend({
+    packageManagers: z.array(z.string()),
+    frameworks: z.array(z.string()),
+    languages: z.array(z.string()),
+    os: z.string(),
+    artifacts: z.array(ArtifactSchema).describe('Semantic code artifacts extracted from source files'),
+  }).strict(),
+  DoneAwaitingUserInputOutputSchema.extend({
     packageManagers: z.array(z.string()),
     frameworks: z.array(z.string()),
     languages: z.array(z.string()),
@@ -132,7 +154,11 @@ export const WorkItemOutputSchema = z.object({
  * Runtime script agent output - creates execution plans.
  */
 export const RuntimeScriptOutputSchema = z.union([
-  DoneOutputSchema.extend({
+  DoneGoalReachedOutputSchema.extend({
+    goal: z.string(),
+    workItems: z.array(WorkItemOutputSchema),
+  }).strict(),
+  DoneAwaitingUserInputOutputSchema.extend({
     goal: z.string(),
     workItems: z.array(WorkItemOutputSchema),
   }).strict(),
@@ -146,7 +172,8 @@ export const RuntimeScriptOutputSchema = z.union([
  * Planner output schema (planning agent).
  */
 export const PlannerOutputSchema = z.union([
-  DoneOutputSchema,
+  DoneGoalReachedOutputSchema,
+  DoneAwaitingUserInputOutputSchema,
   ContinueOutputSchema,
 ]);
 

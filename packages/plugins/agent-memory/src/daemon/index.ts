@@ -41,12 +41,12 @@ import { createAgentGoalsRepository } from '../db/repositories/agent-goals.js'
 import { createAgentActionsRepository } from '../db/repositories/agent-actions.js'
 import { createAgentTracesRepository } from '../db/repositories/agent-traces.js'
 import type { AgentTracesRepository } from '../db/repositories/agent-traces.js'
-import { createEscalationsRepository } from '../db/repositories/escalations.js'
-import type { EscalationsRepository } from '../db/repositories/escalations.js'
 import { createAgenticTaskRepository } from '../db/repositories/agentic-task.js'
 import type { AgenticTaskRepository } from '../db/repositories/agentic-task.js'
 import { createAgenticRunRepository } from '../db/repositories/agentic-run.js'
 import type { AgenticRunRepository } from '../db/repositories/agentic-run.js'
+import { createResearchRepository } from '../db/repositories/research.js'
+import type { ResearchRepository } from '../db/repositories/research.js'
 import { AgenticTaskIntegration, type AgenticIntegrationConfig } from '../agentic/integration.js'
 import { SyncEngine, type SyncEngineConfig } from '../sync/engine.js'
 import { Collector } from '../sync/collector.js'
@@ -152,10 +152,10 @@ export class SyncDaemon {
   readonly goalsRepo: AgentGoalsRepository
   readonly actionsRepo: AgentActionsRepository
   readonly tracesRepo: AgentTracesRepository
-  readonly escalationsRepo: EscalationsRepository
   readonly agenticTaskRepo: AgenticTaskRepository
   readonly agenticRunRepo: AgenticRunRepository
   readonly agenticIntegration: AgenticTaskIntegration
+  readonly researchRepo: ResearchRepository
 
   readonly server: HttpServer
   private connectors: Map<ConnectorType, Connector> = new Map()
@@ -187,10 +187,10 @@ export class SyncDaemon {
     goalsRepo: AgentGoalsRepository,
     actionsRepo: AgentActionsRepository,
     tracesRepo: AgentTracesRepository,
-    escalationsRepo: EscalationsRepository,
     agenticTaskRepo: AgenticTaskRepository,
     agenticRunRepo: AgenticRunRepository,
     agenticIntegration: AgenticTaskIntegration,
+    researchRepo: ResearchRepository,
   ) {
     this.config = config
     this.sql = config.sql
@@ -215,10 +215,10 @@ export class SyncDaemon {
     this.goalsRepo = goalsRepo
     this.actionsRepo = actionsRepo
     this.tracesRepo = tracesRepo
-    this.escalationsRepo = escalationsRepo
     this.agenticTaskRepo = agenticTaskRepo
     this.agenticRunRepo = agenticRunRepo
     this.agenticIntegration = agenticIntegration
+    this.researchRepo = researchRepo
   }
 
   /**
@@ -250,9 +250,9 @@ export class SyncDaemon {
     const goalsRepo = createAgentGoalsRepository(ctx)
     const actionsRepo = createAgentActionsRepository(ctx)
     const tracesRepo = createAgentTracesRepository(ctx)
-    const escalationsRepo = createEscalationsRepository(ctx)
     const agenticTaskRepo = createAgenticTaskRepository(ctx)
     const agenticRunRepo = createAgenticRunRepository(ctx)
+    const researchRepo = createResearchRepository(ctx)
 
     // Create auth provider with connector registry
     const connectors = new Map<ConnectorType, Connector>()
@@ -334,10 +334,10 @@ export class SyncDaemon {
       goalsRepo,
       actionsRepo,
       tracesRepo,
-      escalationsRepo,
       agenticTaskRepo,
       agenticRunRepo,
       agenticIntegration,
+      researchRepo,
     )
 
     // Store connectors map reference in daemon for registration

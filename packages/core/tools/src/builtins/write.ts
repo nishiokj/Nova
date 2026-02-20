@@ -8,9 +8,15 @@ import { writeFile, readFile, mkdir, stat, rename, unlink } from 'fs/promises';
 import { resolve, dirname } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
+import { Effect } from 'effect';
 import type { ToolResult } from 'types';
 import { successResult, errorResult } from 'types';
-import type { ToolExecutionContext, ToolRegistrationOptions } from '../types.js';
+import type {
+  ToolExecutionContext,
+  ToolExecutionError,
+  ToolRegistrationOptions,
+} from '../types.js';
+import { toToolExecutionError } from '../types.js';
 
 /**
  * Atomically write content to a file using a temporary file.
@@ -54,8 +60,7 @@ export async function executeWrite(
   args: Record<string, unknown>,
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
-  // Accept both camelCase and snake_case parameter names for compatibility
-  const path = (args.path ?? args.file_path) as string;
+  const path = args.path as string;
   const cwd = context?.workdirOverride ?? process.cwd();
   const content = args.content as string;
 
@@ -121,12 +126,11 @@ export async function executeEdit(
   args: Record<string, unknown>,
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
-  // Accept both camelCase and snake_case parameter names for compatibility
-  const path = (args.path ?? args.file_path) as string;
+  const path = args.path as string;
   const cwd = context?.workdirOverride ?? process.cwd();
-  const oldString = (args.oldString ?? args.old_string) as string;
-  const newString = (args.newString ?? args.new_string) as string;
-  const replaceAll = ((args.replaceAll ?? args.replace_all) as boolean) ?? false;
+  const oldString = args.oldString as string;
+  const newString = args.newString as string;
+  const replaceAll = (args.replaceAll as boolean) ?? false;
 
   if (!oldString || newString === undefined) {
     return errorResult(
@@ -167,7 +171,7 @@ export async function executeEdit(
     if (count === 0) {
       return errorResult(
         'Edit',
-        `old_string not found in ${resolvedPath}. Verify the exact text including whitespace.`,
+        `oldString not found in ${resolvedPath}. Verify the exact text including whitespace.`,
         Date.now() - startTime,
         { path: resolvedPath, action: 'edit' }
       );
@@ -185,7 +189,7 @@ export async function executeEdit(
 
       return errorResult(
         'Edit',
-        `old_string found ${count} times - not unique. ` +
+        `oldString found ${count} times - not unique. ` +
           `Add surrounding context to make unique, or use replaceAll=true. ` +
           `First occurrence near: ...${snippet}...`,
         Date.now() - startTime,
@@ -266,7 +270,7 @@ export const writeToolOptions: ToolRegistrationOptions = {
     required: ['path', 'content'],
   },
   required: ['path', 'content'],
-  executor: executeWrite,
+  executor: executeWriteEffect,
   timeoutMs: 10000,
   readOnly: false,
   parallelizable: false,
@@ -302,7 +306,7 @@ export const editToolOptions: ToolRegistrationOptions = {
     required: ['path', 'oldString', 'newString'],
   },
   required: ['path', 'oldString', 'newString'],
-  executor: executeEdit,
+  executor: executeEditEffect,
   timeoutMs: 10000,
   readOnly: false,
   parallelizable: false,
@@ -318,30 +322,6 @@ interface EditOperation {
   oldString: string;
   newString: string;
   replaceAll?: boolean;
-}
-
-// Raw edit operation from LLM (may use snake_case)
-interface RawEditOperation {
-  path?: string;
-  file_path?: string;
-  oldString?: string;
-  old_string?: string;
-  newString?: string;
-  new_string?: string;
-  replaceAll?: boolean;
-  replace_all?: boolean;
-}
-
-/**
- * Normalize edit operation to camelCase.
- */
-function normalizeEditOperation(raw: RawEditOperation): EditOperation {
-  return {
-    path: (raw.path ?? raw.file_path) as string,
-    oldString: (raw.oldString ?? raw.old_string) as string,
-    newString: (raw.newString ?? raw.new_string) as string,
-    replaceAll: (raw.replaceAll ?? raw.replace_all) ?? false,
-  };
 }
 
 interface ValidationError {
@@ -368,14 +348,11 @@ export async function executeBatchEdit(
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
   const cwd = context?.workdirOverride ?? process.cwd();
-  const rawEdits = args.edits as RawEditOperation[];
+  const edits = args.edits as EditOperation[];
 
-  if (!rawEdits || !Array.isArray(rawEdits) || rawEdits.length === 0) {
+  if (!edits || !Array.isArray(edits) || edits.length === 0) {
     return errorResult('BatchEdit', 'Must provide non-empty edits array', 0);
   }
-
-  // Normalize all edits to camelCase
-  const edits = rawEdits.map(normalizeEditOperation);
 
   const startTime = Date.now();
 
@@ -501,6 +478,47 @@ export async function executeBatchEdit(
   };
 }
 
+export function executeWriteEffect(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.tryPromise({
+    try: () => executeWrite(args, context),
+    catch: (error) =>
+      toToolExecutionError(error, 'execution_error', {
+        toolName: 'Write',
+        path: args.path,
+      }),
+  });
+}
+
+export function executeEditEffect(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.tryPromise({
+    try: () => executeEdit(args, context),
+    catch: (error) =>
+      toToolExecutionError(error, 'execution_error', {
+        toolName: 'Edit',
+        path: args.path,
+      }),
+  });
+}
+
+export function executeBatchEditEffect(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.tryPromise({
+    try: () => executeBatchEdit(args, context),
+    catch: (error) =>
+      toToolExecutionError(error, 'execution_error', {
+        toolName: 'BatchEdit',
+      }),
+  });
+}
+
 /**
  * BatchEdit tool registration options.
  */
@@ -528,7 +546,7 @@ export const batchEditToolOptions: ToolRegistrationOptions = {
     required: ['edits'],
   },
   required: ['edits'],
-  executor: executeBatchEdit,
+  executor: executeBatchEditEffect,
   timeoutMs: 30000,
   readOnly: false,
   parallelizable: false,

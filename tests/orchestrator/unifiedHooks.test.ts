@@ -1,4 +1,5 @@
 import { failClosed, fireAndForget, success, type EventFor, type HookContext } from 'protocol';
+import { Effect } from 'effect';
 import type { UnifiedDecisionHookRegistration, UnifiedEffectHookRegistration } from 'orchestrator/unifiedHooks/contracts.js';
 import { createSessionScopedUnifiedHookRegistry, createUnifiedHookRegistry } from 'orchestrator/unifiedHooks/registry.js';
 import {
@@ -66,7 +67,7 @@ describe('unified hooks registry', () => {
       policy: fireAndForget(),
       criticality: 'non_critical',
       idempotency: 'idempotent',
-      callback: async () => success({ action: 'continue' }),
+      callback: () => Effect.succeed(success({ action: 'continue' })),
     };
 
     const effect: UnifiedEffectHookRegistration<'pre_tool_use'> = {
@@ -78,7 +79,7 @@ describe('unified hooks registry', () => {
       priority: 10,
       timeoutMs: 500,
       policy: fireAndForget(),
-      callback: async () => ({ kind: 'allow' }),
+      callback: () => Effect.succeed({ kind: 'allow' as const }),
     };
 
     registry.register(decision);
@@ -107,7 +108,7 @@ describe('unified hooks registry', () => {
       policy: fireAndForget(),
       criticality: 'non_critical',
       idempotency: 'idempotent',
-      callback: async () => success({ action: 'continue' }),
+      callback: () => Effect.succeed(success({ action: 'continue' })),
     };
 
     expect(() => registry.register(invalid)).toThrow('scope harness is not allowed');
@@ -129,7 +130,7 @@ describe('unified decision runner', () => {
       policy: fireAndForget(),
       criticality: 'non_critical',
       idempotency: 'idempotent',
-      callback: async () => success({ action: 'inject_guidance', message: 'use tests' }),
+      callback: () => Effect.succeed(success({ action: 'inject_guidance', message: 'use tests' })),
     };
 
     const late: UnifiedDecisionHookRegistration<'cadence_audit'> = {
@@ -143,13 +144,15 @@ describe('unified decision runner', () => {
       policy: fireAndForget(),
       criticality: 'non_critical',
       idempotency: 'idempotent',
-      callback: async () => success({ action: 'continue' }),
+      callback: () => Effect.succeed(success({ action: 'continue' })),
     };
 
     registry.register(early);
     registry.register(late);
 
-    const result = await runUnifiedDecisionHooks(createCadenceEvent(), createHookContext(), registry);
+    const result = await Effect.runPromise(
+      runUnifiedDecisionHooks(createCadenceEvent(), createHookContext(), registry)
+    );
 
     expect(result.status).toBe('decision');
     if (result.status === 'decision') {
@@ -171,9 +174,7 @@ describe('unified decision runner', () => {
       policy: failClosed(),
       criticality: 'critical',
       idempotency: 'idempotent',
-      callback: async () => {
-        throw new Error('boom');
-      },
+      callback: () => Effect.fail(new Error('boom')),
     };
 
     const neverRuns: UnifiedDecisionHookRegistration<'cadence_audit'> = {
@@ -187,13 +188,15 @@ describe('unified decision runner', () => {
       policy: fireAndForget(),
       criticality: 'non_critical',
       idempotency: 'idempotent',
-      callback: async () => success({ action: 'continue' }),
+      callback: () => Effect.succeed(success({ action: 'continue' })),
     };
 
     registry.register(criticalFailing);
     registry.register(neverRuns);
 
-    const result = await runUnifiedDecisionHooks(createCadenceEvent(), createHookContext(), registry);
+    const result = await Effect.runPromise(
+      runUnifiedDecisionHooks(createCadenceEvent(), createHookContext(), registry)
+    );
 
     expect(result.status).toBe('no_decision');
     expect(result.hasCriticalFailure).toBe(true);
@@ -214,22 +217,24 @@ describe('unified effect runner', () => {
       priority: 0,
       timeoutMs: 100,
       policy: fireAndForget(),
-      callback: async () => ({ kind: 'block', reason: 'policy violation' }),
+      callback: () => Effect.succeed({ kind: 'block' as const, reason: 'policy violation' }),
     };
 
     registry.register(blocker);
 
-    const result = await runUnifiedEffectHooks(
-      {
-        type: 'pre_tool_use',
-        toolName: 'exec_command',
-        args: { cmd: 'rm -rf /' },
-      },
-      {
-        sessionKey: 'session-1',
-        requestId: 'req-1',
-      },
-      registry
+    const result = await Effect.runPromise(
+      runUnifiedEffectHooks(
+        {
+          type: 'pre_tool_use',
+          toolName: 'exec_command',
+          args: { cmd: 'rm -rf /' },
+        },
+        {
+          sessionKey: 'session-1',
+          requestId: 'req-1',
+        },
+        registry
+      )
     );
 
     expect(result.status).toBe('blocked');
@@ -252,7 +257,7 @@ describe('session-scoped unified hooks', () => {
       policy: fireAndForget(),
       criticality: 'non_critical',
       idempotency: 'idempotent',
-      callback: async () => success({ action: 'inject_guidance', message: 'from session A' }),
+      callback: () => Effect.succeed(success({ action: 'inject_guidance', message: 'from session A' })),
     };
 
     const hookB: UnifiedDecisionHookRegistration<'cadence_audit'> = {
@@ -266,24 +271,28 @@ describe('session-scoped unified hooks', () => {
       policy: fireAndForget(),
       criticality: 'non_critical',
       idempotency: 'idempotent',
-      callback: async () => success({ action: 'inject_guidance', message: 'from session B' }),
+      callback: () => Effect.succeed(success({ action: 'inject_guidance', message: 'from session B' })),
     };
 
     sessionRegistry.register('session-a', hookA);
     sessionRegistry.register('session-b', hookB);
 
-    const resultA = await runUnifiedDecisionHooksForSession(
-      'session-a',
-      createCadenceEvent(),
-      createHookContext(),
-      sessionRegistry
+    const resultA = await Effect.runPromise(
+      runUnifiedDecisionHooksForSession(
+        'session-a',
+        createCadenceEvent(),
+        createHookContext(),
+        sessionRegistry
+      )
     );
 
-    const resultB = await runUnifiedDecisionHooksForSession(
-      'session-b',
-      createCadenceEvent(),
-      createHookContext(),
-      sessionRegistry
+    const resultB = await Effect.runPromise(
+      runUnifiedDecisionHooksForSession(
+        'session-b',
+        createCadenceEvent(),
+        createHookContext(),
+        sessionRegistry
+      )
     );
 
     expect(resultA.status).toBe('decision');
@@ -307,26 +316,30 @@ describe('session-scoped unified hooks', () => {
   it('returns no hooks for sessions without registrations', async () => {
     const sessionRegistry = createSessionScopedUnifiedHookRegistry();
 
-    const decisionResult = await runUnifiedDecisionHooksForSession(
-      'missing-session',
-      createCadenceEvent(),
-      createHookContext(),
-      sessionRegistry
+    const decisionResult = await Effect.runPromise(
+      runUnifiedDecisionHooksForSession(
+        'missing-session',
+        createCadenceEvent(),
+        createHookContext(),
+        sessionRegistry
+      )
     );
     expect(decisionResult.status).toBe('no_hooks');
 
-    const effectResult = await runUnifiedEffectHooksForSession(
-      'missing-session',
-      {
-        type: 'pre_tool_use',
-        toolName: 'exec_command',
-        args: { cmd: 'echo hi' },
-      },
-      {
-        sessionKey: 'missing-session',
-        requestId: 'req-1',
-      },
-      sessionRegistry
+    const effectResult = await Effect.runPromise(
+      runUnifiedEffectHooksForSession(
+        'missing-session',
+        {
+          type: 'pre_tool_use',
+          toolName: 'exec_command',
+          args: { cmd: 'echo hi' },
+        },
+        {
+          sessionKey: 'missing-session',
+          requestId: 'req-1',
+        },
+        sessionRegistry
+      )
     );
     expect(effectResult.status).toBe('completed');
     expect(effectResult.outcomes).toHaveLength(0);

@@ -4,8 +4,8 @@
  * Extracted from adapter.ts for better code organization.
  */
 
-import type { RateLimitInfo, RateLimitType } from './retry.js';
-import { RateLimitError } from './retry.js';
+import type { RateLimitInfo, RateLimitType } from './policies.js';
+import { RateLimitError } from './policies.js';
 
 /**
  * Parse rate limit headers from a Response object.

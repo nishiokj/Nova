@@ -17,6 +17,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "effect": "^3.19.18",
     "types": "workspace:*",
     "zod": "^4.3.5"
   },

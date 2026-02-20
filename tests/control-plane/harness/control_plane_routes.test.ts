@@ -794,7 +794,7 @@ describe('control-plane cockpit rollup routes', () => {
 
     const result = await invokeRoute({
       method: 'GET',
-      url: '/control-plane/cockpit/rollups/snapshot?sessionLimit=120&escalationLimit=120&repoLimit=50&includeRepo=0',
+      url: '/control-plane/cockpit/rollups/snapshot?sessionLimit=120&repoLimit=50&includeRepo=0',
       ctx,
     });
 

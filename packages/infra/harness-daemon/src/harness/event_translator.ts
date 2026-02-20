@@ -381,12 +381,7 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
 
     case 'harness_user_prompt': {
       const promptData = data as {
-        question?: string;
-        options?: Array<string | { label: string; description?: string }>;
-        context?: string;
-        multiSelect?: boolean;
-        questionType?: string;
-        questions?: Array<{
+        questions: Array<{
           question: string;
           options?: Array<string | { label: string; description?: string }>;
           context?: string;
@@ -396,22 +391,14 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
       };
       const wireData: Record<string, unknown> = {
         request_id: requestId,
-      };
-      if (promptData.questions && promptData.questions.length > 0) {
-        wireData.questions = promptData.questions.map((q) => ({
+        questions: promptData.questions.map((q) => ({
           question: q.question,
           options: q.options,
           context: q.context,
           multi_select: q.multiSelect,
           question_type: q.questionType,
-        }));
-      } else if (promptData.question) {
-        wireData.question = promptData.question;
-        wireData.options = promptData.options;
-        wireData.context = promptData.context;
-        wireData.multi_select = promptData.multiSelect;
-        wireData.question_type = promptData.questionType;
-      }
+        })),
+      };
       return {
         type: 'user_prompt',
         data: wireData,
@@ -544,35 +531,15 @@ function toWireQuestion(q: AgentQuestion): UserPromptEventQuestion {
   };
 }
 
-/**
- * Create a user prompt event for the TUI.
- * Supports single question (backwards compatible) or multiple questions.
- * Converts from agent format (camelCase) to wire format (snake_case).
- */
+/** Create a user prompt event for the TUI using question arrays only. */
 export function createUserPromptEvent(
   requestId: string,
-  question?: string,
-  options?: Array<string | { label: string; description?: string }>,
-  context?: string,
-  multiSelect?: boolean,
-  questionType?: string,
-  questions?: AgentQuestion[]
+  questions: AgentQuestion[]
 ): BridgeEvent {
   const data: UserPromptEventData = {
     request_id: requestId,
+    questions: questions.map(toWireQuestion),
   };
-
-  // If multiple questions provided, convert each to wire format
-  if (questions && questions.length > 0) {
-    data.questions = questions.map(toWireQuestion);
-  } else if (question) {
-    // Single question format (backwards compatible)
-    data.question = question;
-    data.options = options;
-    data.context = context;
-    data.multi_select = multiSelect;
-    data.question_type = questionType;
-  }
 
   return {
     type: 'user_prompt',

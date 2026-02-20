@@ -17,6 +17,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "effect": "^3.19.18",
     "types": "workspace:*",
     "shared": "workspace:*",
     "fast-glob": "^3.3.3"

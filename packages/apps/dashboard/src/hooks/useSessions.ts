@@ -3,11 +3,29 @@ import type { Session, FilterCounts, FilterType } from '../domain/models'
 import { fetchAPI, type ExportResponse, type GraphDSession, type GraphDMessage } from '../lib/api'
 import { mapGraphDSession, parseJSONL } from '../lib/mappers'
 
+const STALE_SESSION_SECONDS = 5 * 60
+const IDLE_POLL_INTERVAL_MS = 15000
+
 /** Keep last occurrence per key (last row = most recently updated). */
 function dedup<T>(items: T[], key: (item: T) => string): T[] {
   const seen = new Map<string, T>()
   for (const item of items) seen.set(key(item), item)
   return Array.from(seen.values())
+}
+
+function toUnixSeconds(ts: number | string): number {
+  if (typeof ts === 'number' && Number.isFinite(ts)) {
+    return ts > 1e12 ? Math.floor(ts / 1000) : Math.floor(ts)
+  }
+  const asNumber = Number(ts)
+  if (!Number.isNaN(asNumber)) {
+    return toUnixSeconds(asNumber)
+  }
+  const parsed = Date.parse(String(ts))
+  if (!Number.isNaN(parsed)) {
+    return Math.floor(parsed / 1000)
+  }
+  return 0
 }
 
 interface ControlPlaneMessage {
@@ -73,9 +91,8 @@ export function useSessions(pollInterval = 2000): UseSessionsResult {
 
       // For genuinely active sessions, refresh their messages in parallel
       const now = Date.now() / 1000
-      const staleThreshold = 5 * 60
       const activeSessions = rawSessions.filter(s =>
-        s.status === 'active' && (now - s.last_accessed_at) < staleThreshold
+        s.status === 'active' && (now - toUnixSeconds(s.last_accessed_at)) < STALE_SESSION_SECONDS
       )
 
       if (activeSessions.length > 0) {
@@ -130,7 +147,7 @@ export function useSessions(pollInterval = 2000): UseSessionsResult {
   }, [])
 
   const hasRunningRequests = useMemo(() => {
-    return sessions.some((s) => s.insights.requestsRunning > 0 || s.state === 'active')
+    return sessions.some((s) => s.state === 'active')
   }, [sessions])
 
   // Initial fetch on mount
@@ -138,12 +155,14 @@ export function useSessions(pollInterval = 2000): UseSessionsResult {
     fetchSessions()
   }, [fetchSessions])
 
-  // Auto-poll when there are running requests
+  // Auto-poll always, but switch to a slower interval when idle.
   useEffect(() => {
-    if (pollInterval > 0 && hasRunningRequests) {
-      const interval = setInterval(fetchSessions, pollInterval)
-      return () => clearInterval(interval)
-    }
+    if (pollInterval <= 0) return
+    const nextInterval = hasRunningRequests
+      ? pollInterval
+      : Math.max(IDLE_POLL_INTERVAL_MS, pollInterval * 5)
+    const interval = setInterval(fetchSessions, nextInterval)
+    return () => clearInterval(interval)
   }, [pollInterval, hasRunningRequests, fetchSessions])
 
   return { sessions, state, error, refetch: fetchSessions, hasRunningRequests, loadSessionMessages, loadedMessageSessions }
@@ -158,8 +177,8 @@ export function useFilterCounts(sessions: Session[]): FilterCounts {
 
     for (const session of sessions) {
       if (session.insights.requestsFailed > 0) errors++
-      if (session.insights.requestsRunning > 0) running++
-      if (session.insights.requestsCompleted > 0 && session.insights.requestsRunning === 0) completed++
+      if (session.state === 'active') running++
+      if (session.insights.requestsCompleted > 0 && session.state !== 'active') completed++
     }
 
     return {
@@ -178,11 +197,9 @@ export function useFilteredSessions(sessions: Session[], filter: FilterType): Se
       case 'errors':
         return sessions.filter((s) => s.insights.requestsFailed > 0)
       case 'running':
-        return sessions.filter((s) => s.insights.requestsRunning > 0)
+        return sessions.filter((s) => s.state === 'active')
       case 'completed':
-        return sessions.filter(
-          (s) => s.insights.requestsCompleted > 0 && s.insights.requestsRunning === 0
-        )
+        return sessions.filter((s) => s.insights.requestsCompleted > 0 && s.state !== 'active')
       case 'all':
       default:
         return sessions

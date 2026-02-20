@@ -4,7 +4,14 @@
  * Ported from: src/harness/agent/tool_registry.py
  */
 
-import type { ToolResult, ToolDefinition } from 'types';
+import type {
+  ToolResult,
+  ToolDefinition,
+  ToolExecutionError as CoreToolExecutionError,
+  RunControlMetadata,
+  RunExecutionMetadata,
+} from 'types';
+import type { Effect } from 'effect';
 
 // ============================================
 // TOOL EXECUTION CONTEXT
@@ -14,6 +21,12 @@ import type { ToolResult, ToolDefinition } from 'types';
  * Execution context for tools with environment and working directory overrides.
  */
 export interface ToolExecutionContext {
+  /** Run metadata propagated from agent/orchestrator */
+  execution?: RunExecutionMetadata;
+  /** Control state propagated from runtime control channel */
+  control?: RunControlMetadata;
+  /** Optional cancellation signal for cooperative abort */
+  signal?: AbortSignal;
   /** Environment variable overrides */
   envOverrides?: Record<string, string>;
   /** Working directory override */
@@ -22,6 +35,8 @@ export interface ToolExecutionContext {
   allowedTools?: Set<string>;
   /** Dangerous mode - bypasses safety checks */
   dangerousMode?: boolean;
+  /** Additional execution metadata for diagnostics */
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -64,12 +79,17 @@ export interface Tool {
 }
 
 /**
- * Tool executor function type.
+ * Tool execution error (aligned with shared types contract).
+ */
+export type ToolExecutionError = CoreToolExecutionError;
+
+/**
+ * Effect-native tool executor function type.
  */
 export type ToolExecutor = (
   args: Record<string, unknown>,
   context?: ToolExecutionContext
-) => Promise<ToolResult>;
+) => Effect.Effect<ToolResult, ToolExecutionError>;
 
 // ============================================
 // TOOL REGISTRATION
@@ -108,6 +128,45 @@ export function createTool(options: ToolRegistrationOptions): Tool {
     readOnly: options.readOnly ?? false,
     parallelizable: options.parallelizable ?? false,
     costHint: options.costHint ?? 'standard',
+  };
+}
+
+/**
+ * Convert unknown errors into typed tool execution errors.
+ */
+export function toToolExecutionError(
+  error: unknown,
+  fallbackType: ToolExecutionError['type'] = 'execution_error',
+  metadata?: Record<string, unknown>
+): ToolExecutionError {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'type' in error &&
+    'message' in error
+  ) {
+    const existing = error as ToolExecutionError;
+    if (!metadata) return existing;
+    return {
+      ...existing,
+      metadata: { ...(existing.metadata ?? {}), ...metadata },
+    };
+  }
+
+  if (error instanceof Error) {
+    return {
+      type: fallbackType,
+      message: error.message,
+      cause: error,
+      metadata,
+    };
+  }
+
+  return {
+    type: fallbackType,
+    message: String(error),
+    cause: error,
+    metadata,
   };
 }
 
@@ -169,7 +228,7 @@ export interface ToolRegistryConfig {
  * Default tool registry configuration.
  */
 export const DEFAULT_TOOL_CONFIG: ToolRegistryConfig = {
-  enabledTools: ['Read', 'Write', 'Edit', 'BatchEdit', 'Bash', 'Glob', 'Grep', 'Skill', 'PromptUser', 'ExpandConversation', 'WebSearch', 'WebFetch'],
+  enabledTools: ['Read', 'Write', 'Edit', 'BatchEdit', 'Bash', 'Glob', 'Grep', 'Skill', 'PromptUser', 'ExpandConversation', 'WebSearch', 'WebFetch', 'apply_patch'],
   bashTimeoutMs: 30000,
   maxOutputLength: 100000,
 };

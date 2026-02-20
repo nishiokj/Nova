@@ -5,7 +5,7 @@
  */
 
 import type { ConnectorType } from '../ids.js'
-import type { TraceRecord, Escalation } from 'types'
+import type { TraceRecord } from 'types'
 
 // ============ Agent Traces ============
 
@@ -27,12 +27,6 @@ export interface TracesResponse {
 
 export interface TraceResponse {
   trace: AgentTrace
-}
-
-// ============ Escalations ============
-
-export interface EscalationResponse {
-  escalation: Escalation
 }
 
 // ============ Internal Events ============

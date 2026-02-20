@@ -7,7 +7,8 @@
  */
 
 import type { ToolResult } from 'types';
-import type { ToolRegistrationOptions } from '../types.js';
+import { Effect } from 'effect';
+import type { ToolExecutionError, ToolRegistrationOptions } from '../types.js';
 
 /**
  * Option structure for user prompts.
@@ -32,12 +33,7 @@ export interface PromptUserQuestion {
  * Arguments for PromptUser tool.
  */
 export interface PromptUserArgs {
-  question: string;
-  options?: Array<string | PromptUserOption>;
-  context?: string;
-  multiSelect?: boolean;
-  questionType?: 'multiple_choice' | 'multi_select' | 'fill_in_blank' | 'yes_no' | 'free_text';
-  questions?: PromptUserQuestion[];
+  questions: PromptUserQuestion[];
 }
 
 /**
@@ -60,6 +56,19 @@ export async function executePromptUser(
   };
 }
 
+export function executePromptUserEffect(
+  args: Record<string, unknown>
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.succeed({
+    toolName: 'PromptUser',
+    status: 'success',
+    output: '__PROMPT_USER__',
+    isSuccess: true,
+    durationMs: 0,
+    metadata: { isPromptUser: true, args },
+  });
+}
+
 /**
  * PromptUser tool registration options.
  */
@@ -69,38 +78,9 @@ export const promptUserToolOptions: ToolRegistrationOptions = {
   parameters: {
     type: 'object',
     properties: {
-      question: {
-        type: 'string',
-        description: 'The question to ask the user',
-      },
-      options: {
-        type: 'array',
-        description: 'Optional list of choices for the user. Each option can be a string or an object with label and optional description.',
-        items: {
-          type: 'object',
-          description: 'Option as string or {label, description?}',
-          properties: {
-            label: { type: 'string', description: 'Display text for the option' },
-            description: { type: 'string', description: 'Additional context for the option' },
-          },
-        },
-      },
-      context: {
-        type: 'string',
-        description: 'Additional context to help the user understand the question',
-      },
-      multiSelect: {
-        type: 'boolean',
-        description: 'Whether the user can select multiple options (default: false)',
-      },
-      questionType: {
-        type: 'string',
-        enum: ['multiple_choice', 'multi_select', 'fill_in_blank', 'yes_no', 'free_text'],
-        description: 'Type of question input expected',
-      },
       questions: {
         type: 'array',
-        description: 'Multiple questions to ask in sequence',
+        description: 'Questions to ask in sequence',
         items: {
           type: 'object',
           properties: {
@@ -126,10 +106,10 @@ export const promptUserToolOptions: ToolRegistrationOptions = {
         },
       },
     },
-    required: ['question'],
+    required: ['questions'],
   },
-  required: ['question'],
-  executor: executePromptUser,
+  required: ['questions'],
+  executor: executePromptUserEffect,
   timeoutMs: 1000,
   readOnly: true,
   parallelizable: false,

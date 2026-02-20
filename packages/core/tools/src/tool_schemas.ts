@@ -29,7 +29,6 @@ export const BashArgsSchema = z.object({
  */
 export const ReadArgsSchema = z.object({
   path: z.string().min(1, 'Path cannot be empty'),
-  file_path: z.string().optional(), // Alias for path
   encoding: z.string().optional(),
   maxBytes: z.number().positive().int().optional(),
   offset: z.number().nonnegative().int().optional(),
@@ -45,7 +44,6 @@ export const ReadArgsSchema = z.object({
  */
 export const WriteArgsSchema = z.object({
   path: z.string().min(1, 'Path cannot be empty'),
-  file_path: z.string().optional(), // Alias for path
   content: z.string(),
   encoding: z.string().optional(),
   mode: z.number().int().optional(),
@@ -55,30 +53,13 @@ export const WriteArgsSchema = z.object({
 // EDIT TOOL
 // ============================================
 
-/**
- * Arguments for edit tool execution.
- * Accepts both camelCase and snake_case for compatibility.
- */
+/** Arguments for edit tool execution. */
 export const EditArgsSchema = z.object({
-  path: z.string().optional(),
-  file_path: z.string().optional(),
-  // Accept both naming conventions
-  old_string: z.string().optional(),
-  oldString: z.string().optional(),
-  new_string: z.string().optional(),
-  newString: z.string().optional(),
-  replace_all: z.boolean().optional(),
+  path: z.string().min(1, 'Path cannot be empty'),
+  oldString: z.string().min(1, 'oldString cannot be empty'),
+  newString: z.string(),
   replaceAll: z.boolean().optional(),
-}).refine(
-  (data) => data.path || data.file_path,
-  { message: 'Either path or file_path is required' }
-).refine(
-  (data) => data.old_string || data.oldString,
-  { message: 'Either old_string or oldString is required' }
-).refine(
-  (data) => data.new_string !== undefined || data.newString !== undefined,
-  { message: 'Either new_string or newString is required' }
-);
+});
 
 // ============================================
 // GLOB TOOL
@@ -161,12 +142,7 @@ const PromptUserQuestionSchema = z.object({
  * Arguments for PromptUser tool execution.
  */
 export const PromptUserArgsSchema = z.object({
-  question: z.string().min(1, 'Question cannot be empty'),
-  options: z.array(PromptUserOptionSchema).optional(),
-  context: z.string().optional(),
-  multiSelect: z.boolean().optional(),
-  questionType: z.enum(['multiple_choice', 'multi_select', 'fill_in_blank', 'yes_no', 'free_text']).optional(),
-  questions: z.array(PromptUserQuestionSchema).optional(),
+  questions: z.array(PromptUserQuestionSchema).min(1, 'At least one question is required'),
 });
 
 // ============================================

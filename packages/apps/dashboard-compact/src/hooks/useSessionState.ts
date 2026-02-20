@@ -221,9 +221,7 @@ export function useSessionState(): UseSessionStateResult {
   useEffect(() => {
     if (!connected) return;
 
-    const activeSessions = state.sessions.filter(
-      (s) => s.state === 'active' || s.insights.requestsRunning > 0
-    );
+    const activeSessions = state.sessions.filter((s) => s.state === 'active');
 
     // Subscribe to session channels
     for (const session of activeSessions) {

@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { Effect } from 'effect';
 import { ToolRegistry, builtinToolOptions } from 'tools';
 import { errorResult, successResult } from 'types';
 import type { FullHarnessConfig } from './config.js';
@@ -111,7 +112,7 @@ export function createToolRegistry(config: FullHarnessConfig, workingDir: string
       required: ['skill'],
     },
     required: ['skill'],
-    executor: async (args) => {
+    executor: (args) => Effect.sync(() => {
       const skillName = String(args.skill ?? '').trim();
       if (!skillName) {
         return errorResult('Skill', 'Skill name is required', 0);
@@ -147,7 +148,7 @@ export function createToolRegistry(config: FullHarnessConfig, workingDir: string
         : skill.instructions;
 
       return successResult('Skill', instructions, 0);
-    },
+    }),
     enabled: true,
     readOnly: true,
     parallelizable: false,

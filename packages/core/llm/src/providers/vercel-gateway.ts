@@ -11,9 +11,11 @@ import type {
   LLMResponse,
   RespondParams,
   StreamParams,
+  LLMExecutionError,
 } from 'types';
+import { Effect, Stream } from 'effect';
 import type { ProviderContext, LLMProviderAdapter } from './types.js';
-import { PartialStreamError } from './types.js';
+import { PartialStreamError, toLLMExecutionError } from './types.js';
 import { compileSchemaForOpenAI } from './schema_compiler.js';
 import { createRateLimitError } from '../rate-limits.js';
 import { parseApiErrorResponse, formatApiError } from '../response_schemas.js';
@@ -30,18 +32,57 @@ function buildSchemaInstruction(schema: Record<string, unknown>): string {
 export class VercelGatewayProvider implements LLMProviderAdapter {
   readonly name = 'vercel-gateway' as const;
 
-  respond(context: ProviderContext, params: RespondParams): Promise<LLMResponse> {
-    if (params.responseSchema) {
-      return this.respondChatCompletions(context, params);
-    }
-    return this.respondGateway(context, params);
+  respond(context: ProviderContext, params: RespondParams): Effect.Effect<LLMResponse, LLMExecutionError> {
+    return Effect.tryPromise({
+      try: () => {
+        if (params.responseSchema) {
+          return this.respondChatCompletions(context, params);
+        }
+        return this.respondGateway(context, params);
+      },
+      catch: (error) => toLLMExecutionError(error, this.name, context.config.model),
+    });
   }
 
-  async *stream(context: ProviderContext, params: StreamParams): AsyncGenerator<string, LLMResponse> {
-    if (params.responseSchema) {
-      return yield* this.streamChatCompletions(context, params);
-    }
-    return yield* this.streamGateway(context, params);
+  stream(context: ProviderContext, params: StreamParams): Stream.Stream<string, LLMExecutionError> {
+    return Stream.unwrapScoped(
+      Effect.acquireRelease(
+        Effect.sync(() =>
+          params.responseSchema
+            ? this.streamChatCompletions(context, params)
+            : this.streamGateway(context, params)
+        ),
+        (generator) =>
+          Effect.tryPromise({
+            try: async () => {
+              if (typeof generator.return === 'function') {
+                await generator.return(undefined as never);
+              }
+            },
+            catch: () => undefined,
+          }).pipe(Effect.orDie)
+      ).pipe(
+        Effect.map((generator) =>
+          Stream.fromAsyncIterable(
+            {
+              [Symbol.asyncIterator]: async function* () {
+                while (true) {
+                  const next = await generator.next();
+                  if (next.done) {
+                    if (next.value) {
+                      params.onComplete?.(next.value);
+                    }
+                    return;
+                  }
+                  yield next.value;
+                }
+              },
+            },
+            (error) => toLLMExecutionError(error, 'vercel-gateway', context.config.model)
+          )
+        )
+      )
+    );
   }
 
   formatTools(tools: ToolDefinition[]): Record<string, unknown>[] {

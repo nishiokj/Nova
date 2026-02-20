@@ -5,6 +5,9 @@
  * and src/harness/agent/plan_models.py (ToolCallRecord)
  */
 
+import type { Effect } from 'effect';
+import type { RunControlMetadata, RunExecutionMetadata } from './llm.js';
+
 // ============================================
 // TOOL RESULT
 // ============================================
@@ -222,9 +225,23 @@ export interface GlobArgs {
  */
 export type ToolArgs = BashArgs | ReadArgs | WriteArgs | GrepArgs | GlobArgs;
 
+export interface ToolExecutionContext {
+  execution: RunExecutionMetadata;
+  control: RunControlMetadata;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ToolExecutionError {
+  type: 'cancelled' | 'paused' | 'timeout' | 'validation_error' | 'execution_error' | 'unknown';
+  message: string;
+  cause?: unknown;
+  metadata?: Record<string, unknown>;
+}
+
 /**
- * Tool executor function type.
+ * Effect-native tool executor contract.
  */
 export type ToolExecutor<T extends ToolArgs = ToolArgs> = (
-  args: T
-) => Promise<ToolResult>;
+  args: T,
+  context: ToolExecutionContext
+) => Effect.Effect<ToolResult, ToolExecutionError>;

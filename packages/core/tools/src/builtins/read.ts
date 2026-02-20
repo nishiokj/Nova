@@ -6,9 +6,15 @@
 
 import { readFile, stat } from 'fs/promises';
 import { resolve } from 'path';
+import { Effect } from 'effect';
 import type { ToolResult } from 'types';
 import { successResult, errorResult } from 'types';
-import type { ToolExecutionContext, ToolRegistrationOptions } from '../types.js';
+import type {
+  ToolExecutionContext,
+  ToolExecutionError,
+  ToolRegistrationOptions,
+} from '../types.js';
+import { toToolExecutionError } from '../types.js';
 
 /**
  * Read a file's contents.
@@ -100,6 +106,20 @@ export async function executeRead(
   }
 }
 
+export function executeReadEffect(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.tryPromise({
+    try: () => executeRead(args, context),
+    catch: (error) =>
+      toToolExecutionError(error, 'execution_error', {
+        toolName: 'Read',
+        path: args.path,
+      }),
+  });
+}
+
 /**
  * Read tool registration options.
  */
@@ -133,7 +153,7 @@ export const readToolOptions: ToolRegistrationOptions = {
     required: ['path'],
   },
   required: ['path'],
-  executor: executeRead,
+  executor: executeReadEffect,
   timeoutMs: 10000,
   readOnly: true,
   parallelizable: true,

@@ -7,6 +7,14 @@
 
 import type { WorkItem } from 'work';
 import type { Agent, AgentResult } from 'agent';
+import type { RunControlMetadata } from 'types';
+
+export interface InProgressWork {
+  item: WorkItem;
+  agent: Agent | null;
+  abortController?: AbortController;
+  cancelReason?: string;
+}
 
 /**
  * Consolidated execution state for the orchestrator loop.
@@ -39,13 +47,18 @@ export interface ExecutionState {
   /** Last agent work ID (for hook context) */
   lastAgentWorkId?: string;
   /** In-progress work items with their agents */
-  inProgress: Map<string, { item: WorkItem; agent: Agent | null }>;
+  inProgress: Map<string, InProgressWork>;
+  /** Latest run-control snapshot applied by the orchestrator runtime */
+  runControl: RunControlMetadata;
 }
 
 /**
  * Create initial execution state for a new orchestration run.
  */
-export function createExecutionState(initialWorkId: string): ExecutionState {
+export function createExecutionState(
+  initialWorkId: string,
+  runControl: RunControlMetadata = { state: 'running' }
+): ExecutionState {
   return {
     iteration: 0,
     totalLlmCalls: 0,
@@ -61,6 +74,7 @@ export function createExecutionState(initialWorkId: string): ExecutionState {
     lastAgentResult: undefined,
     lastAgentWorkId: undefined,
     inProgress: new Map(),
+    runControl,
   };
 }
 
@@ -89,4 +103,11 @@ export function updateMetrics(
   state.totalLlmCalls += result.metrics.llmCallsMade;
   state.totalToolCalls += result.metrics.toolCallsMade;
   state.lastAgentResult = result;
+}
+
+export function updateRunControl(
+  state: ExecutionState,
+  runControl: RunControlMetadata
+): void {
+  state.runControl = runControl;
 }

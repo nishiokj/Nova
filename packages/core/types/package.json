@@ -17,6 +17,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "effect": "^3.18.2",
     "zod": "^4.3.5"
   },
   "devDependencies": {

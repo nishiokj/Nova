@@ -107,7 +107,6 @@ export const GraphDConfigSchema = z.object({
 export const ContextConfigSchema = z.object({
   max_tokens: z.number().positive().int(),
   session_ttl_ms: z.number().int().nonnegative().optional(),
-  pause_timeout_ms: z.number().int().nonnegative().optional(),
   max_sessions: z.number().int().positive().optional(),
 });
 
@@ -292,7 +291,6 @@ export interface FullHarnessConfig {
   context: {
     maxTokens: number;
     sessionTtlMs: number;
-    pauseTimeoutMs: number;
     maxSessions: number;
   };
   skills: {
@@ -358,7 +356,6 @@ export const DEFAULT_GRAPHD_CONFIG: GraphDConfigSection = {
 export const DEFAULT_CONTEXT_CONFIG: ContextConfigSection = {
   max_tokens: 200_000,
   session_ttl_ms: 7_200_000,
-  pause_timeout_ms: 1_200_000, // 20 minutes
   max_sessions: 50,
 };
 

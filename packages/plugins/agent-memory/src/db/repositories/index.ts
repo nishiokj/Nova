@@ -251,13 +251,6 @@ export {
 } from './agent-traces.js'
 
 export {
-  createEscalationsRepository,
-  type EscalationsRepository,
-  type EscalationRow,
-  type EscalationListOptions,
-} from './escalations.js'
-
-export {
   createWorkItemTemplatesRepository,
   type WorkItemTemplatesRepository,
   type WorkItemTemplateRow,
@@ -281,6 +274,23 @@ export {
   type AgenticRunRepository,
   type AgenticRunRow,
 } from './agentic-run.js'
+
+export {
+  createResearchRepository,
+  type ResearchRepository,
+  type ResearchProjectRow,
+  type ResearchNodeRow,
+  type ResearchSourceRow,
+  type ResearchClaimRow,
+  type ResearchProject,
+  type ResearchNode,
+  type ResearchSource,
+  type ResearchClaim,
+  type CreateProjectInput,
+  type CreateNodeInput,
+  type CreateSourceInput,
+  type CreateClaimInput,
+} from './research.js'
 
 export {
   createArchitectureRepository,

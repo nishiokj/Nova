@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import type { Session } from '../domain/models'
 import { StatusBadge, StatusDot, type StatusTone } from './StatusBadge'
 import { CollapsibleSection } from './CollapsibleSection'
@@ -31,6 +31,11 @@ interface SessionCardProps {
   onDelete?: (sessionId: string) => void
 }
 
+const INITIAL_VISIBLE_REQUESTS = 6
+const REQUESTS_PAGE_SIZE = 6
+const INITIAL_VISIBLE_WATCHER = 8
+const WATCHER_PAGE_SIZE = 8
+
 export const SessionCard = memo(function SessionCard({
   session,
   open,
@@ -38,11 +43,30 @@ export const SessionCard = memo(function SessionCard({
   onDelete,
 }: SessionCardProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [visibleRequestCount, setVisibleRequestCount] = useState(INITIAL_VISIBLE_REQUESTS)
+  const [visibleWatcherCount, setVisibleWatcherCount] = useState(INITIAL_VISIBLE_WATCHER)
   const { insights } = session
   const hasErrors = insights.requestsFailed > 0
-  const hasRunning = insights.requestsRunning > 0
+  const hasRunning = session.state === 'active'
+  const visibleRequests = useMemo(
+    () => session.requests.slice(-visibleRequestCount),
+    [session.requests, visibleRequestCount]
+  )
+  const hasMoreRequests = session.requests.length > visibleRequestCount
+  const visibleWatcherDecisions = useMemo(
+    () => session.watcherDecisions.slice(-visibleWatcherCount),
+    [session.watcherDecisions, visibleWatcherCount]
+  )
+  const hasMoreWatcher = session.watcherDecisions.length > visibleWatcherCount
 
   const variant = hasErrors ? 'error' : hasRunning ? 'running' : 'default'
+
+  useEffect(() => {
+    if (!open) {
+      setVisibleRequestCount(INITIAL_VISIBLE_REQUESTS)
+      setVisibleWatcherCount(INITIAL_VISIBLE_WATCHER)
+    }
+  }, [open, session.id])
 
   return (
     <>
@@ -109,9 +133,11 @@ export const SessionCard = memo(function SessionCard({
               {hasRunning && (
                 <div className="flex items-center gap-1.5">
                   <StatusDot status="running" pulse />
-                  <span className="font-mono text-xs tabular-nums text-[var(--running)]">
-                    {insights.requestsRunning}
-                  </span>
+                  {insights.requestsRunning > 0 && (
+                    <span className="font-mono text-xs tabular-nums text-[var(--running)]">
+                      {insights.requestsRunning}
+                    </span>
+                  )}
                 </div>
               )}
 
@@ -183,22 +209,34 @@ export const SessionCard = memo(function SessionCard({
                   Watcher Decisions ({session.watcherDecisions.length})
                 </span>
               </div>
-              <WatcherDecisionPanel decisions={session.watcherDecisions} />
+              <WatcherDecisionPanel decisions={visibleWatcherDecisions} />
+              {hasMoreWatcher && (
+                <button
+                  type="button"
+                  onClick={() => setVisibleWatcherCount((prev) => prev + WATCHER_PAGE_SIZE)}
+                  className="mt-2 text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+                >
+                  Show older decisions ({session.watcherDecisions.length - visibleWatcherCount} more)
+                </button>
+              )}
             </div>
           )}
 
           {/* Requests list */}
           {session.requests.length > 0 ? (
             <div className="space-y-2">
-              {session.requests.map((request, i) => (
-                <div
-                  key={request.id}
-                  className="animate-fade-in"
-                  style={{ animationDelay: `${i * 50}ms` }}
-                >
-                  <RequestRow request={request} />
-                </div>
+              {visibleRequests.map((request) => (
+                <RequestRow key={request.id} request={request} />
               ))}
+              {hasMoreRequests && (
+                <button
+                  type="button"
+                  onClick={() => setVisibleRequestCount((prev) => prev + REQUESTS_PAGE_SIZE)}
+                  className="w-full py-2 text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] rounded transition-colors"
+                >
+                  Show older requests ({session.requests.length - visibleRequestCount} more)
+                </button>
+              )}
             </div>
           ) : (
             <div className="py-8 text-center">

@@ -32,6 +32,7 @@
  * 6. All enqueued work eventually completes or errors
  */
 
+import { Effect, Stream } from 'effect';
 import { ContextWindow } from 'context';
 import type {
   LLMAdapter,
@@ -48,15 +49,15 @@ import type {
   PromptAnswerDecision,
   WorkItemSpec,
 } from 'protocol';
-import { getProtocolId } from 'protocol';
+import { success } from 'protocol';
 import {
   Orchestrator,
   type OrchestratorRuntime,
   type OrchestratorResult,
 } from 'orchestrator/orchestrator.js';
-import { createHookRegistry } from 'orchestrator/hookRegistry/index.js';
+import { createUnifiedHookRegistry } from 'orchestrator/unifiedHooks/registry.js';
 import { getOutputSchemaJson } from 'shared';
-import { resetProviderCircuit } from 'agent';
+import { resetProviderCircuit } from 'llm';
 
 // ============================================
 // STATE MODEL TYPES
@@ -95,7 +96,6 @@ interface StateModel {
 const SESSION_KEY = 'statemachine-test';
 const REQUEST_ID = 'sm-req-001';
 const CWD = '/test';
-const HOOK_META = { source: 'statemachine-test', protocolId: getProtocolId() };
 
 function createContext(): ContextWindow {
   return new ContextWindow(SESSION_KEY, 200_000);
@@ -229,22 +229,20 @@ function createScriptedLLM(script: AgentOutcome[]): LLMAdapter {
     }
   }
 
+  const next = (): LLMResponse => {
+    const outcome = script[Math.min(idx, script.length - 1)];
+    idx++;
+    return outcomeToResponse(outcome);
+  };
+
   return {
-    respond: async () => {
-      const outcome = script[Math.min(idx, script.length - 1)];
-      idx++;
-      return outcomeToResponse(outcome);
-    },
-    stream: async function* () {
-      const outcome = script[Math.min(idx, script.length - 1)];
-      idx++;
-      const response = outcomeToResponse(outcome);
-      yield response.content;
-      return response;
-    },
-    getConfig: () => ({ provider: 'test', model: 'test' }),
-    capabilities: () => ({ supportsStreaming: true, supportsToolUse: true, supportsStructuredOutput: true }),
-  } as unknown as LLMAdapter;
+    respond: () => Effect.sync(next),
+    stream: (params) => Stream.unwrap(Effect.sync(() => {
+      const response = next();
+      params.onComplete?.(response);
+      return Stream.fromIterable(response.content.length > 0 ? [response.content] : []);
+    })),
+  } as LLMAdapter;
 }
 
 // ============================================
@@ -270,7 +268,7 @@ describe('State Machine: Basic Transitions', () => {
       () => getModelSelection()
     );
 
-    const result = await orch.execute(createContext(), 'Test goal', 'standard', CWD);
+    const result = await Effect.runPromise(orch.execute(createContext(), 'Test goal', 'standard', CWD));
 
     // Verify state transition
     expect(result.terminationReason).toBe('goal_state_reached');
@@ -305,7 +303,7 @@ describe('State Machine: Basic Transitions', () => {
       () => getModelSelection()
     );
 
-    const result = await orch.execute(createContext(), 'Bounds test', 'standard', CWD);
+    const result = await Effect.runPromise(orch.execute(createContext(), 'Bounds test', 'standard', CWD));
 
     // Should terminate due to bounds
     expect(result.terminationReason).toBe('max_iterations_exceeded');
@@ -326,7 +324,7 @@ describe('State Machine: Basic Transitions', () => {
       () => getModelSelection()
     );
 
-    const result = await orch.execute(createContext(), 'Ask user', 'standard', CWD);
+    const result = await Effect.runPromise(orch.execute(createContext(), 'Ask user', 'standard', CWD));
 
     expect(result.terminationReason).toBe('user_input_required');
     expect(result.paused).toBe(true);
@@ -345,31 +343,26 @@ describe('State Machine: Hook-Driven Transitions', () => {
       { type: 'goal_reached', response: 'Second attempt' },
     ]);
 
-    const registry = createHookRegistry();
+    const registry = createUnifiedHookRegistry();
     registry.register({
       id: 'block-once',
+      mode: 'decision',
+      scope: 'orchestrator',
+      source: 'statemachine-test',
       event: 'goal_state_reached',
       policy: { kind: 'fire_and_forget' },
       criticality: 'non_critical',
       idempotency: 'idempotent',
       priority: 100,
       timeoutMs: 5000,
-      run: async () => {
+      callback: () => Effect.sync(() => {
         callCount++;
         if (callCount === 1) {
-          return {
-            kind: 'success',
-            decision: { verdict: 'failed', issues: ['Not good enough'] } as QualityGateDecision,
-            patches: [],
-          };
+          return success({ verdict: 'failed', issues: ['Not good enough'] } as QualityGateDecision);
         }
-        return {
-          kind: 'success',
-          decision: { verdict: 'passed' } as QualityGateDecision,
-          patches: [],
-        };
-      },
-    }, HOOK_META);
+        return success({ verdict: 'passed' } as QualityGateDecision);
+      }),
+    } as never);
 
     const orch = new Orchestrator(
       { maxIterations: 10 },
@@ -383,7 +376,7 @@ describe('State Machine: Hook-Driven Transitions', () => {
       () => getModelSelection()
     );
 
-    const result = await orch.execute(createContext(), 'Test', 'standard', CWD, { hookRegistry: registry });
+    const result = await Effect.runPromise(orch.execute(createContext(), 'Test', 'standard', CWD, { hookRegistry: registry }));
 
     // First goal_reached blocked, second allowed
     expect(callCount).toBe(2);
@@ -393,8 +386,7 @@ describe('State Machine: Hook-Driven Transitions', () => {
 
   it('user_input + hook_answer -> continue without pausing', async () => {
     let llmCalls = 0;
-    const llm = {
-      respond: async () => {
+    const nextResponse = (): LLMResponse => {
         llmCalls++;
         if (llmCalls === 1) {
           // First call: ask user
@@ -422,31 +414,30 @@ describe('State Machine: Hook-Driven Transitions', () => {
           usage: { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
           toolCalls: [],
         };
-      },
-      stream: async function* () {
-        const resp = await (this as LLMAdapter).respond([], {});
-        yield resp.content;
-        return resp;
-      },
-      getConfig: () => ({ provider: 'test', model: 'test' }),
-      capabilities: () => ({ supportsStreaming: true, supportsToolUse: true, supportsStructuredOutput: true }),
-    } as unknown as LLMAdapter;
+    };
+    const llm = {
+      respond: () => Effect.sync(nextResponse),
+      stream: (params: { onComplete?: (response: LLMResponse) => void }) => Stream.unwrap(Effect.sync(() => {
+        const response = nextResponse();
+        params.onComplete?.(response);
+        return Stream.fromIterable(response.content.length > 0 ? [response.content] : []);
+      })),
+    } as LLMAdapter;
 
-    const registry = createHookRegistry();
+    const registry = createUnifiedHookRegistry();
     registry.register({
       id: 'answer-user-input',
+      mode: 'decision',
+      scope: 'orchestrator',
+      source: 'statemachine-test',
       event: 'user_input_required',
       policy: { kind: 'fire_and_forget' },
       criticality: 'non_critical',
       idempotency: 'idempotent',
       priority: 100,
       timeoutMs: 5000,
-      run: async () => ({
-        kind: 'success',
-        decision: { action: 'answer', text: 'Test User' } as PromptAnswerDecision,
-        patches: [],
-      }),
-    }, HOOK_META);
+      callback: () => Effect.succeed(success({ action: 'answer', text: 'Test User' } as PromptAnswerDecision)),
+    } as never);
 
     const orch = new Orchestrator(
       { maxIterations: 10 },
@@ -460,8 +451,7 @@ describe('State Machine: Hook-Driven Transitions', () => {
       () => getModelSelection()
     );
 
-    const result = await orch.execute(createContext(), 'Greet user', 'standard', CWD, { hookRegistry: registry });
-
+    const result = await Effect.runPromise(orch.execute(createContext(), 'Greet user', 'standard', CWD, { hookRegistry: registry }));
     // Observer answered, didn't pause
     expect(result.paused).toBe(false);
     expect(result.terminationReason).toBe('goal_state_reached');
@@ -475,24 +465,23 @@ describe('State Machine: Realign Counter', () => {
   it('realign increments on bounds_exceeded + block', async () => {
     // Agent hits bounds repeatedly, hook keeps blocking
     let hookCalls = 0;
-    const registry = createHookRegistry();
+    const registry = createUnifiedHookRegistry();
     registry.register({
       id: 'always-realign',
+      mode: 'decision',
+      scope: 'orchestrator',
+      source: 'statemachine-test',
       event: 'bounds_exceeded',
       policy: { kind: 'fire_and_forget' },
       criticality: 'non_critical',
       idempotency: 'idempotent',
       priority: 100,
       timeoutMs: 5000,
-      run: async () => {
+      callback: () => Effect.sync(() => {
         hookCalls++;
-        return {
-          kind: 'success',
-          decision: { action: 'realign', guidance: `Realign attempt ${hookCalls}` } as BoundsDecision,
-          patches: [],
-        };
-      },
-    }, HOOK_META);
+        return success({ action: 'realign', guidance: `Realign attempt ${hookCalls}` } as BoundsDecision);
+      }),
+    } as never);
 
     const llm = createScriptedLLM([
       { type: 'continue', response: 'Working...' },
@@ -515,7 +504,7 @@ describe('State Machine: Realign Counter', () => {
       () => getModelSelection()
     );
 
-    const result = await orch.execute(createContext(), 'Realign test', 'standard', CWD, { hookRegistry: registry });
+    const result = await Effect.runPromise(orch.execute(createContext(), 'Realign test', 'standard', CWD, { hookRegistry: registry }));
 
     // Should have hit maxRealigns and terminated
     expect(result).toBeDefined();
@@ -525,34 +514,29 @@ describe('State Machine: Realign Counter', () => {
   it('realign resets on split (progress made)', async () => {
     // Hook returns split instead of realign - should reset counter
     let hookCalls = 0;
-    const registry = createHookRegistry();
+    const registry = createUnifiedHookRegistry();
     registry.register({
       id: 'split-on-bounds',
+      mode: 'decision',
+      scope: 'orchestrator',
+      source: 'statemachine-test',
       event: 'bounds_exceeded',
       policy: { kind: 'fire_and_forget' },
       criticality: 'non_critical',
       idempotency: 'idempotent',
       priority: 100,
       timeoutMs: 5000,
-      run: async () => {
+      callback: () => Effect.sync(() => {
         hookCalls++;
         if (hookCalls === 1) {
-          return {
-            kind: 'success',
-            decision: {
-              action: 'split',
-              workItems: [{ id: 's1', goal: 'Split task', objective: 'Do split', agent: 'standard' }],
-            } as BoundsDecision,
-            patches: [],
-          };
+          return success({
+            action: 'split',
+            workItems: [{ id: 's1', goal: 'Split task', objective: 'Do split', agent: 'standard' }],
+          } as BoundsDecision);
         }
-        return {
-          kind: 'success',
-          decision: { action: 'wrap_up', summary: 'Done' } as BoundsDecision,
-          patches: [],
-        };
-      },
-    }, HOOK_META);
+        return success({ action: 'wrap_up', summary: 'Done' } as BoundsDecision);
+      }),
+    } as never);
 
     const llm = createScriptedLLM([
       { type: 'continue', response: 'Working...' },
@@ -571,7 +555,7 @@ describe('State Machine: Realign Counter', () => {
       () => getModelSelection()
     );
 
-    const result = await orch.execute(createContext(), 'Split test', 'standard', CWD, { hookRegistry: registry });
+    const result = await Effect.runPromise(orch.execute(createContext(), 'Split test', 'standard', CWD, { hookRegistry: registry }));
 
     // Split should have executed
     expect(result).toBeDefined();
@@ -597,7 +581,7 @@ describe('State Machine: Invariant Assertions', () => {
       () => getModelSelection()
     );
 
-    await orch.execute(createContext(), 'Test', 'standard', CWD);
+    await Effect.runPromise(orch.execute(createContext(), 'Test', 'standard', CWD));
 
     // After goal_achieved, no more iteration events
     const goalAchievedIdx = events.findIndex(e => e.type === 'goal_achieved');
@@ -630,7 +614,7 @@ describe('State Machine: Invariant Assertions', () => {
       () => getModelSelection()
     );
 
-    await orch.execute(createContext(), 'Test', 'standard', CWD);
+    await Effect.runPromise(orch.execute(createContext(), 'Test', 'standard', CWD));
 
     const iterations = events
       .filter(e => e.type === 'iteration_started')
@@ -667,7 +651,7 @@ describe('State Machine: Invariant Assertions', () => {
       () => getModelSelection()
     );
 
-    await orch.execute(createContext(), 'Test', 'standard', CWD);
+    await Effect.runPromise(orch.execute(createContext(), 'Test', 'standard', CWD));
 
     // goal_achieved should report completed > 0
     const goalEvent = events.find(e => e.type === 'goal_achieved');
@@ -695,7 +679,7 @@ describe('State Machine: Error States', () => {
       () => getModelSelection()
     );
 
-    const result = await orch.execute(createContext(), 'Test', 'nonexistent_agent', CWD);
+    const result = await Effect.runPromise(orch.execute(createContext(), 'Test', 'nonexistent_agent', CWD));
 
     expect(result.success).toBe(false);
     expect(result.terminationReason).toBe('agent_error');
@@ -703,15 +687,9 @@ describe('State Machine: Error States', () => {
 
   it('LLM error -> graceful termination', async () => {
     const llm = {
-      respond: async () => {
-        throw new Error('LLM exploded');
-      },
-      stream: async function* () {
-        throw new Error('LLM exploded');
-      },
-      getConfig: () => ({ provider: 'test', model: 'test' }),
-      capabilities: () => ({ supportsStreaming: true, supportsToolUse: true, supportsStructuredOutput: true }),
-    } as unknown as LLMAdapter;
+      respond: () => Effect.fail(new Error('LLM exploded') as never),
+      stream: () => Stream.fail(new Error('LLM exploded') as never),
+    } as LLMAdapter;
 
     const orch = new Orchestrator(
       { maxIterations: 10 },
@@ -726,7 +704,7 @@ describe('State Machine: Error States', () => {
     );
 
     // Should not throw, should return error result
-    const result = await orch.execute(createContext(), 'Test', 'standard', CWD);
+    const result = await Effect.runPromise(orch.execute(createContext(), 'Test', 'standard', CWD));
     expect(result).toBeDefined();
     expect(result.success).toBe(false);
   });
@@ -738,29 +716,28 @@ describe('State Machine: Interruption Handling', () => {
   it('interruption during goal_reached -> continue with new work', async () => {
     let llmCalls = 0;
     let shouldInterrupt = true;
+    const nextResponse = (): LLMResponse => {
+      llmCalls++;
+      return {
+        content: JSON.stringify({
+          action: 'done',
+          response: `Done ${llmCalls}`,
+          goalStateReached: true,
+          awaitingUserInput: false,
+        }),
+        stopReason: 'end_turn',
+        usage: { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+        toolCalls: [],
+      };
+    };
     const llm = {
-      respond: async () => {
-        llmCalls++;
-        return {
-          content: JSON.stringify({
-            action: 'done',
-            response: `Done ${llmCalls}`,
-            goalStateReached: true,
-            awaitingUserInput: false,
-          }),
-          stopReason: 'end_turn',
-          usage: { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
-          toolCalls: [],
-        };
-      },
-      stream: async function* () {
-        const resp = await (this as LLMAdapter).respond([], {});
-        yield resp.content;
-        return resp;
-      },
-      getConfig: () => ({ provider: 'test', model: 'test' }),
-      capabilities: () => ({ supportsStreaming: true, supportsToolUse: true, supportsStructuredOutput: true }),
-    } as unknown as LLMAdapter;
+      respond: () => Effect.sync(nextResponse),
+      stream: (params: { onComplete?: (response: LLMResponse) => void }) => Stream.unwrap(Effect.sync(() => {
+        const response = nextResponse();
+        params.onComplete?.(response);
+        return Stream.fromIterable(response.content.length > 0 ? [response.content] : []);
+      })),
+    } as LLMAdapter;
 
     const orch = new Orchestrator(
       { maxIterations: 10 },
@@ -784,7 +761,7 @@ describe('State Machine: Interruption Handling', () => {
       },
     };
 
-    const result = await orch.execute(createContext(), 'Test', 'standard', CWD, runtime);
+    const result = await Effect.runPromise(orch.execute(createContext(), 'Test', 'standard', CWD, runtime));
 
     // Interruption should have caused additional work
     expect(llmCalls).toBe(2);

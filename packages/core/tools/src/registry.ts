@@ -4,19 +4,31 @@
  * Ported from: src/harness/agent/tool_registry.py
  */
 
-import type { ToolResult, ToolDefinition } from 'types';
-import { successResult, errorResult, timeoutResult } from 'types';
+import type {
+  ToolResult,
+  ToolDefinition,
+  RunControlMetadata,
+  RunExecutionMetadata,
+} from 'types';
+import { errorResult, timeoutResult } from 'types';
+import { Effect } from 'effect';
 import { profiler } from 'shared';
 import type {
   Tool,
   ToolExecutor,
   ToolExecutionContext,
+  ToolExecutionError,
   ToolRegistrationOptions,
   CachedToolResult,
   CacheConfig,
   ToolRegistryConfig,
 } from './types.js';
-import { createTool, DEFAULT_CACHE_CONFIG, DEFAULT_TOOL_CONFIG } from './types.js';
+import {
+  createTool,
+  DEFAULT_CACHE_CONFIG,
+  DEFAULT_TOOL_CONFIG,
+  toToolExecutionError,
+} from './types.js';
 import { validateToolArgs, TOOL_SCHEMAS } from './tool_schemas.js';
 
 // ============================================
@@ -31,6 +43,14 @@ export interface ToolExecuteOptions {
   cwd?: string;
   /** Timeout override in milliseconds */
   timeout?: number;
+  /** Optional cooperative cancellation signal */
+  signal?: AbortSignal;
+  /** Optional run execution metadata */
+  execution?: RunExecutionMetadata;
+  /** Optional run control snapshot */
+  control?: RunControlMetadata;
+  /** Additional metadata propagated to tool runtime */
+  metadata?: Record<string, unknown>;
   /** Allowed tools restriction (for skill-based filtering) */
   allowedTools?: Set<string>;
   /** Environment variables to inject (e.g., provider API keys) */
@@ -243,40 +263,63 @@ export class ToolRegistry {
 
     // Build execution context for the tool executor
     const execContext: ToolExecutionContext = {
+      execution: options?.execution,
+      control: options?.control,
+      signal: options?.signal,
       workdirOverride: resolvedCwd,
       allowedTools: options?.allowedTools,
       envOverrides: options?.envOverrides,
       dangerousMode: this.dangerousMode,
+      metadata: { ...(options?.metadata ?? {}), toolName: name },
     };
 
-    // Execute with timeout
+    // Execute with Effect policies (timeout + cancellation + typed failures)
     const timeout = options?.timeout ?? tool.timeoutMs;
     const startTime = Date.now();
     const asyncId = profiler.asyncBegin(`tool:${name}`, 'tool');
 
-    try {
-      const result = await this.executeWithTimeout(
-        tool,
-        argsWithCwd,
-        timeout,
-        execContext
-      );
+    const result = await Effect.runPromise(
+      this.executeToolEffect(tool.executor, argsWithCwd, execContext).pipe(
+        Effect.timeoutFail({
+          duration: timeout,
+          onTimeout: () =>
+            toToolExecutionError(
+              { type: 'timeout', message: `Tool execution timed out after ${timeout}ms` },
+              'timeout',
+              { toolName: name, timeoutMs: timeout }
+            ),
+        }),
+        Effect.catchAll((executionError) =>
+          Effect.succeed(
+            this.mapExecutionErrorToResult(
+              name,
+              executionError,
+              Date.now() - startTime
+            )
+          )
+        )
+      )
+    );
 
-      result.durationMs = Date.now() - startTime;
-      profiler.asyncEnd(`tool:${name}`, asyncId, 'tool', {
-        success: result.isSuccess,
-        durationMs: result.durationMs,
-        cacheHit: isCacheable && cacheKey ? !!this.cache.get(cacheKey) : false,
-      });
+    result.durationMs = Date.now() - startTime;
+    profiler.asyncEnd(`tool:${name}`, asyncId, 'tool', {
+      success: result.isSuccess,
+      durationMs: result.durationMs,
+      cacheHit: isCacheable && cacheKey ? !!this.cache.get(cacheKey) : false,
+    });
 
-      // Cache successful read-only results
-      if (isCacheable && cacheKey && result.isSuccess) {
-        this.storeCachedResult(cacheKey, result);
-        result.metadata = { ...result.metadata, cached: true };
-      }
+    // Cache successful read-only results
+    if (isCacheable && cacheKey && result.isSuccess) {
+      this.storeCachedResult(cacheKey, result);
+      result.metadata = { ...result.metadata, cached: true };
+    }
 
-      // Invalidate caches for write operations
-      if (result.isSuccess && (name === 'Write' || name === 'Edit' || name === 'BatchEdit')) {
+    // Invalidate caches for write operations
+    if (result.isSuccess && (name === 'Write' || name === 'Edit' || name === 'BatchEdit' || name === 'apply_patch')) {
+      if (name === 'apply_patch') {
+        // apply_patch can touch multiple files — clear all read caches
+        this.clearCache();
+      } else {
         const argsRecord = argsWithCwd as Record<string, unknown>;
         const invalidate = (pathValue: unknown) => {
           if (typeof pathValue === 'string' && pathValue.length > 0) {
@@ -297,44 +340,78 @@ export class ToolRegistry {
           invalidate(argsRecord.path ?? argsRecord.file_path);
         }
       }
-
-      return result;
-    } catch (error) {
-      const durationMs = Date.now() - startTime;
-      profiler.asyncEnd(`tool:${name}`, asyncId, 'tool', { error: true, durationMs });
-      const message =
-        error instanceof Error ? error.message : String(error);
-      return errorResult(name, message, durationMs);
     }
+
+    return result;
   }
 
-  /**
-   * Execute tool with timeout.
-   */
-  private async executeWithTimeout(
-    tool: Tool,
+  private executeToolEffect(
+    executor: ToolExecutor,
     args: Record<string, unknown>,
-    timeoutMs: number,
     context: ToolExecutionContext
-  ): Promise<ToolResult> {
-    return new Promise((resolve) => {
-      const timeoutId = setTimeout(() => {
-        resolve(timeoutResult(tool.name, timeoutMs));
-      }, timeoutMs);
+  ): Effect.Effect<ToolResult, ToolExecutionError> {
+    return Effect.suspend(() => executor(args, context)).pipe(
+      Effect.raceFirst(this.awaitCancellation(context))
+    );
+  }
 
-      tool
-        .executor(args, context)
-        .then((result) => {
-          clearTimeout(timeoutId);
-          resolve(result);
-        })
-        .catch((error) => {
-          clearTimeout(timeoutId);
-          const message =
-            error instanceof Error ? error.message : String(error);
-          resolve(errorResult(tool.name, message, 0));
-        });
+  private awaitCancellation(
+    context: ToolExecutionContext
+  ): Effect.Effect<never, ToolExecutionError> {
+    if (!context.signal) {
+      return Effect.never;
+    }
+    if (context.signal.aborted) {
+      return Effect.fail(
+        toToolExecutionError(
+          { type: 'cancelled', message: 'Tool execution cancelled before start' },
+          'cancelled'
+        )
+      );
+    }
+
+    return Effect.async<never, ToolExecutionError>((resume) => {
+      const onAbort = () => {
+        resume(
+          Effect.fail(
+            toToolExecutionError(
+              { type: 'cancelled', message: 'Tool execution cancelled' },
+              'cancelled'
+            )
+          )
+        );
+      };
+      context.signal?.addEventListener('abort', onAbort, { once: true });
+      return Effect.sync(() => {
+        context.signal?.removeEventListener('abort', onAbort);
+      });
     });
+  }
+
+  private mapExecutionErrorToResult(
+    toolName: string,
+    executionError: ToolExecutionError,
+    durationMs: number
+  ): ToolResult {
+    if (executionError.type === 'timeout') {
+      return timeoutResult(toolName, durationMs);
+    }
+
+    if (executionError.type === 'cancelled' || executionError.type === 'paused') {
+      return {
+        toolName,
+        status: 'cancelled',
+        output: executionError.message,
+        error: executionError.message,
+        durationMs,
+        isSuccess: false,
+        metadata: executionError.metadata,
+      };
+    }
+
+    const result = errorResult(toolName, executionError.message, durationMs);
+    result.metadata = executionError.metadata;
+    return result;
   }
 
   // ============================================

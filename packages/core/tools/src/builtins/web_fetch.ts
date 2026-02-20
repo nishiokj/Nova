@@ -6,7 +6,13 @@
  */
 
 import type { ToolResult } from 'types';
-import type { ToolRegistrationOptions, ToolExecutionContext } from '../types.js';
+import { Effect } from 'effect';
+import type {
+  ToolRegistrationOptions,
+  ToolExecutionContext,
+  ToolExecutionError,
+} from '../types.js';
+import { toToolExecutionError } from '../types.js';
 
 // ============================================
 // TYPES
@@ -160,25 +166,18 @@ export async function executeWebFetch(
   }
 
   try {
-    // Fetch with timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
+    const signal = composeSignals(context?.signal, FETCH_TIMEOUT_MS);
     let response: Response;
-    try {
-      response = await fetch(parsedUrl.href, {
-        method: 'GET',
-        headers: {
-          'User-Agent': USER_AGENT,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-        },
-        redirect: 'follow',
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timeoutId);
-    }
+    response = await fetch(parsedUrl.href, {
+      method: 'GET',
+      headers: {
+        'User-Agent': USER_AGENT,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      redirect: 'follow',
+      signal,
+    });
 
     const responseUrl = new URL(response.url);
     if (responseUrl.protocol !== 'https:') {
@@ -311,6 +310,20 @@ export async function executeWebFetch(
   }
 }
 
+export function executeWebFetchEffect(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.tryPromise({
+    try: () => executeWebFetch(args, context),
+    catch: (error) =>
+      toToolExecutionError(error, 'execution_error', {
+        toolName: 'WebFetch',
+        url: args.url,
+      }),
+  });
+}
+
 // ============================================
 // CONTENT PROCESSING
 // ============================================
@@ -337,6 +350,17 @@ function parseContentType(value: string): { mimeType: string; charset?: string }
   }
 
   return { mimeType: typePart.trim().toLowerCase(), charset };
+}
+
+function composeSignals(
+  parentSignal: AbortSignal | undefined,
+  timeoutMs: number
+): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  if (!parentSignal) {
+    return timeoutSignal;
+  }
+  return AbortSignal.any([parentSignal, timeoutSignal]);
 }
 
 async function readResponseText(response: Response, charset?: string): Promise<string> {
@@ -656,7 +680,7 @@ Redirects are followed automatically; the output notes when a redirect occurred.
     required: ['url', 'prompt'],
   },
   required: ['url', 'prompt'],
-  executor: executeWebFetch,
+  executor: executeWebFetchEffect,
   enabled: true,
   timeoutMs: 35000,
   readOnly: true,

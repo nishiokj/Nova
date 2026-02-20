@@ -575,7 +575,6 @@ export function createConfigFromFile(
     context: {
       maxTokens: fileConfig.context?.max_tokens ?? DEFAULT_CONTEXT_CONFIG.max_tokens,
       sessionTtlMs: fileConfig.context?.session_ttl_ms ?? (DEFAULT_CONTEXT_CONFIG.session_ttl_ms ?? 0),
-      pauseTimeoutMs: fileConfig.context?.pause_timeout_ms ?? (DEFAULT_CONTEXT_CONFIG.pause_timeout_ms ?? 1_200_000),
       maxSessions: fileConfig.context?.max_sessions ?? (DEFAULT_CONTEXT_CONFIG.max_sessions ?? 50),
     },
     skills: {

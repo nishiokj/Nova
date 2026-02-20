@@ -71,6 +71,12 @@ export const SESSION_STALE_THRESHOLD = 5 * 60;
 /** Network request timeout (ms) - 10 seconds */
 export const NETWORK_TIMEOUT = 10000;
 
+/** Poll interval for detecting stalled busy states (ms) */
+export const BUSY_STALL_CHECK_INTERVAL = 5000;
+
+/** Max allowed quiet period while busy before surfacing a hard error (ms) */
+export const BUSY_STALL_TIMEOUT = 10 * 60 * 1000;
+
 /** File cache refresh interval (ms) - 5 seconds */
 export const FILE_CACHE_REFRESH_INTERVAL = 5000;
 

@@ -11,9 +11,11 @@ import type {
   LLMResponse,
   RespondParams,
   StreamParams,
+  LLMExecutionError,
 } from 'types';
+import { Effect, Stream } from 'effect';
 import type { ProviderContext, LLMProviderAdapter } from './types.js';
-import { PartialStreamError } from './types.js';
+import { PartialStreamError, toLLMExecutionError } from './types.js';
 import {
   createRateLimitError,
 } from '../rate-limits.js';
@@ -35,25 +37,63 @@ function buildSchemaInstruction(schema: Record<string, unknown>): string {
 export class AnthropicProvider implements LLMProviderAdapter {
   readonly name = 'anthropic' as const;
 
-  respond(context: ProviderContext, params: RespondParams): Promise<LLMResponse> {
-    return this.respondAnthropic(context, params);
+  respond(context: ProviderContext, params: RespondParams): Effect.Effect<LLMResponse, LLMExecutionError> {
+    return Effect.tryPromise({
+      try: () => this.respondAnthropic(context, params),
+      catch: (error) => toLLMExecutionError(error, this.name, context.config.model),
+    });
   }
 
-  async *stream(context: ProviderContext, params: StreamParams): AsyncGenerator<string, LLMResponse> {
-    return yield* this.streamAnthropic(context, params);
+  stream(context: ProviderContext, params: StreamParams): Stream.Stream<string, LLMExecutionError> {
+    return Stream.unwrapScoped(
+      Effect.acquireRelease(
+        Effect.sync(() => this.streamAnthropic(context, params)),
+        (generator) =>
+          Effect.tryPromise({
+            try: async () => {
+              if (typeof generator.return === 'function') {
+                await generator.return(undefined as never);
+              }
+            },
+            catch: () => undefined,
+          }).pipe(Effect.orDie)
+      ).pipe(
+        Effect.map((generator) =>
+          Stream.fromAsyncIterable(
+            {
+              [Symbol.asyncIterator]: async function* () {
+                while (true) {
+                  const next = await generator.next();
+                  if (next.done) {
+                    if (next.value) {
+                      params.onComplete?.(next.value);
+                    }
+                    return;
+                  }
+                  yield next.value;
+                }
+              },
+            },
+            (error) => toLLMExecutionError(error, 'anthropic', context.config.model)
+          )
+        )
+      )
+    );
   }
 
   formatTools(tools: ToolDefinition[]): Record<string, unknown>[] {
-    return tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      input_schema: {
-        type: 'object',
-        properties: t.parameters.properties,
-        required: t.parameters.required,
-        additionalProperties: t.parameters.additionalProperties,
-      },
-    }));
+    return tools
+      .filter((t) => t.name !== 'apply_patch')
+      .map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: {
+          type: 'object',
+          properties: t.parameters.properties,
+          required: t.parameters.required,
+          additionalProperties: t.parameters.additionalProperties,
+        },
+      }));
   }
 
   formatMessages(messages: any[]): Array<{ role: string; content: string | unknown[] }> {

@@ -10,10 +10,11 @@ import { StatusDot } from './components/StatusBadge'
 
 type SessionTab = 'active' | 'inactive'
 
+const ACTIVE_PAGE_SIZE = 12
 const INACTIVE_PAGE_SIZE = 5
 
 function isSessionActive(s: Session): boolean {
-  return s.state === 'active' || s.insights.requestsRunning > 0
+  return s.state === 'active'
 }
 
 export default function App() {
@@ -32,6 +33,7 @@ export default function App() {
 
   // Active/Inactive tab state
   const [tab, setTab] = useState<SessionTab>('active')
+  const [activeLimit, setActiveLimit] = useState(ACTIVE_PAGE_SIZE)
   const [inactiveLimit, setInactiveLimit] = useState(INACTIVE_PAGE_SIZE)
 
   // Split filtered sessions into active and inactive
@@ -48,6 +50,16 @@ export default function App() {
     return { activeSessions: active, inactiveSessions: inactive }
   }, [filteredSessions])
 
+  const visibleActiveSessions = useMemo(
+    () => activeSessions.slice(0, activeLimit),
+    [activeSessions, activeLimit]
+  )
+  const hasMoreActive = activeLimit < activeSessions.length
+
+  const loadMoreActive = useCallback(() => {
+    setActiveLimit((prev) => prev + ACTIVE_PAGE_SIZE)
+  }, [])
+
   // Lazy-load inactive sessions
   const visibleInactiveSessions = useMemo(
     () => inactiveSessions.slice(0, inactiveLimit),
@@ -62,6 +74,7 @@ export default function App() {
   // Reset inactive limit when filter changes
   const handleFilterChange = useCallback((f: FilterType) => {
     setFilter(f)
+    setActiveLimit(ACTIVE_PAGE_SIZE)
     setInactiveLimit(INACTIVE_PAGE_SIZE)
   }, [])
 
@@ -105,7 +118,7 @@ export default function App() {
 
     for (const s of sessions) {
       requests += s.insights.requestCount
-      running += s.insights.requestsRunning
+      running += s.state === 'active' ? s.insights.requestsRunning : 0
       errors += s.insights.requestsFailed
       completed += s.insights.requestsCompleted
     }
@@ -317,20 +330,25 @@ export default function App() {
                       </button>
                     </div>
                   ) : (
-                    activeSessions.map((s, i) => (
-                      <div
-                        key={s.id}
-                        className="animate-fade-in"
-                        style={{ animationDelay: `${i * 50}ms` }}
-                      >
+                    <>
+                      {visibleActiveSessions.map((s) => (
                         <SessionCard
+                          key={s.id}
                           session={s}
                           open={open.has(s.id)}
                           onOpenChange={(next) => handleOpenChange(s.id, next)}
                           onDelete={handleDelete}
                         />
-                      </div>
-                    ))
+                      ))}
+                      {hasMoreActive && (
+                        <button
+                          onClick={loadMoreActive}
+                          className="w-full py-3 text-sm font-medium text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] rounded-lg transition-colors"
+                        >
+                          Load more ({activeSessions.length - activeLimit} remaining)
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               )}
@@ -350,19 +368,14 @@ export default function App() {
                     </div>
                   ) : (
                     <>
-                      {visibleInactiveSessions.map((s, i) => (
-                        <div
+                      {visibleInactiveSessions.map((s) => (
+                        <SessionCard
                           key={s.id}
-                          className="animate-fade-in"
-                          style={{ animationDelay: `${i * 50}ms` }}
-                        >
-                          <SessionCard
-                            session={s}
-                            open={open.has(s.id)}
-                            onOpenChange={(next) => handleOpenChange(s.id, next)}
-                            onDelete={handleDelete}
-                          />
-                        </div>
+                          session={s}
+                          open={open.has(s.id)}
+                          onOpenChange={(next) => handleOpenChange(s.id, next)}
+                          onDelete={handleDelete}
+                        />
                       ))}
                       {hasMoreInactive && (
                         <button

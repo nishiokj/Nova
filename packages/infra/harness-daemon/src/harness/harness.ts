@@ -23,6 +23,7 @@ import {
   getAgentPrompt,
   buildAgentConfig,
 } from 'agent';
+import { Effect } from 'effect';
 import os from 'os';
 import { execSync } from 'child_process';
 import { randomUUID } from 'crypto';
@@ -52,6 +53,7 @@ import type {
   AgentRunResult,
   AgentRunHandle,
   BridgeEvent,
+  SessionControlResult,
 } from './types.js';
 import { loadConfig, getAgentConfig } from './config_loader.js';
 import type { FullHarnessConfig, ResolvedAgentConfig } from './config.js';
@@ -77,9 +79,15 @@ import type { EntityGraph, EntityGraphConfig } from 'entity-graph';
 import {
   createSessionScopedUnifiedHookRegistry,
   runUnifiedEffectHooksForSession,
-  type HookRegistry,
+  type UnifiedHookRegistry,
   type SessionScopedUnifiedHookRegistry,
 } from 'orchestrator';
+import {
+  makeRuntimeControlQueue,
+  publishRuntimeControl,
+  type RuntimeCancellationMetadata,
+  type RuntimeControlQueue,
+} from 'runtime';
 import { createMemoryInjector, type MemoryInjector as MemoryInjectorInstance } from 'memory-injector';
 
 /** Agent type for routing - maps to agent config */
@@ -370,7 +378,6 @@ export class AgentHarness {
   // -------------------------------------------------------------------------
 
   private readonly sessionTtlMs: number;
-  private readonly pauseTimeoutMs: number;
   private readonly maxSessions: number;
   private logger: HarnessLogger;
   private isShutdown = false;
@@ -391,12 +398,13 @@ export class AgentHarness {
   private memoryClient: SyncClient | null = null;
   private asyncModeIssues: string[] = [];
   private initializedModelSelections = new Set<string>();
+  private readonly pendingSessionHookTasks = new Set<Promise<void>>();
+  private readonly closingSessionHooks = new Set<string>();
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger, orchestratorRunner?: OrchestratorRunner) {
     this.config = config;
     this.logger = logger ?? consoleLogger;
     this.sessionTtlMs = config.context.sessionTtlMs;
-    this.pauseTimeoutMs = config.context.pauseTimeoutMs;
     this.maxSessions = config.context.maxSessions;
     this.sessionHookRegistry = createSessionScopedUnifiedHookRegistry();
 
@@ -478,7 +486,7 @@ export class AgentHarness {
         required: ['skill'],
       },
       required: ['skill'],
-      executor: async (args) => {
+      executor: (args) => Effect.sync(() => {
         const skillName = String(args.skill ?? '').trim();
         if (!skillName) {
           return errorResult('Skill', 'Skill name is required', 0);
@@ -517,7 +525,7 @@ export class AgentHarness {
           : skill.instructions;
 
         return successResult('Skill', instructions, 0);
-      },
+      }),
       enabled: true,
       readOnly: true,
       parallelizable: false,
@@ -847,12 +855,13 @@ export class AgentHarness {
         event: 'files_modified',
         priority: 0,
         timeoutMs: 30_000,
-        callback: async (payload: { paths?: string[] }) => {
-          if (payload.paths && payload.paths.length > 0) {
-            await entityGraphHooks.onFilesModified(payload.paths);
+        callback: (payload: { paths?: string[] }) => Effect.gen(function* () {
+          const paths = payload.paths;
+          if (paths && paths.length > 0) {
+            yield* Effect.tryPromise(() => entityGraphHooks.onFilesModified(paths));
           }
-          return { kind: 'allow' };
-        },
+          return { kind: 'allow' } as const;
+        }),
       } as never);
     }
 
@@ -882,7 +891,15 @@ export class AgentHarness {
           event: effectEvent,
           priority: Number.isFinite(definition.priority) ? definition.priority : 0,
           timeoutMs: definition.timeout_ms ?? 30_000,
-          callback: async (payload: Record<string, unknown>, callbackContext: { sessionKey: string; requestId: string; workingDir?: string }) => {
+          callback: (
+            payload: Record<string, unknown>,
+            callbackContext: {
+              sessionKey: string;
+              requestId: string;
+              workingDir?: string;
+              signal?: AbortSignal;
+            }
+          ) => Effect.gen(this, function* () {
             const sessionHookContext = this.buildSkillHookContext(effectEvent, payload, {
               sessionKey: callbackContext.sessionKey,
               requestId: callbackContext.requestId,
@@ -893,9 +910,11 @@ export class AgentHarness {
               return { kind: 'skip', reason: 'Hook matcher did not match event context' };
             }
 
-            const result = await runtime.execute(definition, sessionHookContext);
+            const result = yield* Effect.tryPromise(() =>
+              runtime.execute(definition, sessionHookContext, callbackContext.signal)
+            );
             return this.convertConfiguredResultToEffectOutcome(effectEvent, result);
-          },
+          }),
         } as never);
       } catch (error) {
         this.logger.warning('Failed to register configured session hook', {
@@ -911,18 +930,29 @@ export class AgentHarness {
   private async runSessionEffectHooks(
     sessionKey: string,
     event: Record<string, unknown> & { type: string },
-    context: { sessionKey: string; requestId: string; workingDir?: string; workId?: string; agentType?: string; internal?: InternalHookContext; metadata?: Record<string, unknown> }
+    context: {
+      sessionKey: string;
+      requestId: string;
+      workingDir?: string;
+      workId?: string;
+      agentType?: string;
+      internal?: InternalHookContext;
+      metadata?: Record<string, unknown>;
+      signal?: AbortSignal;
+    }
   ): Promise<{
     status: 'completed' | 'blocked';
     outcomes: Array<{ hookId: string; source: string; outcome: { kind: string; [key: string]: unknown } }>;
     blockedBy?: { hookId: string; source: string; reason: string };
   }> {
     try {
-      const result = await runUnifiedEffectHooksForSession(
-        sessionKey,
-        event as never,
-        context as never,
-        this.sessionHookRegistry
+      const result = await Effect.runPromise(
+        runUnifiedEffectHooksForSession(
+          sessionKey,
+          event as never,
+          context as never,
+          this.sessionHookRegistry
+        )
       );
       return {
         status: result.status,
@@ -939,20 +969,57 @@ export class AgentHarness {
     }
   }
 
+  private trackSessionHookTask(task: Promise<void>): void {
+    this.pendingSessionHookTasks.add(task);
+    task.finally(() => {
+      this.pendingSessionHookTasks.delete(task);
+    });
+  }
+
+  private enqueueSessionEffectHook(
+    sessionKey: string,
+    event: Record<string, unknown> & { type: string },
+    context: {
+      sessionKey: string;
+      requestId: string;
+      workingDir?: string;
+      workId?: string;
+      agentType?: string;
+      internal?: InternalHookContext;
+      metadata?: Record<string, unknown>;
+      signal?: AbortSignal;
+    },
+    errorLogMessage: string
+  ): Promise<void> {
+    const task = this.runSessionEffectHooks(sessionKey, event, context).then(
+      () => {},
+      (error) => {
+        this.logger.warning(errorLogMessage, {
+          sessionKey,
+          eventType: event.type,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    );
+    this.trackSessionHookTask(task);
+    return task;
+  }
+
   private cleanupSessionInternalHooks(sessionKey: string, state: SessionState): void {
+    if (this.closingSessionHooks.has(sessionKey)) {
+      return;
+    }
+    this.closingSessionHooks.add(sessionKey);
     const workingDir = state.store.getWorkingDirectory();
-    void this.runSessionEffectHooks(
+    this.enqueueSessionEffectHook(
       sessionKey,
       { type: 'session_stop', sessionKey, reason: 'session_cleanup' },
-      { sessionKey, requestId: 'session_cleanup', workingDir }
-    ).catch((error) => {
-      this.logger.warning('Session stop hook failed during cleanup', {
-        sessionKey,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }).finally(() => {
+      { sessionKey, requestId: 'session_cleanup', workingDir },
+      'Session stop hook failed during cleanup'
+    ).finally(() => {
       this.sessionHookRegistry.clearSession(sessionKey);
       this.configuredHookRuntimes.delete(sessionKey);
+      this.closingSessionHooks.delete(sessionKey);
     });
   }
 
@@ -1102,14 +1169,15 @@ export class AgentHarness {
     const state = createSessionState(store);
     this.sessions.set(sessionKey, state);
     this.registerSessionUnifiedHooks(sessionKey, workingDir ?? this.config.tools.workingDir);
-    void this.runSessionEffectHooks(
+    this.enqueueSessionEffectHook(
       sessionKey,
       { type: 'session_start', sessionKey, workingDir: workingDir ?? this.config.tools.workingDir },
       {
         sessionKey,
         requestId: 'session_start',
         workingDir: workingDir ?? this.config.tools.workingDir,
-      }
+      },
+      'Session start hook failed'
     );
     return state;
   }
@@ -1165,7 +1233,7 @@ export class AgentHarness {
     options: { workingDir?: string; dangerousMode?: boolean; includeUserPreferences?: boolean } = {}
   ): SessionStore {
     const store = this.getOrCreateSessionStore(sessionKey, options.dangerousMode ?? false, options.workingDir);
-    // Hydrate context + session metadata (paused state, permissions, model selections).
+    // Hydrate context + session metadata (permissions, model selections).
     store.getContext();
 
     if (options.includeUserPreferences !== false) {
@@ -1254,13 +1322,6 @@ export class AgentHarness {
       }
     }
 
-    const legacySelection = this.graphd.getUserPreference<{ provider?: string; model?: string }>(
-      'user_prefs:selected_model'
-    );
-    if (legacySelection && !this.isSelectionAccessible(legacySelection, hiddenModels)) {
-      this.graphd.deleteUserPreference('user_prefs:selected_model');
-      this.graphd.deleteUserPreference('user_prefs:last_model');
-    }
   }
 
   private modelSelectionForAgent(agentType: string, hiddenModels: Set<string>): ModelSelection | null {
@@ -1423,11 +1484,6 @@ export class AgentHarness {
     return state?.store.getAllModelSelections() ?? new Map();
   }
 
-  isSessionPaused(sessionKey: string): boolean {
-    const state = this.sessions.get(sessionKey);
-    return !!state?.store.getPausedState();
-  }
-
   setSessionAsyncModeEnabled(sessionKey: string, enabled: boolean): void {
     const store = this.getOrCreateSessionStore(sessionKey);
     store.setAsyncModeEnabled(enabled);
@@ -1476,6 +1532,75 @@ export class AgentHarness {
     state?.store.clearAsyncRun();
   }
 
+  async controlSessionExecution(params: {
+    sessionKey: string;
+    action: 'cancel';
+    reason?: string;
+    requestedBy?: 'user' | 'system' | 'policy';
+    scope?: 'run' | 'work_item' | 'tool';
+    targetWorkIds?: string[];
+    timeoutMs?: number;
+  }): Promise<SessionControlResult> {
+    const state = this.sessions.get(params.sessionKey);
+    if (!state) {
+      return { success: false, error: `Session '${params.sessionKey}' not found` };
+    }
+
+    const active = state.store.getActiveExecutionHandle();
+    if (!active) {
+      return { success: false, error: 'No active execution for this session' };
+    }
+
+    const requestedBy = params.requestedBy ?? 'system';
+    const requestedAt = Date.now();
+    const cancelScope = params.scope ?? 'run';
+    const cancellation: RuntimeCancellationMetadata = {
+      requestedAt,
+      requestedBy,
+      reason: params.reason,
+      scope: cancelScope,
+      targetWorkIds: params.targetWorkIds,
+    };
+
+    try {
+      await Effect.runPromise(publishRuntimeControl(active.controlQueue, {
+        action: 'cancel',
+        runId: active.requestId,
+        cancellation,
+      }));
+    } catch (error) {
+      return {
+        success: false,
+        requestId: active.requestId,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    state.store.updateExecutionRunControl({
+      state: cancelScope === 'run' ? 'cancelling' : 'running',
+      cancellation: cancelScope === 'run' ? cancellation : undefined,
+    });
+
+    if (cancelScope === 'run') {
+      const completed = await state.store.waitForExecutionCompletion(
+        active.requestId,
+        params.timeoutMs ?? 30_000
+      );
+      if (!completed) {
+        return {
+          success: false,
+          requestId: active.requestId,
+          error: 'Timed out waiting for execution to complete',
+        };
+      }
+    }
+
+    return {
+      success: true,
+      requestId: active.requestId,
+    };
+  }
+
   private pruneSessionStores(reason: string): void {
     if (this.sessionTtlMs <= 0) return;
     const now = Date.now();
@@ -1492,39 +1617,18 @@ export class AgentHarness {
       if (state.store.isExecuting() || state.store.getAsyncRun()) {
         continue;
       }
-      const pausedState = state.store.getPausedState();
-      if (pausedState) {
-        // Paused sessions: check if paused too long
-        const pausedDuration = now - pausedState.pausedAt;
-        if (pausedDuration < this.pauseTimeoutMs) continue; // Still within timeout, skip
-        // Paused too long - persist and evict
-        this.cleanupSessionInternalHooks(sessionKey, state);
-        state.store.persistContext();
-        state.store.close();
-        clearSessionState(state);
-        markInactive(sessionKey);
-        this.sessions.delete(sessionKey);
-        this.initializedModelSelections.delete(sessionKey);
-        this.logger.debug('Evicted paused session (timeout)', {
-          sessionKey,
-          reason,
-          pausedMs: pausedDuration,
-        });
-      } else {
-        // Active sessions: check TTL as before
-        if (state.lastAccessMs > cutoff) continue;
-        this.cleanupSessionInternalHooks(sessionKey, state);
-        state.store.close();
-        clearSessionState(state);
-        markInactive(sessionKey);
-        this.sessions.delete(sessionKey);
-        this.initializedModelSelections.delete(sessionKey);
-        this.logger.debug('Evicted session store', {
-          sessionKey,
-          reason,
-          idleMs: now - state.lastAccessMs,
-        });
-      }
+      if (state.lastAccessMs > cutoff) continue;
+      this.cleanupSessionInternalHooks(sessionKey, state);
+      state.store.close();
+      clearSessionState(state);
+      markInactive(sessionKey);
+      this.sessions.delete(sessionKey);
+      this.initializedModelSelections.delete(sessionKey);
+      this.logger.debug('Evicted session store', {
+        sessionKey,
+        reason,
+        idleMs: now - state.lastAccessMs,
+      });
     }
   }
 
@@ -1573,7 +1677,6 @@ export class AgentHarness {
 
   /**
    * Run the agent with the given parameters.
-   * Also handles resuming paused sessions - if a session is paused, inputText is treated as the answer.
    */
   run(params: AgentRunParams): AgentRunHandle {
     const {
@@ -1617,16 +1720,14 @@ export class AgentHarness {
 
     this.pruneSessionStores('run');
     const store = this.ensureSessionHydrated(sessionKey, { workingDir, includeUserPreferences: true });
-    const paused = store.getPausedState();
+    const controlQueue = Effect.runSync(makeRuntimeControlQueue());
 
-    // Determine if this is a resume (paused state exists) or fresh run
-    const isResume = !!paused;
-    const sendingMessage = isResume ? 'Resuming with user input...' : 'Processing request...';
+    const sendingMessage = 'Processing request...';
     eventQueue.push(createStatusEvent('sending', sendingMessage));
     emit(createEvent('harness_status', { state: 'sending', message: sendingMessage }));
 
     // Attempt to mark execution as started; if another run is active, queue instead.
-    if (!store.startExecution(requestId)) {
+    if (!store.startExecution(requestId, controlQueue)) {
       this.logger.info('Message received during active execution, queueing for agent', {
         sessionKey,
         requestId,
@@ -1656,7 +1757,6 @@ export class AgentHarness {
         sessionKey,
         success: true,
         finalText: '',
-        paused: false,
         toolsUsed: [],
         durationMs: 0,
         metadata: { queued: true, executingRequestId: store.getExecutingRequestId() },
@@ -1666,25 +1766,11 @@ export class AgentHarness {
       return { result: resultPromise, events: eventQueue };
     }
 
-    // Determine execution parameters based on paused state
-    let goal: string;
-    let effectiveAgentType: AgentType;
-    let effectiveWorkingDir: string;
     const contextWindow = store.getContext();
-
-    if (isResume) {
-      // This is a resume - inputText is the answer to a pending question
-      contextWindow.addMessage('user', inputText);
-      goal = paused.goal;
-      effectiveAgentType = paused.agentType as AgentType;
-      effectiveWorkingDir = workingDir ?? paused.workingDir;
-    } else {
-      // Fresh run - inputText is the goal
-      contextWindow.addMessage('user', inputText);
-      goal = inputText;
-      effectiveAgentType = requestedTier || 'standard';
-      effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
-    }
+    contextWindow.addMessage('user', inputText);
+    const goal = inputText;
+    const effectiveAgentType: AgentType = requestedTier || 'standard';
+    const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
 
     if (supplementalContext.length > 0) {
       contextWindow.addMessage(
@@ -1740,7 +1826,6 @@ export class AgentHarness {
             success: false,
             finalText: blockMsg,
             errorMessage: blockMsg,
-            paused: false,
             toolsUsed: [],
             durationMs: 0,
           };
@@ -1751,7 +1836,6 @@ export class AgentHarness {
 
         this.logger.debug('Running with agent config', {
           agentType: effectiveAgentType,
-          isResume,
           model: agentConfig.llm.model,
           provider: agentConfig.llm.provider,
         });
@@ -1779,7 +1863,6 @@ export class AgentHarness {
 
         // All requests go through orchestrator (loop-until-goal architecture)
         // Orchestrator handles interruptions internally via checkInterruption() callback
-        // Note: hookRegistry only applies to fresh runs, not resumes
         const result = await this.runOrchestrator(
           contextWindow,
           goal,
@@ -1789,7 +1872,8 @@ export class AgentHarness {
           effectiveAgentType,
           effectiveWorkingDir,
           store,
-          isResume ? undefined : hookRegistry
+          hookRegistry,
+          controlQueue
         );
         const responseContent = result.finalText.trim().length > 0
           ? result.finalText
@@ -1801,67 +1885,26 @@ export class AgentHarness {
         // happen first to avoid transient "missing assistant message" gaps.
         this.persistToGraphD(sessionKey, requestId, inputText, responseContent, result.durationMs, userMessagePersisted);
 
-        if (result.paused && result.userPrompt) {
-          // Pausing for user input - emit response first (if any), then user prompt
-          if (responseHasContent) {
-            eventQueue.push(
-              createResponseEvent(
-                requestId,
-                true, // Partial success - got response before pause
-                responseContent,
-                result.toolsUsed,
-                result.durationMs,
-                undefined,
-                result.metadata
-              )
-            );
-            emit(createEvent('harness_response', {
-              success: true,
-              content: responseContent,
-              toolsUsed: result.toolsUsed,
-              durationMs: result.durationMs,
-              metadata: result.metadata,
-            }));
-          }
-          eventQueue.push(createUserPromptEvent(
-            result.userPrompt.requestId,
-            result.userPrompt.question,
-            result.userPrompt.options,
-            result.userPrompt.context,
-            result.userPrompt.multiSelect,
-            result.userPrompt.questionType,
-            result.userPrompt.questions
-          ));
-          emit(createEvent('harness_user_prompt', {
-            question: result.userPrompt.question,
-            options: result.userPrompt.options,
-            context: result.userPrompt.context,
-            multiSelect: result.userPrompt.multiSelect,
-            questionType: result.userPrompt.questionType,
-            questions: result.userPrompt.questions,
-          }));
-        } else {
-          // Execution completed (success or failure) - emit response event
-          eventQueue.push(
-            createResponseEvent(
-              requestId,
-              result.success,
-              responseContent,
-              result.toolsUsed,
-              result.durationMs,
-              result.errorMessage,
-              result.metadata
-            )
-          );
-          emit(createEvent('harness_response', {
-            success: result.success,
-            content: responseContent,
-            toolsUsed: result.toolsUsed,
-            durationMs: result.durationMs,
-            error: result.errorMessage,
-            metadata: result.metadata,
-          }));
-        }
+        // Emit response event
+        eventQueue.push(
+          createResponseEvent(
+            requestId,
+            result.success,
+            responseContent,
+            result.toolsUsed,
+            result.durationMs,
+            result.errorMessage,
+            result.metadata
+          )
+        );
+        emit(createEvent('harness_response', {
+          success: result.success,
+          content: responseContent,
+          toolsUsed: result.toolsUsed,
+          durationMs: result.durationMs,
+          error: result.errorMessage,
+          metadata: result.metadata,
+        }));
 
         eventQueue.push(createStatusEvent('idle'));
         emit(createEvent('harness_status', { state: 'idle' }));
@@ -1892,7 +1935,6 @@ export class AgentHarness {
             success: false,
             finalText: recoverable.userMessage,
             errorMessage: getErrorMessage(error),
-            paused: false,
             toolsUsed: [],
             durationMs: 0,
           };
@@ -1921,21 +1963,10 @@ export class AgentHarness {
           success: false,
           finalText: '',
           errorMessage,
-          paused: false,
           toolsUsed: [],
           durationMs: 0,
         };
       } finally {
-        // Mark execution as complete - allows new messages to start their own orchestrator
-        const queuedMessages = store.endExecution();
-        if (queuedMessages.length > 0) {
-          this.logger.info('Execution ended with queued messages', {
-            sessionKey,
-            requestId,
-            queuedCount: queuedMessages.length,
-          });
-        }
-
         await this.runSessionEffectHooks(
           sessionKey,
           {
@@ -1949,6 +1980,16 @@ export class AgentHarness {
             workingDir: effectiveWorkingDir,
           }
         );
+
+        // Mark execution complete only after session_stop hooks settle.
+        const queuedMessages = store.endExecution();
+        if (queuedMessages.length > 0) {
+          this.logger.info('Execution ended with queued messages', {
+            sessionKey,
+            requestId,
+            queuedCount: queuedMessages.length,
+          });
+        }
 
         queueMicrotask(() => {
           try {
@@ -1973,7 +2014,25 @@ export class AgentHarness {
       }
     })();
 
-    return { result: resultPromise, events: eventQueue };
+    return {
+      result: resultPromise,
+      events: eventQueue,
+      abort: () => {
+        void this.controlSessionExecution({
+          sessionKey,
+          action: 'cancel',
+          reason: 'Execution aborted by handle',
+          requestedBy: 'system',
+        });
+      },
+      cancel: (reason?: string) =>
+        this.controlSessionExecution({
+          sessionKey,
+          action: 'cancel',
+          reason: reason ?? 'Execution cancelled by handle',
+          requestedBy: 'system',
+        }),
+    };
   }
 
   /**
@@ -2319,7 +2378,8 @@ export class AgentHarness {
     agentType: AgentType = 'standard',
     workingDir?: string,
     store?: SessionStore,
-    hookRegistry?: HookRegistry
+    hookRegistry?: UnifiedHookRegistry,
+    controlQueue?: RuntimeControlQueue
   ): Promise<AgentRunResult> {
     const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
     const hooks = this.createAgentHooks(context.sessionKey, requestId, effectiveWorkingDir, emit);
@@ -2347,7 +2407,7 @@ export class AgentHarness {
 
     const runtime = {
       hookRegistry,
-      executeEffectHook: async (event: InternalHookEvent, hookContext: InternalHookContext) => {
+      executeEffectHook: async (event: InternalHookEvent, hookContext: InternalHookContext, signal?: AbortSignal) => {
         await this.runSessionEffectHooks(
           hookContext.sessionKey,
           event,
@@ -2358,10 +2418,12 @@ export class AgentHarness {
             agentType: hookContext.agentType,
             workingDir: effectiveWorkingDir,
             internal: hookContext,
+            signal,
           }
         );
       },
       onStart: (activeContext: ContextWindow) => this.attachArtifactSubscriber(activeContext),
+      controlQueue,
       // Pass interruption check callback so orchestrator can avoid premature termination
       // when user messages arrived during execution.
       // The callback drains the queue (clear on check) so subsequent checks return false.
@@ -2369,8 +2431,7 @@ export class AgentHarness {
         const pending = store.drainQueuedMessages();
         return pending.length > 0;
       } : undefined,
-      // Pass stop request check so agent can exit loop early on explicit "stop" from user
-      checkStopRequest: store ? () => store.hasPendingStopRequest() : undefined,
+      getRunControl: store ? () => store.getExecutionRunControl() : undefined,
     };
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
@@ -2393,19 +2454,7 @@ export class AgentHarness {
       cwd: effectiveWorkingDir,
       runtime,
     });
-    profiler.asyncEnd(`orchestrator:${agentType}`, asyncId, 'orchestrator', { toolCalls: result.metrics.totalToolCalls, paused: result.paused });
-
-    // Store paused state for resume, or clear it on completion
-    if (result.paused) {
-      store?.setPausedState({
-        goal,
-        agentType,
-        workingDir: effectiveWorkingDir,
-        userPromptType: result.userPrompt?.questionType,
-      });
-    } else {
-      store?.clearPausedState();
-    }
+    profiler.asyncEnd(`orchestrator:${agentType}`, asyncId, 'orchestrator', { toolCalls: result.metrics.totalToolCalls });
 
     return {
       requestId,
@@ -2413,16 +2462,6 @@ export class AgentHarness {
       success: result.success,
       finalText: result.response,
       errorMessage: result.error,
-      paused: result.paused,
-      userPrompt: result.paused && result.userPrompt ? {
-        requestId,
-        question: String(result.userPrompt.question ?? 'Please provide input:'),
-        options: result.userPrompt.options,
-        context: result.userPrompt.context,
-        multiSelect: result.userPrompt.multiSelect,
-        questionType: result.userPrompt.questionType,
-        questions: result.userPrompt.questions,
-      } : undefined,
       toolsUsed: [],
       durationMs: result.metrics.durationMs,
       metadata: { agentType, metrics: result.metrics },
@@ -2566,9 +2605,16 @@ export class AgentHarness {
 
     this.eventBus.shutdown();
 
-    // Persist and mark all sessions inactive BEFORE stopping GraphD
     for (const [sessionKey, state] of this.sessions.entries()) {
       this.cleanupSessionInternalHooks(sessionKey, state);
+    }
+
+    if (this.pendingSessionHookTasks.size > 0) {
+      await Promise.allSettled(Array.from(this.pendingSessionHookTasks));
+    }
+
+    // Persist and mark all sessions inactive BEFORE stopping GraphD
+    for (const [sessionKey, state] of this.sessions.entries()) {
       try {
         state.store.persistContext();
         if (this.isGraphDReady()) {

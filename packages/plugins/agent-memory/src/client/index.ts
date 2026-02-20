@@ -75,13 +75,12 @@ import type {
   TaskSanityResponse,
   TraceResponse,
   TracesResponse,
-  EscalationResponse,
   TransformationListResponse,
   TransformationSummary,
   TriggerConfig,
 } from './types.js'
 import { SyncClientError } from './types.js'
-import type { TraceRecord, Escalation, EscalationCreateInput, EscalationResolveInput } from 'types'
+import type { TraceRecord } from 'types'
 
 export interface SyncClientConfig {
   /** Base URL of the sync daemon (e.g., 'http://localhost:3001') */
@@ -1285,30 +1284,6 @@ export class SyncClient {
     delete: async (id: string): Promise<boolean> => {
       await this.delete<{ deleted: boolean }>(`/traces/${id}`)
       return true
-    },
-  }
-
-  // ============ Escalations ============
-
-  escalations = {
-    create: async (input: EscalationCreateInput): Promise<Escalation> => {
-      const response = await this.post<EscalationResponse>('/escalations', input)
-      return response.escalation
-    },
-
-    resolve: async (id: string, input: EscalationResolveInput): Promise<Escalation> => {
-      const response = await this.post<EscalationResponse>(`/escalations/${id}/resolve`, input)
-      return response.escalation
-    },
-
-    dismiss: async (id: string): Promise<Escalation> => {
-      const response = await this.post<EscalationResponse>(`/escalations/${id}/dismiss`, {})
-      return response.escalation
-    },
-
-    get: async (id: string): Promise<Escalation> => {
-      const response = await this.get<EscalationResponse>(`/escalations/${id}`)
-      return response.escalation
     },
   }
 

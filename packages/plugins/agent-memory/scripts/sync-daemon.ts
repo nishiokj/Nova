@@ -32,7 +32,7 @@ import { TelegramConnector } from '../src/connectors/telegram/index.js'
 import { notifyAllUsers } from '../src/connectors/telegram/notify.js'
 
 // Load .env from project root
-await loadEnvFile(join(import.meta.dir, '../../../.env'))
+await loadEnvFile(join(import.meta.dir, '../../../../.env'))
 
 // Log which Google OAuth credentials are being used
 console.log('🔑 Google OAuth Configuration:')
@@ -141,7 +141,7 @@ export function loadConfig(): DaemonConfig {
     telegramAllowedUsers,
     harnessHost: process.env.HARNESS_HOST ?? '127.0.0.1',
     harnessPort: parseInt(process.env.HARNESS_PORT ?? '9555', 10),
-    workingDir: process.env.WORKING_DIR ?? join(import.meta.dir, '../../../'),
+    workingDir: process.env.WORKING_DIR ?? join(import.meta.dir, '../../../../'),
   }
 
   const missing = required.filter(key => !config[key])

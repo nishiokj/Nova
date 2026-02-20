@@ -22,6 +22,9 @@ export const AgentCoreEventTypeSchema = z.enum([
   'agent_bounds_hit',
   'memory_injected',
   'files_modified',
+  'run_control_requested',
+  'run_control_applied',
+  'run_control_rejected',
 ]);
 
 /**
@@ -63,6 +66,50 @@ export const BaseEventFieldsSchema = z.object({
   timestamp: z.number(),
   /** WorkItem ID if event is workitem-related */
   workItemId: z.string().optional(),
+});
+
+// ============================================
+// RUN CONTROL SCHEMAS
+// ============================================
+
+export const RunControlStateSchema = z.enum([
+  'running',
+  'cancelling',
+  'cancelled',
+]);
+
+export const RunControlActionSchema = z.enum(['cancel']);
+export const RunControlScopeSchema = z.enum(['run', 'work_item', 'tool']);
+export const RunControlSourceSchema = z.enum(['user', 'system', 'policy']);
+
+export const RunCancellationMetadataSchema = z.object({
+  requestedAt: z.number(),
+  requestedBy: RunControlSourceSchema.optional(),
+  reason: z.string().optional(),
+  scope: RunControlScopeSchema.optional(),
+  targetWorkIds: z.array(z.string()).optional(),
+});
+
+export const RunControlTargetSchema = z.object({
+  scope: RunControlScopeSchema,
+  runId: z.string().optional(),
+  workItemIds: z.array(z.string()).optional(),
+});
+
+export const RunControlRequestedDataSchema = z.object({
+  action: RunControlActionSchema,
+  source: RunControlSourceSchema,
+  target: RunControlTargetSchema,
+  stateBefore: RunControlStateSchema,
+  cancellation: RunCancellationMetadataSchema.optional(),
+});
+
+export const RunControlAppliedDataSchema = RunControlRequestedDataSchema.extend({
+  stateAfter: RunControlStateSchema,
+});
+
+export const RunControlRejectedDataSchema = RunControlRequestedDataSchema.extend({
+  reason: z.string(),
 });
 
 // ============================================
@@ -327,6 +374,30 @@ export const MemoryInjectedEventSchema = BaseEventFieldsSchema.extend({
 });
 
 /**
+ * Run control requested event.
+ */
+export const RunControlRequestedEventSchema = BaseEventFieldsSchema.extend({
+  type: z.literal('run_control_requested'),
+  data: RunControlRequestedDataSchema,
+});
+
+/**
+ * Run control applied event.
+ */
+export const RunControlAppliedEventSchema = BaseEventFieldsSchema.extend({
+  type: z.literal('run_control_applied'),
+  data: RunControlAppliedDataSchema,
+});
+
+/**
+ * Run control rejected event.
+ */
+export const RunControlRejectedEventSchema = BaseEventFieldsSchema.extend({
+  type: z.literal('run_control_rejected'),
+  data: RunControlRejectedDataSchema,
+});
+
+/**
  * Agent bounds hit event.
  */
 export const AgentBoundsHitEventSchema = BaseEventFieldsSchema.extend({
@@ -399,6 +470,9 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
   LLMCallEventSchema,
   LLMErrorEventSchema,
   MemoryInjectedEventSchema,
+  RunControlRequestedEventSchema,
+  RunControlAppliedEventSchema,
+  RunControlRejectedEventSchema,
   AgentBoundsHitEventSchema,
   OrchestrationStartedEventSchema,
   IterationStartedEventSchema,
@@ -419,6 +493,10 @@ export type AgentEventType = z.infer<typeof AgentEventTypeSchema>;
 export type ToolCallPhase = z.infer<typeof ToolCallPhaseSchema>;
 export type HookCallPhase = z.infer<typeof HookCallPhaseSchema>;
 export type LLMErrorType = z.infer<typeof LLMErrorTypeSchema>;
+export type RunControlState = z.infer<typeof RunControlStateSchema>;
+export type RunControlAction = z.infer<typeof RunControlActionSchema>;
+export type RunControlScope = z.infer<typeof RunControlScopeSchema>;
+export type RunControlSource = z.infer<typeof RunControlSourceSchema>;
 
 export type ToolCallData = z.infer<typeof ToolCallDataSchema>;
 export type HookCallData = z.infer<typeof HookCallDataSchema>;
@@ -426,6 +504,11 @@ export type LLMCallData = z.infer<typeof LLMCallDataSchema>;
 export type LLMErrorData = z.infer<typeof LLMErrorDataSchema>;
 export type MemoryInjectionTrainingSignal = z.infer<typeof MemoryInjectionTrainingSignalSchema>;
 export type MemoryInjectedData = z.infer<typeof MemoryInjectedDataSchema>;
+export type RunCancellationMetadata = z.infer<typeof RunCancellationMetadataSchema>;
+export type RunControlTarget = z.infer<typeof RunControlTargetSchema>;
+export type RunControlRequestedData = z.infer<typeof RunControlRequestedDataSchema>;
+export type RunControlAppliedData = z.infer<typeof RunControlAppliedDataSchema>;
+export type RunControlRejectedData = z.infer<typeof RunControlRejectedDataSchema>;
 export type RuntimeScriptCreatedData = z.infer<typeof RuntimeScriptCreatedDataSchema>;
 export type WorkItemStatusValue = z.infer<typeof WorkItemStatusValueSchema>;
 export type WorkItemStatusData = z.infer<typeof WorkItemStatusDataSchema>;
@@ -437,6 +520,9 @@ export type HookCallEvent = z.infer<typeof HookCallEventSchema>;
 export type LLMCallEvent = z.infer<typeof LLMCallEventSchema>;
 export type LLMErrorEvent = z.infer<typeof LLMErrorEventSchema>;
 export type MemoryInjectedEvent = z.infer<typeof MemoryInjectedEventSchema>;
+export type RunControlRequestedEvent = z.infer<typeof RunControlRequestedEventSchema>;
+export type RunControlAppliedEvent = z.infer<typeof RunControlAppliedEventSchema>;
+export type RunControlRejectedEvent = z.infer<typeof RunControlRejectedEventSchema>;
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 
 // ============================================

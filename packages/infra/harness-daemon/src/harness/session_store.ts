@@ -1,9 +1,11 @@
 import { ContextWindow } from 'context';
 import type { GraphDManager } from 'graphd';
-import type { ContextWindowSnapshot, SessionPermissionState } from 'types';
+import type { ContextWindowSnapshot, RunControlMetadata, SessionPermissionState } from 'types';
 import type { ModelSelection } from 'agent';
+import type { RuntimeControlQueue } from 'runtime';
 import { PermissionChecker } from './permissions.js';
 import path from 'path';
+import { existsSync, readdirSync } from 'fs';
 
 interface SessionStoreOptions {
   sessionKey: string;
@@ -30,79 +32,6 @@ export type SessionPermissionStateWithFlags = SessionPermissionState & {
   restrictWriteToPaths?: string[];
 };
 
-export interface PausedState {
-  goal: string;
-  agentType: string;
-  workingDir: string;
-  userPromptType?: string;
-  pausedAt: number; // Timestamp when session entered paused state
-}
-
-export type PausedWorkItemStatus = 'pending' | 'resolved' | 'cancelled';
-
-export interface PausedWorkItemState {
-  workId: string;
-  agentType: string;
-  objective?: string;
-  reason: string;
-  escalationId?: string;
-  status: PausedWorkItemStatus;
-  createdAt: number;
-  updatedAt: number;
-  resolvedAt?: number;
-  resolutionSummary?: string;
-}
-
-function asNonEmptyString(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function asPositiveTimestamp(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
-}
-
-function normalizePausedWorkItemStatus(value: unknown): PausedWorkItemStatus {
-  switch (value) {
-    case 'pending':
-    case 'resolved':
-    case 'cancelled':
-      return value;
-    default:
-      return 'pending';
-  }
-}
-
-function normalizePausedWorkItem(value: unknown): PausedWorkItemState | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  const input = value as Record<string, unknown>;
-  const workId = asNonEmptyString(input.workId);
-  const agentType = asNonEmptyString(input.agentType);
-  const reason = asNonEmptyString(input.reason);
-  if (!workId || !agentType || !reason) return null;
-  const objective = asNonEmptyString(input.objective);
-  const escalationId = asNonEmptyString(input.escalationId);
-
-  const createdAt = asPositiveTimestamp(input.createdAt) ?? Date.now();
-  const updatedAt = asPositiveTimestamp(input.updatedAt) ?? createdAt;
-  const resolvedAt = asPositiveTimestamp(input.resolvedAt);
-  const resolutionSummary = asNonEmptyString(input.resolutionSummary);
-
-  return {
-    workId,
-    agentType,
-    ...(objective ? { objective } : {}),
-    reason,
-    ...(escalationId ? { escalationId } : {}),
-    status: normalizePausedWorkItemStatus(input.status),
-    createdAt,
-    updatedAt,
-    ...(resolvedAt ? { resolvedAt } : {}),
-    ...(resolutionSummary ? { resolutionSummary } : {}),
-  };
-}
-
 /**
  * Build an interruption directive that wraps the user's message with guidance.
  * This helps the agent understand the message arrived mid-execution and how to handle it.
@@ -111,12 +40,43 @@ function buildInterruptionDirective(userMessage: string): string {
   return `**User Interruption**: "${userMessage}"
 
 Consider if the user is:
-- Asking you to stop current work
 - Requesting a pivot to a different task
 - Providing information that invalidates your current action
 - Adding context as an addendum
 
 Acknowledge the interruption and adjust your approach accordingly.`;
+}
+
+function resolveContextFilePath(workingDir: string, sessionKey: string): string {
+  const date = new Date().toISOString().split('T')[0];
+  const sessionsRoot = path.join(workingDir, '.haiku', 'sessions');
+  const todayPath = path.join(sessionsRoot, date, sessionKey, 'context.md');
+
+  if (existsSync(todayPath)) {
+    return todayPath;
+  }
+
+  if (!existsSync(sessionsRoot)) {
+    return todayPath;
+  }
+
+  try {
+    const dateDirs = readdirSync(sessionsRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((a, b) => b.localeCompare(a));
+
+    for (const dateDir of dateDirs) {
+      const candidate = path.join(sessionsRoot, dateDir, sessionKey, 'context.md');
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  } catch {
+    // Fall back to today's path on any filesystem error.
+  }
+
+  return todayPath;
 }
 
 /** Info about an active async run for a session */
@@ -125,6 +85,14 @@ export interface AsyncRunInfo {
   goal: string;
   cancelled: boolean;
   startedAt: number;
+}
+
+export interface SessionExecutionHandle {
+  requestId: string;
+  controlQueue: RuntimeControlQueue;
+  runControl: RunControlMetadata;
+  startedAt: number;
+  completion: Promise<void>;
 }
 
 export class SessionStore {
@@ -137,14 +105,16 @@ export class SessionStore {
   private readonly permissionChecker: PermissionChecker;
   private context: ContextWindow | null = null;
   private readonly contextFilePath: string;
-  private pausedState: PausedState | null = null;
-  private pausedWorkItems = new Map<string, PausedWorkItemState>();
   private modelSelections = new Map<string, ModelSelection>();
   private asyncModeEnabled = false;
 
   // Execution tracking: prevents race conditions when user sends messages during agent execution
   private executingRequestId: string | null = null;
   private queuedUserMessages: Array<{ requestId: string; message: string }> = [];
+  private executionControlQueue: RuntimeControlQueue | null = null;
+  private executionRunControl: RunControlMetadata = { state: 'running' };
+  private executionCompletion: Promise<void> | null = null;
+  private executionCompletionResolver: (() => void) | null = null;
 
   // Session-level exclusive operation tracking (prevents multiple connections from starting concurrent ops)
   private asyncRun: AsyncRunInfo | null = null;
@@ -156,8 +126,7 @@ export class SessionStore {
     this.isGraphDReady = options.isGraphDReady;
     this.logger = options.logger;
     this.workingDir = options.workingDir ?? process.cwd();
-    const date = new Date().toISOString().split('T')[0];
-    this.contextFilePath = path.join(this.workingDir, '.haiku', 'sessions', date, options.sessionKey, 'context.md');
+    this.contextFilePath = resolveContextFilePath(this.workingDir, options.sessionKey);
 
     // Per-session permission checker - each session has its own dangerous mode and grants
     this.permissionChecker = new PermissionChecker(
@@ -220,10 +189,22 @@ export class SessionStore {
       return this.context;
     }
 
-    // First, recover paused state from GraphD metadata if it exists
-    this.recoverPausedState();
+    // Recover session state (model selections, permissions) from GraphD metadata
+    this.recoverSessionState();
 
-    // Try to hydrate from GraphD
+    const hadLocalContextFile = existsSync(this.contextFilePath);
+    if (hadLocalContextFile) {
+      this.context = new ContextWindow(this.sessionKey, this.maxTokens, this.contextFilePath);
+      this.logger.debug('Hydrated context from disk', {
+        sessionKey: this.sessionKey,
+        itemCount: this.context.items.length,
+        version: this.context.version,
+        path: this.contextFilePath,
+      });
+      return this.context;
+    }
+
+    // Fall back to GraphD only when no disk context exists yet.
     if (this.isGraphDReady() && this.graphd) {
       try {
         const result = this.graphd.contextGet(this.sessionKey) as {
@@ -232,15 +213,16 @@ export class SessionStore {
         };
         if (result.snapshot?.context) {
           this.context = ContextWindow.deserialize(result.snapshot.context, this.contextFilePath);
-          this.logger.debug('Hydrated context from GraphD', {
+          this.logger.debug('Seeded disk context from GraphD snapshot', {
             sessionKey: this.sessionKey,
             itemCount: this.context.items.length,
             version: this.context.version,
+            path: this.contextFilePath,
           });
           return this.context;
         }
       } catch (error) {
-        this.logger.warning('Failed to hydrate context from GraphD', {
+        this.logger.warning('Failed to seed context from GraphD snapshot', {
           sessionKey: this.sessionKey,
           error: String(error),
         });
@@ -253,10 +235,10 @@ export class SessionStore {
   }
 
   /**
-   * Recover paused state from GraphD session metadata.
-   * Called during context hydration to restore session pause state.
+   * Recover session state (model selections, permissions) from GraphD metadata.
+   * Called during context hydration.
    */
-  private recoverPausedState(): void {
+  private recoverSessionState(): void {
     if (!this.isGraphDReady() || !this.graphd) {
       return;
     }
@@ -264,41 +246,12 @@ export class SessionStore {
     try {
       const session = this.graphd.sessionGet(this.sessionKey);
       const metadata = session?.metadata as Record<string, unknown> | undefined;
-      const pausedStateMetadata = metadata?.paused_state as Omit<PausedState, 'pausedAt'> | undefined;
 
-      if (pausedStateMetadata) {
-        this.pausedState = {
-          ...pausedStateMetadata,
-          pausedAt: Date.now(),
-        };
-        this.logger.debug('Recovered paused state from GraphD', {
-          sessionKey: this.sessionKey,
-          goal: this.pausedState.goal,
-          agentType: this.pausedState.agentType,
-        });
-      }
-
-      const pausedWorkItemsRaw = metadata?.paused_work_items;
-      const pausedWorkItems = Array.isArray(pausedWorkItemsRaw)
-        ? pausedWorkItemsRaw.map((entry) => normalizePausedWorkItem(entry)).filter((entry): entry is PausedWorkItemState => entry !== null)
-        : [];
-      if (pausedWorkItems.length > 0) {
-        this.pausedWorkItems.clear();
-        for (const item of pausedWorkItems) {
-          this.pausedWorkItems.set(item.workId, item);
-        }
-        this.logger.debug('Recovered paused work items from GraphD', {
-          sessionKey: this.sessionKey,
-          count: pausedWorkItems.length,
-        });
-      }
-
-      // Hydrate session state (model selections, permissions) from metadata
       if (metadata) {
         this.hydrateSessionState(metadata);
       }
     } catch (error) {
-      this.logger.warning('Failed to recover paused state from GraphD', {
+      this.logger.warning('Failed to recover session state from GraphD', {
         sessionKey: this.sessionKey,
         error: String(error),
       });
@@ -428,133 +381,17 @@ export class SessionStore {
     this.graphd.sessionTouch(this.sessionKey, workingDir);
   }
 
-  setPausedState(state: Omit<PausedState, 'pausedAt'>): void {
-    this.pausedState = { ...state, pausedAt: Date.now() };
-    // Persist paused state to GraphD session metadata for recovery
-    if (this.isGraphDReady() && this.graphd) {
-      try {
-        this.graphd.sessionUpdateMetadata(this.sessionKey, { paused_state: state });
-        this.logger.debug('Persisted paused state to GraphD', {
-          sessionKey: this.sessionKey,
-          goal: state.goal,
-          agentType: state.agentType,
-        });
-      } catch (error) {
-        this.logger.warning('Failed to persist paused state to GraphD', {
-          sessionKey: this.sessionKey,
-          error: String(error),
-        });
-      }
-    }
-  }
-
-  getPausedState(): PausedState | null {
-    return this.pausedState;
-  }
-
-  upsertPausedWorkItem(input: {
-    workId: string;
-    agentType: string;
-    objective?: string;
-    reason: string;
-    escalationId?: string;
-    status?: PausedWorkItemStatus;
-    timestamp?: number;
-  }): PausedWorkItemState {
-    const now = input.timestamp ?? Date.now();
-    const existing = this.pausedWorkItems.get(input.workId);
-    const next: PausedWorkItemState = {
-      workId: input.workId,
-      agentType: input.agentType,
-      ...(input.objective ? { objective: input.objective } : existing?.objective ? { objective: existing.objective } : {}),
-      reason: input.reason,
-      ...(input.escalationId ? { escalationId: input.escalationId } : existing?.escalationId ? { escalationId: existing.escalationId } : {}),
-      status: input.status ?? 'pending',
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-      ...(existing?.resolvedAt ? { resolvedAt: existing.resolvedAt } : {}),
-      ...(existing?.resolutionSummary ? { resolutionSummary: existing.resolutionSummary } : {}),
-    };
-    this.pausedWorkItems.set(input.workId, next);
-    this.persistPausedWorkItems();
-    return next;
-  }
-
-  listPausedWorkItems(): PausedWorkItemState[] {
-    return Array.from(this.pausedWorkItems.values()).sort((a, b) => b.updatedAt - a.updatedAt);
-  }
-
-  resolvePausedWorkItem(workId: string, resolutionSummary?: string, timestamp: number = Date.now()): PausedWorkItemState | null {
-    const existing = this.pausedWorkItems.get(workId);
-    if (!existing) return null;
-    if (existing.status === 'resolved' || existing.status === 'cancelled') return existing;
-
-    const next: PausedWorkItemState = {
-      ...existing,
-      status: 'resolved',
-      updatedAt: timestamp,
-      resolvedAt: timestamp,
-      ...(resolutionSummary ? { resolutionSummary } : {}),
-    };
-    this.pausedWorkItems.set(workId, next);
-    this.persistPausedWorkItems();
-    return next;
-  }
-
-  cancelPausedWorkItem(workId: string, resolutionSummary?: string, timestamp: number = Date.now()): PausedWorkItemState | null {
-    const existing = this.pausedWorkItems.get(workId);
-    if (!existing) return null;
-    if (existing.status === 'resolved' || existing.status === 'cancelled') return existing;
-
-    const next: PausedWorkItemState = {
-      ...existing,
-      status: 'cancelled',
-      updatedAt: timestamp,
-      resolvedAt: timestamp,
-      ...(resolutionSummary ? { resolutionSummary } : {}),
-    };
-    this.pausedWorkItems.set(workId, next);
-    this.persistPausedWorkItems();
-    return next;
-  }
-
-  private persistPausedWorkItems(): void {
-    if (!this.isGraphDReady() || !this.graphd) return;
-    try {
-      this.graphd.sessionUpdateMetadata(this.sessionKey, {
-        paused_work_items: Array.from(this.pausedWorkItems.values()),
-      });
-    } catch (error) {
-      this.logger.warning('Failed to persist paused work items to GraphD', {
-        sessionKey: this.sessionKey,
-        error: String(error),
-      });
-    }
-  }
-
-  clearPausedState(): void {
-    this.pausedState = null;
-    // Clear paused state from GraphD session metadata
-    if (this.isGraphDReady() && this.graphd) {
-      try {
-        this.graphd.sessionUpdateMetadata(this.sessionKey, { paused_state: null });
-        this.logger.debug('Cleared paused state from GraphD', { sessionKey: this.sessionKey });
-      } catch (error) {
-        this.logger.warning('Failed to clear paused state from GraphD', {
-          sessionKey: this.sessionKey,
-          error: String(error),
-        });
-      }
-    }
-  }
-
   close(): void {
     this.persistContext();
     this.context = null;
-    this.pausedState = null;
-    this.pausedWorkItems.clear();
     this.modelSelections.clear();
     this.asyncRun = null;
+    this.executionCompletionResolver?.();
+    this.executionCompletionResolver = null;
+    this.executionCompletion = null;
+    this.executionControlQueue = null;
+    this.executionRunControl = { state: 'running' };
+    this.executingRequestId = null;
   }
 
   /**
@@ -672,11 +509,16 @@ export class SessionStore {
    * Mark that an orchestrator is executing for this session.
    * Returns false if there's already an active execution (caller should queue message instead).
    */
-  startExecution(requestId: string): boolean {
+  startExecution(requestId: string, controlQueue: RuntimeControlQueue): boolean {
     if (this.executingRequestId !== null) {
       return false;
     }
     this.executingRequestId = requestId;
+    this.executionControlQueue = controlQueue;
+    this.executionRunControl = { state: 'running' };
+    this.executionCompletion = new Promise((resolve) => {
+      this.executionCompletionResolver = resolve;
+    });
     return true;
   }
 
@@ -694,11 +536,86 @@ export class SessionStore {
     return this.executingRequestId;
   }
 
+  getActiveExecutionHandle(): SessionExecutionHandle | null {
+    if (
+      this.executingRequestId === null ||
+      this.executionControlQueue === null ||
+      this.executionCompletion === null
+    ) {
+      return null;
+    }
+    return {
+      requestId: this.executingRequestId,
+      controlQueue: this.executionControlQueue,
+      runControl: {
+        state: this.executionRunControl.state,
+        cancellation: this.executionRunControl.cancellation
+          ? {
+              ...this.executionRunControl.cancellation,
+              targetWorkIds: this.executionRunControl.cancellation.targetWorkIds
+                ? [...this.executionRunControl.cancellation.targetWorkIds]
+                : undefined,
+            }
+          : undefined,
+      },
+      startedAt: this.asyncRun?.startedAt ?? Date.now(),
+      completion: this.executionCompletion,
+    };
+  }
+
+  updateExecutionRunControl(control: RunControlMetadata): void {
+    this.executionRunControl = {
+      state: control.state,
+      cancellation: control.cancellation
+        ? {
+            ...control.cancellation,
+            targetWorkIds: control.cancellation.targetWorkIds
+              ? [...control.cancellation.targetWorkIds]
+              : undefined,
+          }
+        : undefined,
+    };
+  }
+
+  getExecutionRunControl(): RunControlMetadata {
+    return {
+      state: this.executionRunControl.state,
+      cancellation: this.executionRunControl.cancellation
+        ? {
+            ...this.executionRunControl.cancellation,
+            targetWorkIds: this.executionRunControl.cancellation.targetWorkIds
+              ? [...this.executionRunControl.cancellation.targetWorkIds]
+              : undefined,
+          }
+        : undefined,
+    };
+  }
+
+  async waitForExecutionCompletion(requestId: string, timeoutMs = 30_000): Promise<boolean> {
+    if (this.executingRequestId !== requestId || !this.executionCompletion) {
+      return true;
+    }
+
+    const completion = this.executionCompletion;
+    const timedOut = await Promise.race([
+      completion.then(() => false),
+      new Promise<boolean>((resolve) => {
+        setTimeout(() => resolve(true), timeoutMs);
+      }),
+    ]);
+    return !timedOut;
+  }
+
   /**
    * Mark execution as complete and return any queued user messages.
    * Messages should be injected into context before next agent turn.
    */
   endExecution(): Array<{ requestId: string; message: string }> {
+    this.executionCompletionResolver?.();
+    this.executionCompletionResolver = null;
+    this.executionCompletion = null;
+    this.executionControlQueue = null;
+    this.executionRunControl = { state: 'running' };
     this.executingRequestId = null;
     const queued = this.queuedUserMessages;
     this.queuedUserMessages = [];
@@ -746,13 +663,5 @@ export class SessionStore {
    */
   hasPendingInterruption(): boolean {
     return this.queuedUserMessages.length > 0;
-  }
-
-  /**
-   * Check if any pending user message is a stop request.
-   * Used by agent to exit loop early on explicit user stop.
-   */
-  hasPendingStopRequest(): boolean {
-    return this.queuedUserMessages.some(({ message }) => /\bstop\b/i.test(message));
   }
 }

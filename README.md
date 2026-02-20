@@ -173,6 +173,36 @@ bun run clean                  # Clean all build artifacts
 bun run lint                   # Typecheck all packages
 ```
 
+## AgentLab Experiment (Curated A/B)
+
+`/jesus` includes a Dockerized SWE-bench Lite curated A/B experiment between:
+
+- `glm-5` (`z.ai-coder`)
+- `gpt-5.3-codex-spark` (`codex`)
+
+Source files:
+
+- Experiment builder: `scripts/agentlab/build_swebench_curated_ab_experiment.mjs`
+- Run script: `scripts/agentlab/run_swebench_curated_ab.sh`
+- Agent image build script: `scripts/agentlab/build_agent_image.sh`
+- Agent-loop entrypoint adapter: `scripts/agentlab/run_agent_loop_trial.mjs`
+- Agent runtime Dockerfile: `Dockerfile.rex-harness`
+- Curated dataset: `.lab/experiments/data/swebench_lite_curated.task_boundary_v1.jsonl`
+
+Run a smoke pass (2 trials total: 1 task x 2 variants):
+
+```bash
+cd /Users/jevinnishioka/Desktop/jesus
+bash scripts/agentlab/run_swebench_curated_ab.sh --limit 1
+```
+
+Run against all curated tasks:
+
+```bash
+cd /Users/jevinnishioka/Desktop/jesus
+bash scripts/agentlab/run_swebench_curated_ab.sh --limit 50
+```
+
 ## Key Design Principles
 
 - **Agents are pure functions**: receive `ContextWindow` by value, mutate locally

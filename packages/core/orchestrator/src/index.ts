@@ -22,23 +22,6 @@ export {
   type BoundsCheckResult,
 } from './bounds-checker.js';
 
-export type { StopHookHandler, StopHookContext } from 'agent';
-
-// New protocol hook registry/runner (orchestrator-owned)
-export {
-  createHookRegistry,
-  type HookRegistry,
-  type HookBundle,
-  type HookRegistrationMeta,
-  type RegisteredHook,
-} from './hookRegistry/index.js';
-
-export {
-  runHooksForEvent,
-  type HookExecutionResult,
-  type HookAuditEntry,
-} from './hookRunner/index.js';
-
 // Unified hook model (decision + effect under one registry)
 export {
   createUnifiedHookRegistry,

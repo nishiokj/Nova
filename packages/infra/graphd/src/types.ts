@@ -309,7 +309,7 @@ export interface GraphDSession {
   /** Truncated preview of the last user message (for session lists) */
   lastUserMessagePreview?: string | null;
 
-  // Workflow-like fields (enriched for Cockpit)
+  // Workflow fields (session enrichment)
   /** Original user goal/objective */
   goal?: string | null;
   /** Currently executing work item ID */

@@ -64,6 +64,16 @@ export type {
   AgentReasoningData,
   MemoryInjectionTrainingSignal,
   MemoryInjectedData,
+  RunControlAction,
+  RunControlScope,
+  RunControlSource,
+  RunControlTarget,
+  RunControlRequestedData,
+  RunControlAppliedData,
+  RunControlRejectedData,
+  RunControlRequestedEventData,
+  RunControlAppliedEventData,
+  RunControlRejectedEventData,
   EventCallback,
   PermissionRequestEventData,
   GitCommitData,
@@ -90,6 +100,18 @@ export {
   LLMErrorDataSchema,
   MemoryInjectedDataSchema,
   MemoryInjectionTrainingSignalSchema,
+  RunControlStateSchema,
+  RunControlActionSchema,
+  RunControlScopeSchema,
+  RunControlSourceSchema,
+  RunCancellationMetadataSchema,
+  RunControlTargetSchema,
+  RunControlRequestedDataSchema,
+  RunControlAppliedDataSchema,
+  RunControlRejectedDataSchema,
+  RunControlRequestedEventSchema,
+  RunControlAppliedEventSchema,
+  RunControlRejectedEventSchema,
   parseEvent,
   isValidEvent,
 } from './event_schemas.js';
@@ -110,6 +132,8 @@ export type {
   GlobArgs,
   ToolArgs,
   ToolExecutor,
+  ToolExecutionContext,
+  ToolExecutionError,
 } from './tools.js';
 
 export {
@@ -143,6 +167,12 @@ export type {
   ConversationContext,
   StructuredOutputSchema,
   FallbackConfig,
+  RunControlState,
+  RunCancellationMetadata,
+  RunControlMetadata,
+  RunExecutionMetadata,
+  LLMExecutionContext,
+  LLMExecutionError,
 } from './llm.js';
 
 export {
@@ -296,28 +326,6 @@ export {
   rfc3339Timestamp,
   generateTraceId,
 } from './agent_trace.js';
-
-// ============================================
-// ESCALATION (Cockpit control plane)
-// ============================================
-export type {
-  EscalationType,
-  EscalationStatus,
-  EscalationOption,
-  EscalationReference,
-  EscalationResolution,
-  Escalation,
-  EscalationCreateInput,
-  EscalationResolveInput,
-} from './escalation.js';
-
-export {
-  isEscalationPending,
-  isEscalationTerminal,
-  isEscalationBlocking,
-  ALL_ESCALATION_TYPES,
-  ALL_ESCALATION_STATUSES,
-} from './escalation.js';
 
 // ============================================
 // WORKITEM TEMPLATES

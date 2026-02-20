@@ -11,11 +11,16 @@ const COMPLETION_RULES = `
 ## Output Schema Rules (CRITICAL)
 
 **Always set \`action\`, \`goalStateReached\`, and \`awaitingUserInput\` every turn.**
-- \`action\`: "done" | "continue"
-- \`goalStateReached: true\` only when you are finished
-- \`awaitingUserInput: true\` only when you called \`PromptUser\` this turn
+- \`action\` is loop control: "done" | "continue"
+- \`goalStateReached\` is outcome: \`true\` only when the objective is complete
+- \`awaitingUserInput\` is blocking state: \`true\` only when you called \`PromptUser\` this turn
 
 **Use \`PromptUser\` for questions.** Do not ask in plain text.
+
+Valid combinations (and only these):
+- \`action: "continue"\` + \`goalStateReached: false\` + \`awaitingUserInput: false\`
+- \`action: "done"\` + \`goalStateReached: true\` + \`awaitingUserInput: false\` (objective complete)
+- \`action: "done"\` + \`goalStateReached: false\` + \`awaitingUserInput: true\` (waiting on user)
 `;
 
 /**
@@ -355,7 +360,7 @@ Return exactly ONE \`observerAction\`:
 | \`split\` | Decompose into smaller units | \`workItems[]\` with goal, objective, agent, dependencies, targetPaths, bounds |
 | \`create_work_item\` | Add one or more new work items | \`workItems[]\` with goal, objective, agent, dependencies, targetPaths, bounds |
 | \`quality_gate\` | Evaluate goal_state_reached | \`qualityGate.passed\`, \`qualityGate.issues[]\` if failed |
-| \`stop_work_item\` | Stop only the current work item | \`reason\`, optional \`escalationId\` |
+| \`stop_work_item\` | Stop only the current work item | \`reason\` |
 | \`allow\` | No intervention needed | \`reason\` |
 | \`continue\` | Equivalent to \`allow\` | \`reason\` |
 

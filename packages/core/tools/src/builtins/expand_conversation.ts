@@ -5,8 +5,10 @@
  */
 
 import type { ToolResult } from 'types';
+import { Effect } from 'effect';
 import { successResult, errorResult } from 'types';
-import type { ToolExecutionContext, ToolRegistrationOptions } from '../types.js';
+import type { ToolExecutionContext, ToolExecutionError, ToolRegistrationOptions } from '../types.js';
+import { toToolExecutionError } from '../types.js';
 
 export interface ExpandConversationArgs {
   conversation_id: string;
@@ -163,6 +165,19 @@ export async function executeExpandConversation(
   }
 }
 
+export function executeExpandConversationEffect(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext
+): Effect.Effect<ToolResult, ToolExecutionError> {
+  return Effect.tryPromise({
+    try: () => executeExpandConversation(args, context),
+    catch: (error) =>
+      toToolExecutionError(error, 'execution_error', {
+        toolName: 'ExpandConversation',
+      }),
+  });
+}
+
 /**
  * ExpandConversation tool registration options.
  */
@@ -200,7 +215,7 @@ export const expandConversationToolOptions: ToolRegistrationOptions = {
     required: ['conversation_id'],
   },
   required: ['conversation_id'],
-  executor: executeExpandConversation,
+  executor: executeExpandConversationEffect,
   readOnly: true,
   parallelizable: true,
   costHint: 'low',

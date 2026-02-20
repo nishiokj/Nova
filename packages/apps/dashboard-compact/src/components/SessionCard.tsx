@@ -100,9 +100,9 @@ function computeTurnsByRequest(requests: AgentRequest[]): RequestGroup[] {
   return groups;
 }
 
-const MAX_VISIBLE_TURNS = 12;
-const MAX_VISIBLE_LOGS = 8;
-const MAX_VISIBLE_FILES = 12;
+const MAX_VISIBLE_TURNS = 6;
+const MAX_VISIBLE_LOGS = 5;
+const MAX_VISIBLE_FILES = 8;
 
 export function SessionCard({ session, onExpand }: SessionCardProps) {
   const [activeTab, setActiveTab] = useState<TabType>('turns');
@@ -112,9 +112,9 @@ export function SessionCard({ session, onExpand }: SessionCardProps) {
   // Get goal from first request's plan, or first user input
   const firstRequest = session.requests[0];
   const description =
-    firstRequest?.plan?.goal?.slice(0, 60) ||
-    (session.meta.description as string)?.slice(0, 60) ||
-    firstRequest?.userInput?.slice(0, 60) ||
+    firstRequest?.plan?.goal?.slice(0, 48) ||
+    (session.meta.description as string)?.slice(0, 48) ||
+    firstRequest?.userInput?.slice(0, 48) ||
     'Active session';
 
   // Compute turns grouped by request

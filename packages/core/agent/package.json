@@ -19,6 +19,7 @@
   "dependencies": {
     "types": "workspace:*",
     "shared": "workspace:*",
+    "effect": "^3.19.18",
     "llm": "workspace:*",
     "tools": "workspace:*",
     "context": "workspace:*",

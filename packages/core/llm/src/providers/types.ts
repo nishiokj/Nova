@@ -11,7 +11,9 @@ import type {
   LLMRequestConfig,
   RespondParams,
   StreamParams,
+  LLMExecutionError,
 } from 'types';
+import { Effect, Stream } from 'effect';
 
 /**
  * Error thrown when a streaming request fails mid-stream.
@@ -94,12 +96,18 @@ export interface LLMProviderAdapter {
   /**
    * Send a non-streaming request.
    */
-  respond(context: ProviderContext, params: RespondParams): Promise<LLMResponse>;
+  respond(
+    context: ProviderContext,
+    params: RespondParams
+  ): Effect.Effect<LLMResponse, LLMExecutionError>;
 
   /**
    * Send a streaming request.
    */
-  stream(context: ProviderContext, params: StreamParams): AsyncGenerator<string, LLMResponse>;
+  stream(
+    context: ProviderContext,
+    params: StreamParams
+  ): Stream.Stream<string, LLMExecutionError>;
 
   /**
    * Format tools for this provider's API.
@@ -112,3 +120,47 @@ export interface LLMProviderAdapter {
   formatMessages?(messages: Message[]): Array<Record<string, unknown>>;
 }
 
+function inferExecutionErrorType(
+  error: unknown
+): LLMExecutionError['type'] {
+  if (error instanceof PartialStreamError) return 'provider_error';
+  if (error instanceof Error) {
+    if (error.name === 'AbortError') return 'cancelled';
+    if (error.name === 'TimeoutError') return 'timeout';
+    const message = error.message.toLowerCase();
+    if (message.includes('cancel')) return 'cancelled';
+    if (message.includes('timeout')) return 'timeout';
+  }
+  return 'unknown';
+}
+
+export function toLLMExecutionError(
+  error: unknown,
+  provider: string,
+  model: string
+): LLMExecutionError {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'type' in error &&
+    'message' in error
+  ) {
+    return error as LLMExecutionError;
+  }
+  if (error instanceof Error) {
+    const decorated = error as Error & Partial<LLMExecutionError>;
+    if (!decorated.type) {
+      decorated.type = inferExecutionErrorType(error);
+    }
+    if (!decorated.metadata) {
+      decorated.metadata = { provider, model };
+    }
+    return decorated as unknown as LLMExecutionError;
+  }
+  return {
+    type: 'unknown',
+    message: String(error),
+    cause: error,
+    metadata: { provider, model },
+  };
+}

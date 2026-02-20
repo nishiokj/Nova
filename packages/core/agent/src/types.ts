@@ -1,5 +1,13 @@
 import type { WorkItem } from 'work';
-import type { AgentEvent, StructuredOutputSchema, ToolResult, ArtifactItem, LLMRequestConfig } from 'types';
+import type {
+  AgentEvent,
+  StructuredOutputSchema,
+  ToolResult,
+  ArtifactItem,
+  LLMRequestConfig,
+  RunControlMetadata,
+  RunExecutionMetadata,
+} from 'types';
 import type { ContextWindow } from 'context';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
@@ -100,8 +108,24 @@ export interface AgentRunParams {
   workItem: WorkItem;
   /** Working directory for tool execution. Required for concurrent-safe operation. */
   cwd: string;
-  /** Optional abort signal to cancel agent execution. */
+  /** Optional run-scoped execution metadata and control state. */
+  runControl?: {
+    execution: RunExecutionMetadata;
+    control: RunControlMetadata;
+  };
+  /** Optional abort signal for legacy callers; runtime should prefer runControl metadata. */
   signal?: AbortSignal;
+}
+
+/**
+ * Runtime control directive consumed inside the agent loop.
+ * Used to propagate cancel/continue decisions across iteration and tool phases.
+ */
+export interface AgentControlDirective {
+  action: 'continue' | 'stop';
+  reason?: string;
+  source?: 'signal' | 'run_control';
+  terminationReason?: Extract<TerminationReason, 'user_stopped'>;
 }
 
 /**
@@ -150,7 +174,6 @@ export interface AgentResultBase {
   /** Optional observer stop metadata when cadence intervention terminates a work item/session. */
   observerStop?: {
     reason: string;
-    escalationId?: string;
   };
 }
 
@@ -218,17 +241,10 @@ export interface UserPromptQuestion {
 
 /**
  * User prompt information for interactive requests.
- * Supports single question (backwards compatible) or multiple questions.
  */
 export interface UserPromptInfo {
-  /** Single question (backwards compatible) */
-  question: string;
-  options?: Array<string | { label: string; description?: string }>;
-  context?: string;
-  multiSelect?: boolean;
-  questionType?: string;
-  /** Multiple questions to ask in sequence */
-  questions?: UserPromptQuestion[];
+  /** Questions to ask in sequence (single-question prompts use one entry). */
+  questions: UserPromptQuestion[];
 }
 
 /**
@@ -280,7 +296,6 @@ export interface AgentCadenceResult {
   action: 'continue' | 'inject' | 'stop';
   systemMessage?: string;
   terminationReason?: Extract<TerminationReason, 'observer_stopped' | 'observer_work_item_stopped'>;
-  escalationId?: string;
   reason?: string;
 }
 
@@ -449,38 +464,11 @@ export type InternalHookEvent =
       branch?: string;
     }
   | {
-      /** Fired when an escalation is raised (needs human attention) */
-      type: 'escalation_raised';
-      escalation: {
-        id: string;
-        escalationType: string;
-        sessionKey: string;
-        workItemId?: string;
-        title: string;
-        context: string;
-        tradeoffs?: string[];
-        options?: Array<{
-          id: string;
-          label: string;
-          description: string;
-          implications: string[];
-          recommended: boolean;
-        }>;
-        references: Array<{
-          type: string;
-          label: string;
-          target: string;
-          preview?: string;
-        }>;
-      };
-    }
-  | {
       /** Fired when observer stops a specific work item during cadence checks. */
       type: 'observer_agent_stopped';
       sessionKey: string;
       workId: string;
       reason: string;
-      escalationId?: string;
       agentType: string;
     }
 ;

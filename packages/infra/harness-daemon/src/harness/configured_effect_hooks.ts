@@ -33,13 +33,17 @@ export class ConfiguredEffectHooksRunner {
     }
   }
 
-  async execute(definition: HookDefinition, context: HookContext): Promise<HookResult> {
+  async execute(
+    definition: HookDefinition,
+    context: HookContext,
+    signal?: AbortSignal
+  ): Promise<HookResult> {
     for (const action of definition.hooks) {
       let result: HookResult;
       if (action.type === 'command') {
-        result = await this.runCommandHook(action, definition, context);
+        result = await this.runCommandHook(action, definition, context, signal);
       } else if (action.type === 'script') {
-        result = await this.runScriptHook(action, definition, context);
+        result = await this.runScriptHook(action, definition, context, signal);
       } else {
         continue;
       }
@@ -54,14 +58,15 @@ export class ConfiguredEffectHooksRunner {
   private async runCommandHook(
     action: CommandHookAction,
     hook: HookDefinition,
-    context: HookContext
+    context: HookContext,
+    signal?: AbortSignal
   ): Promise<HookResult> {
     const timeout = hook.timeout_ms ?? 30000;
     const failOpen = hook.fail_open ?? true;
     const env = this.buildEnv(action.env ?? {}, context);
 
     try {
-      const result = await this.execCommand(action.command, env, timeout, this.workingDir);
+      const result = await this.execCommand(action.command, env, timeout, this.workingDir, signal);
       return this.parseHookResult(result.exitCode, result.stdout, result.stderr, failOpen, 'Hook');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -74,7 +79,8 @@ export class ConfiguredEffectHooksRunner {
   private async runScriptHook(
     action: ScriptHookAction,
     hook: HookDefinition,
-    context: HookContext
+    context: HookContext,
+    signal?: AbortSignal
   ): Promise<HookResult> {
     const timeout = hook.timeout_ms ?? 30000;
     const failOpen = hook.fail_open ?? true;
@@ -97,7 +103,7 @@ export class ConfiguredEffectHooksRunner {
     const args = (action.args ?? []).map((arg) => arg.replace(/\$(\w+)/g, (_, name) => env[name] ?? ''));
 
     try {
-      const result = await this.execScript(interpreter, scriptPath, args, env, timeout, this.workingDir);
+      const result = await this.execScript(interpreter, scriptPath, args, env, timeout, this.workingDir, signal);
       return this.parseHookResult(result.exitCode, result.stdout, result.stderr, failOpen, 'Script');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -177,7 +183,8 @@ export class ConfiguredEffectHooksRunner {
     args: string[],
     env: Record<string, string>,
     timeout: number,
-    cwd: string
+    cwd: string,
+    signal?: AbortSignal
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     return new Promise((resolve) => {
       const proc = spawn(interpreter, [scriptPath, ...args], {
@@ -189,17 +196,35 @@ export class ConfiguredEffectHooksRunner {
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let aborted = false;
 
       const timer = setTimeout(() => {
         timedOut = true;
         proc.kill('SIGTERM');
       }, timeout);
 
+      const onAbort = () => {
+        aborted = true;
+        proc.kill('SIGTERM');
+      };
+      if (signal) {
+        if (signal.aborted) {
+          onAbort();
+        } else {
+          signal.addEventListener('abort', onAbort, { once: true });
+        }
+      }
+
       proc.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
       proc.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
 
       proc.on('close', (code) => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        if (aborted) {
+          resolve({ exitCode: 130, stdout, stderr: stderr || 'Hook cancelled' });
+          return;
+        }
         if (timedOut) {
           resolve({ exitCode: 124, stdout, stderr: stderr || 'Hook timed out' });
           return;
@@ -213,7 +238,8 @@ export class ConfiguredEffectHooksRunner {
     command: string,
     env: Record<string, string>,
     timeout: number,
-    cwd: string
+    cwd: string,
+    signal?: AbortSignal
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     return new Promise((resolve) => {
       const proc = spawn('sh', ['-c', command], {
@@ -225,17 +251,35 @@ export class ConfiguredEffectHooksRunner {
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let aborted = false;
 
       const timer = setTimeout(() => {
         timedOut = true;
         proc.kill('SIGTERM');
       }, timeout);
 
+      const onAbort = () => {
+        aborted = true;
+        proc.kill('SIGTERM');
+      };
+      if (signal) {
+        if (signal.aborted) {
+          onAbort();
+        } else {
+          signal.addEventListener('abort', onAbort, { once: true });
+        }
+      }
+
       proc.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
       proc.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
 
       proc.on('close', (code) => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        if (aborted) {
+          resolve({ exitCode: 130, stdout, stderr: stderr || 'Hook cancelled' });
+          return;
+        }
         if (timedOut) {
           resolve({ exitCode: 124, stdout, stderr: stderr || 'Hook timed out' });
           return;

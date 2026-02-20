@@ -17,7 +17,7 @@ export interface AgentRunParams {
   sessionKey: string;
   workingDir: string;
   context?: string;
-  hookRegistry?: import('orchestrator').HookRegistry;
+  hookRegistry?: import('orchestrator').UnifiedHookRegistry;
 }
 
 /**
@@ -29,7 +29,6 @@ export interface AgentRunResult {
   success: boolean;
   finalText: string;
   errorMessage?: string;
-  paused: boolean;
   userPrompt?: UserPromptInfo;
   toolsUsed: string[];
   durationMs: number;
@@ -46,18 +45,11 @@ export interface UserPromptQuestion {
 }
 
 /**
- * User prompt info when agent pauses for input.
+ * User prompt info when agent requires input.
  */
 export interface UserPromptInfo {
   requestId: string;
-  /** Single question (backwards compatible) */
-  question?: string;
-  options?: Array<string | { label: string; description?: string }>;
-  context?: string;
-  multiSelect?: boolean;
-  questionType?: string;
-  /** Multiple questions to ask in sequence */
-  questions?: UserPromptQuestion[];
+  questions: UserPromptQuestion[];
 }
 
 /**
@@ -85,6 +77,14 @@ export interface BridgeEvent {
   data?: Record<string, unknown>;
 }
 
+export type SessionControlAction = 'cancel';
+
+export interface SessionControlResult {
+  success: boolean;
+  requestId?: string;
+  error?: string;
+}
+
 /**
  * Handle returned from agent.run() for streaming events.
  */
@@ -92,6 +92,7 @@ export interface AgentRunHandle {
   result: Promise<AgentRunResult>;
   events: AsyncIterable<BridgeEvent>;
   abort?: () => void;
+  cancel?: (reason?: string) => Promise<SessionControlResult>;
 }
 
 /**
@@ -187,14 +188,7 @@ export interface UserPromptEventQuestion {
  */
 export interface UserPromptEventData {
   request_id: string;
-  /** Single question (backwards compatible) */
-  question?: string;
-  options?: Array<string | { label: string; description?: string }>;
-  context?: string;
-  multi_select?: boolean;
-  question_type?: string;
-  /** Multiple questions to ask in sequence */
-  questions?: UserPromptEventQuestion[];
+  questions: UserPromptEventQuestion[];
 }
 
 /**

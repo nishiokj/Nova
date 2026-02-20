@@ -19,18 +19,20 @@ import {
   createAgenticRunRepository,
   type AgenticRunRepository,
 } from '../db/repositories/agentic-run.js'
-import { executeAgenticRun } from './runner.js'
+import { executeAgenticRun, type HarnessConnectionConfig } from './runner.js'
 
 export interface AgenticIntegrationConfig {
   /** Maximum job runtime in ms (default: 600000 = 10 min) */
   maxJobRuntime?: number
   /** Base directory for agentic task data (default: 'data/agentic-tasks') */
   dataDir?: string
+  /** Harness daemon connection config for dispatching agent sessions */
+  harnessConfig?: HarnessConnectionConfig
 }
 
 export class AgenticTaskIntegration {
   private sql: Sql
-  private config: Required<AgenticIntegrationConfig>
+  private config: Required<Pick<AgenticIntegrationConfig, 'maxJobRuntime' | 'dataDir'>> & Pick<AgenticIntegrationConfig, 'harnessConfig'>
   private taskRepo: AgenticTaskRepository
   private runRepo: AgenticRunRepository
 
@@ -39,6 +41,7 @@ export class AgenticTaskIntegration {
     this.config = {
       maxJobRuntime: config.maxJobRuntime ?? 600000,
       dataDir: config.dataDir ?? 'data/agentic-tasks',
+      harnessConfig: config.harnessConfig,
     }
     const ctx = { sql }
     this.taskRepo = createAgenticTaskRepository(ctx)
@@ -103,7 +106,7 @@ export class AgenticTaskIntegration {
     try {
       await this.runRepo.start(run.id)
 
-      const result = await executeAgenticRun({ task, run, outputDir, logger })
+      const result = await executeAgenticRun({ task, run, outputDir, logger, harnessConfig: this.config.harnessConfig })
 
       if (result.budgetExceeded) {
         await this.runRepo.markBudgetExceeded(run.id, result.mutations)
