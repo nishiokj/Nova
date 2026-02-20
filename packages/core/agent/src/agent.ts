@@ -6,7 +6,7 @@
  */
 
 import path from 'node:path';
-import { Effect, Fiber, Stream } from 'effect';
+import { Effect, Stream } from 'effect';
 import type { LLMAdapter, Message, LLMRequestConfig, LLMResponse } from 'llm';
 import {
   resilientCall,
@@ -273,6 +273,17 @@ export class Agent {
       requestId: this.requestId,
       objective: workItem.objective,
     };
+  }
+
+  private fromAsync<R>(operation: () => Promise<R>): Effect.Effect<R, unknown> {
+    return Effect.tryPromise({
+      try: operation,
+      catch: (error) => error,
+    });
+  }
+
+  private runEffect<R, E>(effect: Effect.Effect<R, E>): Promise<R> {
+    return Effect.runPromise(effect);
   }
 
   /**
@@ -1113,7 +1124,7 @@ export class Agent {
 
       // Auto-read target files
       if (workItem.targetPaths && workItem.targetPaths.length > 0) {
-        yield* Effect.promise(() =>
+        yield* this.fromAsync(() =>
           this.autoReadTargetFiles(
             workItem.targetPaths,
             localContext,
@@ -1144,7 +1155,7 @@ export class Agent {
         // Cadence check: observer intervention point (every N LLM calls)
         const cadenceCheck = this.hooks?.cadenceCheck;
         if (cadenceCheck && iteration > 0 && iteration % CADENCE_CHECK_INTERVAL === 0) {
-          const cadenceResult = yield* Effect.promise(() =>
+          const cadenceResult = yield* this.fromAsync(() =>
             cadenceCheck({
               llmCallsMade: metrics.llmCallsMade,
               toolCallsMade: metrics.toolCallsMade,
@@ -1174,10 +1185,10 @@ export class Agent {
           break;
         }
 
-      yield* Effect.promise(() => this.compactIfNeeded(localContext, localReadFiles, workItem));
+      yield* this.fromAsync(() => this.compactIfNeeded(localContext, localReadFiles, workItem));
 
       // 2. Build LLM request (async for memory injection)
-      const { messages, tools: toolsForThisCall, toolChoice: toolChoiceForThisCall } = yield* Effect.promise(() =>
+      const { messages, tools: toolsForThisCall, toolChoice: toolChoiceForThisCall } = yield* this.fromAsync(() =>
         this.buildIterationRequest(
           workItem,
           globalContext,
@@ -1324,7 +1335,7 @@ export class Agent {
         const toolCallsSucceededBefore = metrics.toolCallsSucceeded;
         const toolCallsFailedBefore = metrics.toolCallsFailed;
 
-        yield* Effect.promise(() =>
+        yield* this.fromAsync(() =>
           this.processToolCalls(
             toolCalls,
             globalContext,
@@ -2006,7 +2017,7 @@ export class Agent {
     }
     const pendingParallel: Array<{
       call: { id: string; name: string; arguments: Record<string, unknown> };
-      run: () => Effect.Effect<{ toolResult: ToolResult; toolDurationMs: number }>;
+      run: () => Promise<{ toolResult: ToolResult; toolDurationMs: number }>;
     }> = [];
 
     const invalidatePath = (pathValue: unknown): void => {
@@ -2172,18 +2183,7 @@ export class Agent {
     const flushParallel = async (): Promise<boolean> => {
       if (pendingParallel.length === 0) return false;
       const batch = pendingParallel.splice(0, pendingParallel.length);
-      const results = await Effect.runPromise(
-        Effect.scoped(
-          Effect.gen(function* () {
-            const fibers = yield* Effect.forEach(
-              batch,
-              (item) => Effect.forkScoped(item.run()),
-              { concurrency: 'unbounded' }
-            );
-            return yield* Effect.forEach(fibers, (fiber) => Fiber.join(fiber));
-          })
-        )
-      );
+      const results = await Promise.all(batch.map((item) => item.run()));
       for (let i = 0; i < batch.length; i++) {
         const { call } = batch[i];
         const { toolResult, toolDurationMs } = results[i];
@@ -2289,14 +2289,12 @@ export class Agent {
         const capturedCanonicalName = canonicalName;
         const capturedCall = call;
         const run = () =>
-          Effect.promise(() =>
-            executeToolCall({
-              call: capturedCall,
-              canonicalName: capturedCanonicalName,
-              effectiveArgs: capturedArgs,
-              isAgentTool: false,
-            })
-          );
+          executeToolCall({
+            call: capturedCall,
+            canonicalName: capturedCanonicalName,
+            effectiveArgs: capturedArgs,
+            isAgentTool: false,
+          });
 
         pendingParallel.push({ call, run });
         continue;
@@ -2555,7 +2553,7 @@ export class Agent {
       }
     );
 
-    const subResult = await Effect.runPromise(
+    const subResult = await this.runEffect(
       agent.run({
         globalContext: mergedContextForSubAgent,
         workItem: subWorkItem,

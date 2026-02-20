@@ -333,6 +333,14 @@ interface CadenceAuditor {
   maybeAudit(resultsByWorkId: Map<string, AgentResult>): Promise<void>;
 }
 
+type SyntheticResultTerminationReason = Extract<TerminationReason, 'goal_state_reached' | 'agent_error' | 'user_stopped'>;
+
+const BOUNDS_TERMINATION_REASONS = new Set<TerminationReason>([
+  'max_iterations_exceeded',
+  'max_tool_calls_exceeded',
+  'max_duration_exceeded',
+]);
+
 // --- Orchestrator ---
 
 /**
@@ -392,6 +400,17 @@ export class Orchestrator {
     this.hooks = hooks;
     this.getModelSelection = getModelSelection;
     this.hookQueue = this.createHookQueue();
+  }
+
+  private fromAsync<R>(operation: () => Promise<R>): Effect.Effect<R, unknown> {
+    return Effect.tryPromise({
+      try: operation,
+      catch: (error) => error,
+    });
+  }
+
+  private runEffect<R, E>(effect: Effect.Effect<R, E>): Promise<R> {
+    return Effect.runPromise(effect);
   }
 
   /**
@@ -499,8 +518,8 @@ export class Orchestrator {
     let success = false;
     let error: string | undefined;
     try {
-      await Effect.runPromise(
-        Effect.promise(() => params.handler(params.signal)).pipe(
+      await this.runEffect(
+        this.fromAsync(() => params.handler(params.signal)).pipe(
           Effect.timeoutFail({
             duration: timeoutMs,
             onTimeout: () => new Error('hook_timeout'),
@@ -524,7 +543,11 @@ export class Orchestrator {
         error,
         durationMs: Date.now() - start,
       }, params.workItemId, this.requestId));
-      console.error(`[HOOK:${params.hookType}] Handler error:`, err);
+      this.log('error', 'Internal hook handler failed', {
+        hookType: params.hookType,
+        workItemId: params.workItemId,
+        error,
+      });
     } finally {
       params.contextWindow.addFunctionCallOutput(
         callId,
@@ -653,6 +676,11 @@ export class Orchestrator {
     this.workQueue = [];
     this.completedWork.clear();
     this.workItemContexts.clear();
+    this.initialWorkId = '';
+    this.realignCount = 0;
+    this.hookMetadata = new Map();
+    this.hookAuditLog = [];
+    this.hookTerminationReason = null;
     this.activeSessionKey = context.sessionKey;
     this.activeInProgress = null;
     this.runtimeRunControl = { state: 'running' };
@@ -774,14 +802,11 @@ export class Orchestrator {
         const auditResult = resultsByWorkId.get(auditWorkId)
           ?? (auditWorkId === state.lastAgentWorkId ? state.lastAgentResult : undefined);
 
-        const recentActivityEntries = activeWorkIds.length > 0
-          ? activeWorkIds
-          : (state.lastAgentWorkId ? [state.lastAgentWorkId] : []);
         const workIdsForAudit = activeWorkIds.length > 0
           ? activeWorkIds
           : (state.lastAgentWorkId ? [state.lastAgentWorkId] : []);
-        const recentActivity = recentActivityEntries.length > 0
-          ? recentActivityEntries.map((workId) => {
+        const recentActivity = workIdsForAudit.length > 0
+          ? workIdsForAudit.map((workId) => {
               const result = resultsByWorkId.get(workId)
                 ?? (workId === state.lastAgentWorkId ? state.lastAgentResult : undefined);
               const preview = result?.response?.slice(0, 200) ?? '';
@@ -952,7 +977,7 @@ export class Orchestrator {
 
   private async syncRuntimeControlState(runtime?: OrchestratorRuntime): Promise<void> {
     if (runtime?.controlQueue) {
-      const messages = await Effect.runPromise(takeAllRuntimeControl(runtime.controlQueue));
+      const messages = await this.runEffect(takeAllRuntimeControl(runtime.controlQueue));
       for (const message of messages) {
         this.applyRuntimeControlMessage(message);
       }
@@ -992,19 +1017,35 @@ export class Orchestrator {
     };
   }
 
-  private createInternalHookResult(context: ContextWindow): AgentResult {
+  private createSyntheticAgentResult(params: {
+    context: ContextWindow;
+    terminationReason: SyntheticResultTerminationReason;
+    success: boolean;
+    response?: string;
+    error?: string;
+  }): AgentResult {
+    const { context, terminationReason, success, response = '', error } = params;
     return {
-      success: true,
-      response: '',
+      success,
+      response,
+      error,
       metrics: { llmCallsMade: 0, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
       filesRead: [],
       invalidatedPaths: [],
       toolErrors: [],
-      terminationReason: 'goal_state_reached',
+      terminationReason,
       needsUserInput: false,
       isRefusal: false,
       localContext: context,
     };
+  }
+
+  private createInternalHookResult(context: ContextWindow): AgentResult {
+    return this.createSyntheticAgentResult({
+      context,
+      terminationReason: 'goal_state_reached',
+      success: true,
+    });
   }
 
   private async executeSingleWorkItem(params: {
@@ -1049,8 +1090,8 @@ export class Orchestrator {
         cwd,
         signal: abortController?.signal,
         runControl: this.buildAgentRunControl(workId, iteration),
-      }) as Effect.Effect<AgentResult, never>;
-      const result = await Effect.runPromise(runEffect);
+      });
+      const result = await this.runEffect(runEffect);
       profiler.asyncEnd(`agent:${item.agent}`, agentAsyncId, 'agent', {
         llmCalls: result.metrics.llmCallsMade,
         toolCalls: result.metrics.toolCallsMade,
@@ -1366,19 +1407,12 @@ export class Orchestrator {
           if (checkResult.shouldContinue) {
             if (checkResult.newItem) {
               workQueue.enqueue(checkResult.newItem);
-              state.initialWorkCompleted = false;
-              state.initialWorkResponse = '';
-              state.initialWorkId = this.resetWorkTracking(checkResult.newItem);
-              state.startTime = Date.now();
+              this.resetInitialWorkState(state, this.resetWorkTracking(checkResult.newItem));
             } else if (this.initialWorkId !== state.initialWorkId) {
               // Some continuation paths (e.g. user_input hook answers) enqueue via
               // handleStopHookBlock and update orchestrator-level tracking directly.
               // Keep execution-state tracking aligned with that canonical initial work id.
-              state.initialWorkCompleted = false;
-              state.initialWorkResponse = '';
-              state.initialWorkResult = undefined;
-              state.initialWorkId = this.initialWorkId;
-              state.startTime = Date.now();
+              this.resetInitialWorkState(state, this.initialWorkId);
             }
             if (checkResult.itemToRequeue) {
               workQueue.enqueue(checkResult.itemToRequeue);
@@ -1429,11 +1463,7 @@ export class Orchestrator {
                 workItemHookBlocked = true;
 
                 if (workId === state.initialWorkId) {
-                  state.initialWorkCompleted = false;
-                  state.initialWorkResponse = '';
-                  state.initialWorkResult = undefined;
-                  state.initialWorkId = this.resetWorkTracking(retryItem);
-                  state.startTime = Date.now();
+                  this.resetInitialWorkState(state, this.resetWorkTracking(retryItem));
                 }
               }
             }
@@ -1458,10 +1488,7 @@ export class Orchestrator {
           this.log('info', 'Pending interruption detected, continuing execution', { iteration });
           const newItem = this.createWorkItem('Continue with user input', agentType);
           workQueue.enqueue(newItem);
-          state.initialWorkCompleted = false;
-          state.initialWorkResponse = '';
-          state.initialWorkId = this.resetWorkTracking(newItem);
-          state.startTime = Date.now();
+          this.resetInitialWorkState(state, this.resetWorkTracking(newItem));
           continue;
         }
 
@@ -1488,9 +1515,7 @@ export class Orchestrator {
                 iteration,
                 queuedItems: workQueue.size(),
               });
-              state.initialWorkCompleted = false;
-              state.initialWorkResponse = '';
-              state.initialWorkResult = undefined;
+              this.resetInitialWorkState(state);
               continue;
             }
 
@@ -1514,10 +1539,7 @@ export class Orchestrator {
               const newItem = this.createWorkItem(reason, agentType);
               workQueue.enqueue(newItem);
 
-              state.initialWorkCompleted = false;
-              state.initialWorkResponse = '';
-              state.initialWorkResult = undefined;
-              state.initialWorkId = this.resetWorkTracking(newItem);
+              this.resetInitialWorkState(state, this.resetWorkTracking(newItem));
 
               continue;
             }
@@ -1940,35 +1962,21 @@ export class Orchestrator {
    * Create a synthetic error result when agent fails to execute.
    */
   private createErrorResult(error: string, context: ContextWindow): AgentResult {
-    return {
-      success: false,
-      response: '',
-      error,
-      metrics: { llmCallsMade: 0, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
-      filesRead: [],
-      invalidatedPaths: [],
-      toolErrors: [],
+    return this.createSyntheticAgentResult({
+      context,
       terminationReason: 'agent_error',
-      needsUserInput: false,
-      isRefusal: false,
-      localContext: context,
-    };
+      success: false,
+      error,
+    });
   }
 
   private createCancelledWorkItemResult(reason: string, context: ContextWindow): AgentResult {
-    return {
-      success: false,
-      response: '',
-      error: reason,
-      metrics: { llmCallsMade: 0, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
-      filesRead: [],
-      invalidatedPaths: [],
-      toolErrors: [],
+    return this.createSyntheticAgentResult({
+      context,
       terminationReason: 'user_stopped',
-      needsUserInput: false,
-      isRefusal: false,
-      localContext: context,
-    };
+      success: false,
+      error: reason,
+    });
   }
 
   private cancelInProgressWork(workId: string, reason: string): boolean {
@@ -1993,6 +2001,17 @@ export class Orchestrator {
     this.completedWork.delete(this.initialWorkId);
     this.initialWorkId = newItem.workId;
     return this.initialWorkId;
+  }
+
+  private resetInitialWorkState(state: ExecutionState, newInitialWorkId?: string): void {
+    state.initialWorkCompleted = false;
+    state.initialWorkResponse = '';
+    state.initialWorkResult = undefined;
+
+    if (newInitialWorkId) {
+      state.initialWorkId = newInitialWorkId;
+      state.startTime = Date.now();
+    }
   }
 
   /**
@@ -2107,7 +2126,7 @@ export class Orchestrator {
         audit: [],
       };
     }
-    const result = await Effect.runPromise(runUnifiedDecisionHooks(event, ctx, registry));
+    const result = await this.runEffect(runUnifiedDecisionHooks(event, ctx, registry));
     if (result.patches.length > 0) {
       this.applyHookPatches(context, result.patches, `hooks:${event.type}`);
     }
@@ -2403,8 +2422,7 @@ export class Orchestrator {
     // === HARD SAFETY CAP (checked first, before any processing) ===
     // Every bounds_exceeded hook call counts toward the cap, regardless of decision type.
     // This prevents alternating realign/split from bypassing maxRealigns.
-    const boundsReasons = ['max_iterations_exceeded', 'max_tool_calls_exceeded', 'max_duration_exceeded'];
-    const isBoundsExceeded = boundsReasons.includes(terminationReason ?? '');
+    const isBoundsExceeded = terminationReason ? BOUNDS_TERMINATION_REASONS.has(terminationReason) : false;
 
     if (isBoundsExceeded) {
       this.realignCount++;
@@ -2464,8 +2482,7 @@ export class Orchestrator {
       // Continue with a generic goal - the answer is now in context
       const newItem = this.createWorkItem('Continue with the provided answer', agentType);
       this.enqueue(newItem);
-      this.completedWork.delete(this.initialWorkId);
-      this.initialWorkId = newItem.workId;
+      this.resetWorkTracking(newItem);
       return true;
     }
 
@@ -2477,8 +2494,7 @@ export class Orchestrator {
 
     const newItem = this.createWorkItem(reason, agentType);
     this.enqueue(newItem);
-    this.completedWork.delete(this.initialWorkId);
-    this.initialWorkId = newItem.workId;
+    this.resetWorkTracking(newItem);
 
     return true;
   }

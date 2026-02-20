@@ -8,10 +8,16 @@ const DEFAULTS = {
   dataset: '.lab/experiments/data/swebench_lite_curated.task_boundary_v1.jsonl',
   output: '.lab/experiments/swebench_lite_curated_glm5_vs_codex_spark.yaml',
   image: 'rex-harness:swebench-lite',
-  timeoutMs: 900000,
   replications: 1,
   seed: 42,
   maxConcurrency: 1,
+};
+
+const LONG_DEFAULT_TIMEOUT_MS = 1_800_000;
+const BENCHMARK_TIMEOUT_MS = {
+  'swebench-lite': 1_800_000,
+  swebench_lite: 1_800_000,
+  swebench_lite_curated: 1_800_000,
 };
 
 function parseArgs(argv) {
@@ -78,6 +84,46 @@ function countJsonl(path) {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0).length;
+}
+
+function detectBenchmarkKeyFromDataset(path) {
+  const raw = readFileSync(path, 'utf8');
+  const first = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (!first) return null;
+  try {
+    const parsed = JSON.parse(first);
+    if (parsed && typeof parsed === 'object' && typeof parsed.source === 'string') {
+      return parsed.source;
+    }
+  } catch {
+    // ignore parse errors and fall back to path-based detection
+  }
+  return null;
+}
+
+function detectBenchmarkKey(datasetPath, detectedSource) {
+  if (typeof detectedSource === 'string' && detectedSource.trim().length > 0) {
+    return detectedSource.trim();
+  }
+  const lower = datasetPath.toLowerCase();
+  if (lower.includes('swebench')) {
+    return 'swebench-lite';
+  }
+  return 'unknown';
+}
+
+function resolveTimeoutMs(explicitTimeoutRaw, benchmarkKey) {
+  if (explicitTimeoutRaw !== undefined && explicitTimeoutRaw !== null) {
+    return toPositiveInt(explicitTimeoutRaw, '--timeout-ms');
+  }
+  const benchmarkDefault = BENCHMARK_TIMEOUT_MS[benchmarkKey];
+  if (typeof benchmarkDefault === 'number' && benchmarkDefault > 0) {
+    return benchmarkDefault;
+  }
+  return LONG_DEFAULT_TIMEOUT_MS;
 }
 
 function buildCredentialStagingEntries(homeDir) {
@@ -149,7 +195,9 @@ function main() {
   const datasetCount = countJsonl(datasetAbs);
   const limit = args.limit ? toPositiveInt(args.limit, '--limit') : datasetCount;
   const safeLimit = Math.min(limit, datasetCount);
-  const timeoutMs = toPositiveInt(args.timeoutMs, '--timeout-ms');
+  const detectedSource = detectBenchmarkKeyFromDataset(datasetAbs);
+  const benchmarkKey = detectBenchmarkKey(datasetAbs, detectedSource);
+  const timeoutMs = resolveTimeoutMs(args.timeoutMs, benchmarkKey);
   const replications = toPositiveInt(args.replications, '--replications');
   const seed = toPositiveInt(args.seed, '--seed');
   const maxConcurrency = toPositiveInt(args.maxConcurrency, '--max-concurrency');
@@ -294,6 +342,8 @@ function main() {
   console.log(`wrote experiment config: ${outputAbs}`);
   console.log(`dataset rows=${datasetCount}, limit=${safeLimit}`);
   console.log(`image=${args.image}`);
+  console.log(`benchmark=${benchmarkKey}`);
+  console.log(`timeout_ms=${timeoutMs}`);
   console.log(`credential staging entries=${stagingEntries.length}`);
 }
 

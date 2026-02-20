@@ -23,6 +23,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$ROOT_DIR"
+echo "prebuilding llm dist (codex/provider runtime)"
+bun run --cwd packages/core/llm build
 echo "building ${IMAGE_TAG} from ${DOCKERFILE}"
 docker build -f "$DOCKERFILE" -t "$IMAGE_TAG" .
 echo "built ${IMAGE_TAG}"

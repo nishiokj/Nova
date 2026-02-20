@@ -50,7 +50,7 @@ type RunResult = {
   error?: string;
 };
 
-const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 9555;
 
@@ -60,10 +60,10 @@ function asNonEmptyString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function parsePositiveInt(raw: string | undefined, fallback: number): number {
-  if (!raw || raw.trim().length === 0) return fallback;
+function parsePositiveInt(raw: string | undefined): number | null {
+  if (!raw || raw.trim().length === 0) return null;
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
   return parsed;
 }
 
@@ -211,7 +211,10 @@ export async function runHarnessAgentLoopCli(): Promise<void> {
   const taskPath = resolve(requiredEnv('AGENTLAB_TASK_PATH'));
   const bindingsPath = resolve(requiredEnv('AGENTLAB_BINDINGS_PATH'));
   const resultPath = resolve(requiredEnv('AGENTLAB_RESULT_PATH'));
-  const timeoutMs = parsePositiveInt(process.env.AGENTLAB_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+  const timeoutMs =
+    parsePositiveInt(process.env.AGENTLAB_TIMEOUT_MS) ??
+    parsePositiveInt(process.env.AGENTLAB_TRIAL_TIMEOUT_MS) ??
+    DEFAULT_TIMEOUT_MS;
   const eventsPath = process.env.AGENTLAB_TRAJECTORY_PATH
     ? resolve(process.env.AGENTLAB_TRAJECTORY_PATH)
     : undefined;
