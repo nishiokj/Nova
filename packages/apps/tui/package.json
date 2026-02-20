@@ -16,7 +16,7 @@
     "comms-bus": "workspace:*",
     "entity-graph": "workspace:*",
     "harness-client": "workspace:*",
-    "ink": "^4.4.1",
+    "ink": "^6.7.0",
     "marked": "^17.0.1",
     "marked-terminal": "^7.3.0",
     "react": "^18.3.1",
