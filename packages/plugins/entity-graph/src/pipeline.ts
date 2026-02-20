@@ -9,25 +9,10 @@
 import { readFile } from 'fs/promises'
 import fg from 'fast-glob'
 import path from 'path'
-import Parser from 'tree-sitter'
 import type { Sql } from 'postgres'
 import type { ParseResult, EntityGraphConfig, EdgeType, Edge } from './types.js'
-import { languageForFile, createParser } from './parser/parser.js'
+import { languageForFile, createParser, getLanguage, initParser } from './parser/parser.js'
 import { extract } from './parser/extractor.js'
-
-// Language objects for query construction
-import TypeScript from 'tree-sitter-typescript'
-import JavaScript from 'tree-sitter-javascript'
-import type { SupportedLanguage } from './parser/parser.js'
-
-const { typescript: TSLanguage, tsx: TSXLanguage } = TypeScript
-
-const LANGUAGE_OBJECTS: Record<SupportedLanguage, Parser.Language> = {
-  typescript: TSLanguage as unknown as Parser.Language,
-  tsx: TSXLanguage as unknown as Parser.Language,
-  javascript: JavaScript as unknown as Parser.Language,
-  jsx: JavaScript as unknown as Parser.Language,
-}
 
 // --- Edge table mapping ---
 
@@ -55,6 +40,9 @@ const EDGE_COLUMNS: Record<EdgeType, { source: string; target: string; extra?: s
  * Returns null if the file is not a supported language.
  */
 export async function parseFile(filepath: string, sourceRoot: string): Promise<ParseResult | null> {
+  // Ensure web-tree-sitter is initialized
+  await initParser()
+
   const lang = languageForFile(filepath)
   if (!lang) return null
 
@@ -70,7 +58,8 @@ export async function parseFile(filepath: string, sourceRoot: string): Promise<P
 
   const parser = createParser(lang)
   const tree = parser.parse(source)
-  const tsLanguage = LANGUAGE_OBJECTS[lang]
+  if (!tree) return null
+  const tsLanguage = getLanguage(lang)
 
   return extract(tree, relPath, lang, tsLanguage, sourceRoot)
 }
@@ -219,6 +208,9 @@ export async function buildFullGraph(
   config: EntityGraphConfig
 ): Promise<{ files: number; entities: number; edges: number; durationMs: number }> {
   const start = Date.now()
+
+  // Initialize web-tree-sitter before parsing
+  await initParser()
 
   const includePatterns = config.include ?? ['**/*.{ts,tsx,js,jsx}']
   const ignorePatterns = config.exclude ?? ['**/node_modules/**', '**/dist/**', '**/.git/**']

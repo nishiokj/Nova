@@ -174,5 +174,5 @@ export {
 export { acquireLease, releaseLease, cleanExpiredLeases } from './leasing.js'
 export { createEntityGraphHooks } from './hooks.js'
 export { entityId } from './parser/extractor.js'
-export { languageForFile, createParser, parseSource } from './parser/parser.js'
+export { initParser, isParserInitialized, languageForFile, createParser, parseSource } from './parser/parser.js'
 export type { SupportedLanguage } from './parser/parser.js'

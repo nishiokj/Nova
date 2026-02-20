@@ -7,10 +7,16 @@
  * Uses the TUI theme system for consistent, themeable syntax highlighting.
  */
 
-import Parser from 'tree-sitter'
-import { languageForFile, createParser, type SupportedLanguage } from 'entity-graph'
+import type { Node, Tree } from 'web-tree-sitter'
+import { initParser, isParserInitialized, languageForFile, createParser, type SupportedLanguage } from 'entity-graph'
 import { Chalk } from 'chalk'
 import { getColors, type ThemeColors, getCurrentThemeName } from '../theme.js'
+
+// Eagerly kick off parser init (non-blocking).
+// highlightCode will await this before first use.
+const parserReady = initParser().catch(() => {
+  // tree-sitter WASM init failed — syntax highlighting will be disabled
+})
 
 // Create a chalk instance with forced color support (consistent with markdown.ts)
 const chalk = new Chalk({ level: 3 })
@@ -46,7 +52,7 @@ let cachedThemeName: string | null = null
  */
 function getThemeColorFunctions() {
   const currentTheme = getCurrentThemeName()
-  
+
   if (cachedColorFunctions && cachedThemeName === currentTheme) {
     return cachedColorFunctions
   }
@@ -54,7 +60,7 @@ function getThemeColorFunctions() {
   const colors = getColors()
   cachedColorFunctions = createThemeColorFunctions(colors)
   cachedThemeName = currentTheme
-  
+
   return cachedColorFunctions
 }
 
@@ -234,6 +240,7 @@ function detectLanguage(lang: string | undefined): SupportedLanguage | null {
  * Check if a language is supported for syntax highlighting.
  */
 export function isLanguageSupported(lang: string | undefined): boolean {
+  if (!isParserInitialized()) return false
   return detectLanguage(lang) !== null
 }
 
@@ -258,6 +265,11 @@ export function highlightCode(code: string | null, lang: string | undefined): st
 
   // Skip highlighting for empty code
   if (code.trim() === '') {
+    return code
+  }
+
+  // Parser not ready yet — return plain text
+  if (!isParserInitialized()) {
     return code
   }
 
@@ -291,18 +303,18 @@ export function highlightCode(code: string | null, lang: string | undefined): st
  *
  * Collects all highlightable nodes and applies colors to build the output.
  */
-function highlightTree(tree: Parser.Tree, source: string): string {
+function highlightTree(tree: Tree, source: string): string {
   const root = tree.rootNode
 
   // Check for parse errors (still try to highlight what we can)
-  // Note: hasError is a property in entity-graph's tree-sitter binding, not a method
+  // Note: hasError is a property in tree-sitter binding
   const hasError = root.hasError
 
   // Collect all highlightable nodes with their ranges
   const highlights: Array<{ start: number; end: number; color: (text: string) => string }> = []
 
   // Walk the tree and collect nodes that have color mappings
-  const walk = (node: Parser.SyntaxNode) => {
+  const walk = (node: Node) => {
     const color = getColorForNode(node.type)
     if (color && node.text.length > 0) {
       highlights.push({
@@ -315,7 +327,7 @@ function highlightTree(tree: Parser.Tree, source: string): string {
     // Recursively walk ALL children (named and unnamed)
     // Keywords like 'function', 'return' are unnamed children
     for (let i = 0; i < node.childCount; i++) {
-      walk(node.child(i))
+      walk(node.child(i)!)
     }
   }
 
