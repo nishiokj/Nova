@@ -194,6 +194,85 @@ function pruneSpec(spec) {
   return out;
 }
 
+function sanitizeStringArray(input) {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((value) => typeof value === 'string')
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
+function stripLegacyInputOutputTokens(command) {
+  const stripped = [];
+  for (let index = 0; index < command.length; index += 1) {
+    const token = command[index];
+    const next = command[index + 1];
+    const isLegacyInputPair = token === '--input-file' && next === '${AGENTLAB_TASK_PATH}';
+    const isLegacyOutputPair = token === '--output' && next === '${AGENTLAB_RESULT_PATH}';
+    if (isLegacyInputPair || isLegacyOutputPair) {
+      index += 1;
+      continue;
+    }
+    stripped.push(token);
+  }
+  return stripped;
+}
+
+function migrateRuntimeAgentToHardCut(spec) {
+  const out = spec;
+  const runtime = out?.runtime;
+  const legacyAgent = runtime?.agent;
+  if (!runtime || !legacyAgent || typeof legacyAgent !== 'object' || Array.isArray(legacyAgent)) {
+    return out;
+  }
+
+  const legacyCustomImage =
+    legacyAgent.custom_image && typeof legacyAgent.custom_image === 'object' && !Array.isArray(legacyAgent.custom_image)
+      ? legacyAgent.custom_image
+      : null;
+  const legacyEntry = sanitizeStringArray(legacyCustomImage?.entrypoint);
+  const migratedCommand = stripLegacyInputOutputTokens(legacyEntry);
+  const command = migratedCommand.length > 0 ? migratedCommand : legacyEntry;
+  if (command.length === 0) {
+    return out;
+  }
+
+  const image =
+    asNonEmptyString(legacyCustomImage?.image) ??
+    asNonEmptyString(runtime?.policy?.sandbox?.image);
+  const overrides =
+    legacyAgent.overrides && typeof legacyAgent.overrides === 'object' && !Array.isArray(legacyAgent.overrides)
+      ? legacyAgent.overrides
+      : null;
+  const env =
+    overrides?.env && typeof overrides.env === 'object' && !Array.isArray(overrides.env)
+      ? Object.fromEntries(
+        Object.entries(overrides.env).filter(([, value]) => typeof value === 'string' && value.trim().length > 0),
+      )
+      : {};
+  const envFromHost = sanitizeStringArray(overrides?.env_from_host);
+
+  const migratedAgent = {
+    command,
+    io: {
+      input_arg: '--input-file',
+      output_arg: '--output',
+    },
+  };
+  if (image) {
+    migratedAgent.image = image;
+  }
+  if (Object.keys(env).length > 0) {
+    migratedAgent.env = env;
+  }
+  if (envFromHost.length > 0) {
+    migratedAgent.env_from_host = envFromHost;
+  }
+
+  runtime.agent = migratedAgent;
+  return out;
+}
+
 async function main() {
   const { values } = parseArgs({
     options: {
@@ -329,7 +408,7 @@ async function main() {
 
   const built = builder.build();
   built.experiment.workload_type = 'agent_loop';
-  const spec = pruneSpec(built);
+  const spec = pruneSpec(migrateRuntimeAgentToHardCut(built));
   writeFileSync(outputAbs, `${yamlStringify(spec)}\n`, 'utf8');
 
   console.log(`wrote experiment: ${outputAbs}`);

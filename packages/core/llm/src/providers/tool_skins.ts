@@ -198,12 +198,15 @@ export function translateCodexArgsToRex(
 
     case 'read_file': {
       const result: Record<string, unknown> = {
-        path: args.file_path,
+        path: args.file_path ?? args.path,
       };
-      if (args.offset !== undefined) {
-        result.startLine = args.offset;
-        if (args.limit !== undefined) {
-          result.endLine = (args.offset as number) + (args.limit as number) - 1;
+      const offset = args.offset ?? args.startLine;
+      if (offset !== undefined) {
+        result.startLine = offset;
+        const limit = args.limit ?? args.endLine;
+        if (limit !== undefined) {
+          // If model sent endLine (Rex-style), use directly; otherwise compute from offset+limit
+          result.endLine = args.endLine ?? ((offset as number) + (limit as number) - 1);
         }
       }
       return result;
@@ -213,19 +216,19 @@ export function translateCodexArgsToRex(
       const result: Record<string, unknown> = {
         pattern: args.pattern,
       };
-      if (args.include !== undefined) result.glob = args.include;
+      if ((args.include ?? args.glob) !== undefined) result.glob = args.include ?? args.glob;
       if (args.path !== undefined) result.path = args.path;
-      if (args.limit !== undefined) result.maxResults = args.limit;
+      if ((args.limit ?? args.maxResults) !== undefined) result.maxResults = args.limit ?? args.maxResults;
       return result;
     }
 
     case 'list_dir': {
-      const dirPath = (args.dir_path as string) ?? '.';
+      const dirPath = (args.dir_path ?? args.pattern) as string | undefined ?? '.';
       const result: Record<string, unknown> = {
         pattern: dirPath.endsWith('/') ? `${dirPath}**/*` : `${dirPath}/**/*`,
       };
-      if (args.limit !== undefined) result.maxResults = args.limit;
-      if (args.depth !== undefined) result.maxDepth = args.depth;
+      if ((args.limit ?? args.maxResults) !== undefined) result.maxResults = args.limit ?? args.maxResults;
+      if ((args.depth ?? args.maxDepth) !== undefined) result.maxDepth = args.depth ?? args.maxDepth;
       return result;
     }
 

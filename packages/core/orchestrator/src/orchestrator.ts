@@ -486,35 +486,11 @@ export class Orchestrator {
   }): Effect.Effect<void, never> {
     const timeoutMs = this.config.hookTimeoutMs;
     const start = Date.now();
-    const callId = `hook-${params.hookType}-${params.workItemId}`;
-    const hookArgs = {
-      hookType: params.hookType,
-      event: params.event,
-      context: params.hookContext,
-    };
-    params.contextWindow.addFunctionCall(callId, `hook:${params.hookType}`, hookArgs);
 
     this.emit(createEvent('hook_call', {
       hookType: params.hookType,
       phase: 'starting',
     }, params.workItemId, this.requestId));
-
-    const addOutput = (success: boolean, error: string | undefined) => {
-      params.contextWindow.addFunctionCallOutput(
-        callId,
-        JSON.stringify(
-          {
-            hookType: params.hookType,
-            success,
-            durationMs: Date.now() - start,
-            error: error ?? null,
-          },
-          null,
-          2
-        ),
-        !success
-      );
-    };
 
     const handlerResult = params.handler(params.signal);
     return Effect.tryPromise({
@@ -533,7 +509,6 @@ export class Orchestrator {
           success: true,
           durationMs: Date.now() - start,
         }, params.workItemId, this.requestId));
-        addOutput(true, undefined);
       })),
       Effect.catchAll((err) => Effect.sync(() => {
         const error = err instanceof Error ? err.message : String(err);
@@ -549,7 +524,6 @@ export class Orchestrator {
           workItemId: params.workItemId,
           error,
         });
-        addOutput(false, error);
       })),
     );
   }

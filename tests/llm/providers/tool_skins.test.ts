@@ -3,10 +3,13 @@
  *
  * Focus areas:
  * - formatToolForOpenAI: correct Codex definitions, filtering, freeform vs JSON
- * - translateCodexArgsToRex: argument translation for each 1:1 mapping
+ * - translateCodexArgsToRex: argument translation (Codex → Rex)
+ * - translateRexArgsToCodex: argument translation (Rex → Codex)
+ * - Argument round-trip consistency
+ * - vocabForProvider / REX_VOCAB / CODEX_VOCAB
  * - OpenAI provider parseToolCalls: Codex → Rex name + arg translation
  * - OpenAI provider normalizeInput: Rex → Codex name translation
- * - Round-trip consistency
+ * - Full round-trip consistency through provider
  */
 
 import type { ToolDefinition } from 'types';
@@ -14,9 +17,14 @@ import {
   CODEX_TO_REX,
   REX_TO_CODEX,
   FILTERED_REX_TOOLS,
+  CODEX_TOOL_DEFS,
   formatToolForOpenAI,
   translateCodexArgsToRex,
+  translateRexArgsToCodex,
   supportsCustomTools,
+  vocabForProvider,
+  REX_VOCAB,
+  CODEX_VOCAB,
 } from 'llm/providers/tool_skins.js';
 import { OpenAIProvider } from 'llm/providers/openai.js';
 
@@ -40,6 +48,13 @@ describe('name maps', () => {
     expect(FILTERED_REX_TOOLS.has('BatchEdit')).toBe(true);
     expect(FILTERED_REX_TOOLS.has('Read')).toBe(false);
     expect(FILTERED_REX_TOOLS.has('Bash')).toBe(false);
+  });
+
+  it('every skinned tool has a matching CODEX_TOOL_DEFS entry', () => {
+    for (const codexName of Object.values(REX_TO_CODEX)) {
+      expect(CODEX_TOOL_DEFS).toHaveProperty(codexName);
+      expect(CODEX_TOOL_DEFS[codexName].name).toBe(codexName);
+    }
   });
 });
 
@@ -152,6 +167,83 @@ describe('formatToolForOpenAI', () => {
     expect(params.properties).toHaveProperty('input');
   });
 
+  it('should filter out Write', () => {
+    const writeDef: ToolDefinition = {
+      name: 'Write',
+      description: 'Write a file',
+      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    };
+    expect(formatToolForOpenAI(writeDef, 'gpt-4.1')).toBeNull();
+  });
+
+  it('should filter out BatchEdit', () => {
+    const batchEditDef: ToolDefinition = {
+      name: 'BatchEdit',
+      description: 'Batch edit files',
+      parameters: { type: 'object', properties: { edits: { type: 'string' } }, required: ['edits'] },
+    };
+    expect(formatToolForOpenAI(batchEditDef, 'gpt-4.1')).toBeNull();
+  });
+
+  it('should translate Grep to grep_files', () => {
+    const grepDef: ToolDefinition = {
+      name: 'Grep',
+      description: 'Search files',
+      parameters: {
+        type: 'object',
+        properties: { pattern: { type: 'string' }, glob: { type: 'string' } },
+        required: ['pattern'],
+      },
+    };
+    const result = formatToolForOpenAI(grepDef, 'gpt-4.1');
+    expect(result).not.toBeNull();
+    expect(result!.name).toBe('grep_files');
+    expect(result!.type).toBe('function');
+    const params = result!.parameters as Record<string, unknown>;
+    expect(params.properties).toHaveProperty('pattern');
+    expect(params.properties).toHaveProperty('include');
+  });
+
+  it('should translate Glob to list_dir', () => {
+    const globDef: ToolDefinition = {
+      name: 'Glob',
+      description: 'List files',
+      parameters: {
+        type: 'object',
+        properties: { pattern: { type: 'string' } },
+        required: ['pattern'],
+      },
+    };
+    const result = formatToolForOpenAI(globDef, 'gpt-4.1');
+    expect(result).not.toBeNull();
+    expect(result!.name).toBe('list_dir');
+    expect(result!.type).toBe('function');
+    const params = result!.parameters as Record<string, unknown>;
+    expect(params.properties).toHaveProperty('dir_path');
+  });
+
+  it('should forward strict from pass-through tools', () => {
+    const strictDef: ToolDefinition = {
+      name: 'CustomTool',
+      description: 'A custom tool',
+      parameters: { type: 'object', properties: { x: { type: 'string' } }, required: ['x'] },
+      strict: true,
+    };
+    const result = formatToolForOpenAI(strictDef, 'gpt-4.1');
+    expect(result).not.toBeNull();
+    expect(result!.strict).toBe(true);
+  });
+
+  it('should default strict to false for pass-through tools without it', () => {
+    const result = formatToolForOpenAI(webFetchDef, 'gpt-4.1');
+    expect(result!.strict).toBe(false);
+  });
+
+  it('should set strict: false on skinned tools', () => {
+    const result = formatToolForOpenAI(bashDef, 'gpt-4.1');
+    expect(result!.strict).toBe(false);
+  });
+
   it('should pass through unskinned tools as-is', () => {
     const result = formatToolForOpenAI(webFetchDef, 'gpt-4.1');
     expect(result).not.toBeNull();
@@ -174,6 +266,22 @@ describe('supportsCustomTools', () => {
     expect(supportsCustomTools('o3')).toBe(true);
     expect(supportsCustomTools('o3-mini')).toBe(true);
     expect(supportsCustomTools('o4-mini')).toBe(true);
+  });
+
+  it('should return true for GPT-4o models', () => {
+    expect(supportsCustomTools('gpt-4o')).toBe(true);
+    expect(supportsCustomTools('gpt-4o-mini')).toBe(true);
+  });
+
+  it('should return true for codex models', () => {
+    expect(supportsCustomTools('codex-mini')).toBe(true);
+    expect(supportsCustomTools('gpt-5.3-codex')).toBe(true);
+  });
+
+  it('should be case-insensitive', () => {
+    expect(supportsCustomTools('GPT-4.1')).toBe(true);
+    expect(supportsCustomTools('O3-mini')).toBe(true);
+    expect(supportsCustomTools('CODEX-mini')).toBe(true);
   });
 
   it('should return false for older models', () => {
@@ -199,6 +307,20 @@ describe('translateCodexArgsToRex', () => {
         timeout_ms: 5000,
       });
       expect(result.timeout).toBe(5);
+    });
+
+    it('should omit timeout when timeout_ms is not provided', () => {
+      const result = translateCodexArgsToRex('shell_command', { command: 'echo hi' });
+      expect(result.timeout).toBeUndefined();
+    });
+
+    it('should drop workdir (handled by execution context)', () => {
+      const result = translateCodexArgsToRex('shell_command', {
+        command: 'ls',
+        workdir: '/home/user',
+      });
+      expect(result).toEqual({ command: 'ls' });
+      expect(result.workdir).toBeUndefined();
     });
   });
 
@@ -226,6 +348,43 @@ describe('translateCodexArgsToRex', () => {
       expect(result.startLine).toBe(10);
       expect(result.endLine).toBeUndefined();
     });
+
+    it('should accept path as alias for file_path', () => {
+      const result = translateCodexArgsToRex('read_file', { path: '/x.ts' });
+      expect(result.path).toBe('/x.ts');
+    });
+
+    it('should prefer file_path over path', () => {
+      const result = translateCodexArgsToRex('read_file', { file_path: '/a.ts', path: '/b.ts' });
+      expect(result.path).toBe('/a.ts');
+    });
+
+    it('should pass through endLine directly when model sends it', () => {
+      const result = translateCodexArgsToRex('read_file', {
+        file_path: '/x.ts',
+        offset: 5,
+        endLine: 42,
+      });
+      expect(result.startLine).toBe(5);
+      expect(result.endLine).toBe(42);
+    });
+
+    it('should accept startLine as alias for offset', () => {
+      const result = translateCodexArgsToRex('read_file', {
+        file_path: '/x.ts',
+        startLine: 7,
+        limit: 10,
+      });
+      expect(result.startLine).toBe(7);
+      expect(result.endLine).toBe(16); // 7 + 10 - 1
+    });
+
+    it('should return only path when no range args given', () => {
+      const result = translateCodexArgsToRex('read_file', { file_path: '/x.ts' });
+      expect(result.path).toBe('/x.ts');
+      expect(result.startLine).toBeUndefined();
+      expect(result.endLine).toBeUndefined();
+    });
   });
 
   describe('grep_files → Grep', () => {
@@ -240,6 +399,24 @@ describe('translateCodexArgsToRex', () => {
       expect(result.glob).toBe('*.ts');
       expect(result.path).toBe('/src');
       expect(result.maxResults).toBe(50);
+    });
+
+    it('should accept glob as alias for include', () => {
+      const result = translateCodexArgsToRex('grep_files', { pattern: 'foo', glob: '*.js' });
+      expect(result.glob).toBe('*.js');
+    });
+
+    it('should accept maxResults as alias for limit', () => {
+      const result = translateCodexArgsToRex('grep_files', { pattern: 'bar', maxResults: 25 });
+      expect(result.maxResults).toBe(25);
+    });
+
+    it('should handle pattern-only (minimal call)', () => {
+      const result = translateCodexArgsToRex('grep_files', { pattern: 'hello' });
+      expect(result.pattern).toBe('hello');
+      expect(result.glob).toBeUndefined();
+      expect(result.path).toBeUndefined();
+      expect(result.maxResults).toBeUndefined();
     });
   });
 
@@ -263,6 +440,26 @@ describe('translateCodexArgsToRex', () => {
       expect(result.maxResults).toBe(100);
       expect(result.maxDepth).toBe(3);
     });
+
+    it('should accept pattern as alias for dir_path', () => {
+      const result = translateCodexArgsToRex('list_dir', { pattern: 'lib' });
+      expect(result.pattern).toBe('lib/**/*');
+    });
+
+    it('should default to current dir when neither dir_path nor pattern given', () => {
+      const result = translateCodexArgsToRex('list_dir', {});
+      expect(result.pattern).toBe('./**/*');
+    });
+
+    it('should accept maxResults as alias for limit', () => {
+      const result = translateCodexArgsToRex('list_dir', { dir_path: '.', maxResults: 50 });
+      expect(result.maxResults).toBe(50);
+    });
+
+    it('should accept maxDepth as alias for depth', () => {
+      const result = translateCodexArgsToRex('list_dir', { dir_path: '.', maxDepth: 2 });
+      expect(result.maxDepth).toBe(2);
+    });
   });
 
   describe('unknown tool', () => {
@@ -271,6 +468,213 @@ describe('translateCodexArgsToRex', () => {
       const result = translateCodexArgsToRex('unknown_tool', args);
       expect(result).toEqual(args);
     });
+  });
+});
+
+// ============================================
+// REVERSE ARGUMENT TRANSLATION (Rex → Codex)
+// ============================================
+
+describe('translateRexArgsToCodex', () => {
+  describe('Bash → shell_command', () => {
+    it('should translate command', () => {
+      const result = translateRexArgsToCodex('Bash', { command: 'ls -la' });
+      expect(result.command).toBe('ls -la');
+    });
+
+    it('should translate timeout (seconds) to timeout_ms', () => {
+      const result = translateRexArgsToCodex('Bash', { command: 'sleep 1', timeout: 5 });
+      expect(result.timeout_ms).toBe(5000);
+    });
+
+    it('should omit timeout_ms when timeout is not provided', () => {
+      const result = translateRexArgsToCodex('Bash', { command: 'echo hi' });
+      expect(result.timeout_ms).toBeUndefined();
+    });
+  });
+
+  describe('Read → read_file', () => {
+    it('should translate path to file_path', () => {
+      const result = translateRexArgsToCodex('Read', { path: '/src/main.ts' });
+      expect(result.file_path).toBe('/src/main.ts');
+    });
+
+    it('should translate startLine/endLine to offset/limit', () => {
+      const result = translateRexArgsToCodex('Read', {
+        path: '/src/main.ts',
+        startLine: 10,
+        endLine: 29,
+      });
+      expect(result.offset).toBe(10);
+      expect(result.limit).toBe(20); // 29 - 10 + 1
+    });
+
+    it('should handle startLine without endLine', () => {
+      const result = translateRexArgsToCodex('Read', { path: '/x.ts', startLine: 5 });
+      expect(result.offset).toBe(5);
+      expect(result.limit).toBeUndefined();
+    });
+
+    it('should return only file_path when no range given', () => {
+      const result = translateRexArgsToCodex('Read', { path: '/x.ts' });
+      expect(result.file_path).toBe('/x.ts');
+      expect(result.offset).toBeUndefined();
+      expect(result.limit).toBeUndefined();
+    });
+  });
+
+  describe('Grep → grep_files', () => {
+    it('should translate glob to include', () => {
+      const result = translateRexArgsToCodex('Grep', {
+        pattern: 'TODO',
+        glob: '*.ts',
+        path: '/src',
+        maxResults: 50,
+      });
+      expect(result.pattern).toBe('TODO');
+      expect(result.include).toBe('*.ts');
+      expect(result.path).toBe('/src');
+      expect(result.limit).toBe(50);
+    });
+
+    it('should handle pattern-only (minimal call)', () => {
+      const result = translateRexArgsToCodex('Grep', { pattern: 'hello' });
+      expect(result.pattern).toBe('hello');
+      expect(result.include).toBeUndefined();
+      expect(result.path).toBeUndefined();
+      expect(result.limit).toBeUndefined();
+    });
+  });
+
+  describe('Glob → list_dir', () => {
+    it('should translate pattern to dir_path', () => {
+      const result = translateRexArgsToCodex('Glob', { pattern: 'src/**/*' });
+      expect(result.dir_path).toBe('src/**/*');
+    });
+
+    it('should translate maxResults and maxDepth', () => {
+      const result = translateRexArgsToCodex('Glob', {
+        pattern: '.',
+        maxResults: 100,
+        maxDepth: 3,
+      });
+      expect(result.limit).toBe(100);
+      expect(result.depth).toBe(3);
+    });
+
+    it('should omit optional fields when absent', () => {
+      const result = translateRexArgsToCodex('Glob', { pattern: '.' });
+      expect(result.limit).toBeUndefined();
+      expect(result.depth).toBeUndefined();
+    });
+  });
+
+  describe('unknown tool', () => {
+    it('should pass through args unchanged', () => {
+      const args = { foo: 'bar', baz: 123 };
+      const result = translateRexArgsToCodex('UnknownTool', args);
+      expect(result).toEqual(args);
+    });
+  });
+});
+
+// ============================================
+// ARGUMENT ROUND-TRIP INVARIANT
+// ============================================
+
+describe('argument round-trip: Codex → Rex → Codex', () => {
+  it('shell_command args survive the round-trip', () => {
+    const codexArgs = { command: 'echo hello', timeout_ms: 3000 };
+    const rexArgs = translateCodexArgsToRex('shell_command', codexArgs);
+    const backToCodex = translateRexArgsToCodex('Bash', rexArgs);
+    expect(backToCodex.command).toBe(codexArgs.command);
+    expect(backToCodex.timeout_ms).toBe(codexArgs.timeout_ms);
+  });
+
+  it('read_file args survive the round-trip', () => {
+    const codexArgs = { file_path: '/a.ts', offset: 10, limit: 20 };
+    const rexArgs = translateCodexArgsToRex('read_file', codexArgs);
+    const backToCodex = translateRexArgsToCodex('Read', rexArgs);
+    expect(backToCodex.file_path).toBe(codexArgs.file_path);
+    expect(backToCodex.offset).toBe(codexArgs.offset);
+    expect(backToCodex.limit).toBe(codexArgs.limit);
+  });
+
+  it('grep_files args survive the round-trip', () => {
+    const codexArgs = { pattern: 'TODO', include: '*.ts', path: '/src', limit: 50 };
+    const rexArgs = translateCodexArgsToRex('grep_files', codexArgs);
+    const backToCodex = translateRexArgsToCodex('Grep', rexArgs);
+    expect(backToCodex.pattern).toBe(codexArgs.pattern);
+    expect(backToCodex.include).toBe(codexArgs.include);
+    expect(backToCodex.path).toBe(codexArgs.path);
+    expect(backToCodex.limit).toBe(codexArgs.limit);
+  });
+
+  it('read_file with no range survives the round-trip', () => {
+    const codexArgs = { file_path: '/b.ts' };
+    const rexArgs = translateCodexArgsToRex('read_file', codexArgs);
+    const backToCodex = translateRexArgsToCodex('Read', rexArgs);
+    expect(backToCodex.file_path).toBe('/b.ts');
+    expect(backToCodex.offset).toBeUndefined();
+    expect(backToCodex.limit).toBeUndefined();
+  });
+});
+
+// ============================================
+// TOOL VOCABULARY TESTS
+// ============================================
+
+describe('vocabForProvider', () => {
+  it('should return CODEX_VOCAB for openai provider', () => {
+    expect(vocabForProvider('openai')).toBe(CODEX_VOCAB);
+  });
+
+  it('should return CODEX_VOCAB for codex provider', () => {
+    expect(vocabForProvider('codex')).toBe(CODEX_VOCAB);
+  });
+
+  it('should return REX_VOCAB for anthropic provider', () => {
+    expect(vocabForProvider('anthropic')).toBe(REX_VOCAB);
+  });
+
+  it('should return REX_VOCAB for any unknown provider', () => {
+    expect(vocabForProvider('google')).toBe(REX_VOCAB);
+    expect(vocabForProvider('')).toBe(REX_VOCAB);
+  });
+});
+
+describe('vocabulary constants', () => {
+  it('REX_VOCAB uses Rex tool names', () => {
+    expect(REX_VOCAB.read).toBe('Read');
+    expect(REX_VOCAB.glob).toBe('Glob');
+    expect(REX_VOCAB.grep).toBe('Grep');
+    expect(REX_VOCAB.bash).toBe('Bash');
+    expect(REX_VOCAB.edit).toBe('Edit');
+    expect(REX_VOCAB.write).toBe('Write');
+  });
+
+  it('CODEX_VOCAB uses Codex tool names for skinned tools', () => {
+    expect(CODEX_VOCAB.read).toBe('read_file');
+    expect(CODEX_VOCAB.glob).toBe('list_dir');
+    expect(CODEX_VOCAB.grep).toBe('grep_files');
+    expect(CODEX_VOCAB.bash).toBe('shell_command');
+  });
+
+  it('CODEX_VOCAB uses apply_patch for edit and write', () => {
+    expect(CODEX_VOCAB.edit).toBe('apply_patch');
+    expect(CODEX_VOCAB.write).toBe('apply_patch');
+  });
+
+  it('CODEX_VOCAB inherits unskinned tool names from Rex', () => {
+    expect(CODEX_VOCAB.explorer).toBe('Explorer');
+    expect(CODEX_VOCAB.promptUser).toBe('PromptUser');
+  });
+
+  it('CODEX_VOCAB.bash/read/grep/glob match REX_TO_CODEX', () => {
+    expect(CODEX_VOCAB.bash).toBe(REX_TO_CODEX['Bash']);
+    expect(CODEX_VOCAB.read).toBe(REX_TO_CODEX['Read']);
+    expect(CODEX_VOCAB.grep).toBe(REX_TO_CODEX['Grep']);
+    expect(CODEX_VOCAB.glob).toBe(REX_TO_CODEX['Glob']);
   });
 });
 

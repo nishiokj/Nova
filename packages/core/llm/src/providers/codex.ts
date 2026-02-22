@@ -655,9 +655,16 @@ export class CodexProvider implements LLMProviderAdapter {
         }
 
         // Translate Rex args → Codex args so the model sees its native param names
-        // in conversation history (e.g. path → file_path for read_file)
-        if (rawName && REX_TO_CODEX[rawName] && typeof args === 'object' && args !== null) {
-          args = translateRexArgsToCodex(rawName, args as Record<string, unknown>);
+        // in conversation history (e.g. path → file_path for read_file).
+        // getItemsForLLM() emits arguments as JSON strings, so parse first.
+        if (rawName && REX_TO_CODEX[rawName] && name !== 'apply_patch') {
+          let argsObj = args;
+          if (typeof argsObj === 'string') {
+            try { argsObj = JSON.parse(argsObj); } catch { /* leave as-is */ }
+          }
+          if (typeof argsObj === 'object' && argsObj !== null) {
+            args = JSON.stringify(translateRexArgsToCodex(rawName, argsObj as Record<string, unknown>));
+          }
         }
 
         input.push({
