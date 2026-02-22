@@ -20,7 +20,6 @@ import {
   type MemoryInjector,
   type InternalHookEvent,
   type InternalHookContext,
-  getAgentPrompt,
   buildAgentConfig,
 } from 'agent';
 import { Effect, Layer, ManagedRuntime } from 'effect';
@@ -2389,34 +2388,31 @@ export class AgentHarness {
     requestId: string,
     emit: ReturnType<typeof createEventEmitCallback>,
     llm: ReturnType<typeof createAdapter>,
-    agentType: AgentType = 'standard',
-    workingDir?: string,
-    store?: SessionStore,
-    hookRegistry?: UnifiedHookRegistry,
-    controlQueue?: RuntimeControlQueue,
-    executionRuntime?: ManagedRuntime.ManagedRuntime<never, never>
+    agentType: AgentType,
+    workingDir: string,
+    store: SessionStore,
+    hookRegistry: UnifiedHookRegistry | undefined,
+    controlQueue: RuntimeControlQueue,
+    executionRuntime: ManagedRuntime.ManagedRuntime<never, never>
   ): Promise<AgentRunResult> {
-    const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
-    const hooks = this.createAgentHooks(context.sessionKey, requestId, effectiveWorkingDir, emit);
+    const hooks = this.createAgentHooks(context.sessionKey, requestId, workingDir, emit);
 
     // Create closure for per-agent-type model selection lookup
     // NO FALLBACK: Each agent type must have an explicit model selection
-    const getModelSelection = store
-      ? (queryAgentType: string) => {
-          const selection = store.getModelSelection(queryAgentType);
-          if (selection) {
-            this.logger.debug('Model selection for agent', {
-              agentType: queryAgentType,
-              model: selection.model,
-              provider: selection.provider,
-              reasoning: selection.reasoning,
-            });
-            // Update TraceSubscriber with current model
-            this.traceSubscriber?.setCurrentModel(selection.provider, selection.model);
-          }
-          return selection;
-        }
-      : undefined;
+    const getModelSelection = (queryAgentType: string) => {
+      const selection = store.getModelSelection(queryAgentType);
+      if (selection) {
+        this.logger.debug('Model selection for agent', {
+          agentType: queryAgentType,
+          model: selection.model,
+          provider: selection.provider,
+          reasoning: selection.reasoning,
+        });
+        // Update TraceSubscriber with current model
+        this.traceSubscriber?.setCurrentModel(selection.provider, selection.model);
+      }
+      return selection;
+    };
 
     const sessionKey = context.sessionKey;
 
@@ -2431,7 +2427,7 @@ export class AgentHarness {
             requestId: hookContext.requestId,
             workId: hookContext.workId,
             agentType: hookContext.agentType,
-            workingDir: effectiveWorkingDir,
+            workingDir,
             internal: hookContext,
             signal,
           }
@@ -2442,11 +2438,11 @@ export class AgentHarness {
       // Pass interruption check callback so orchestrator can avoid premature termination
       // when user messages arrived during execution.
       // The callback drains the queue (clear on check) so subsequent checks return false.
-      checkInterruption: store ? () => {
+      checkInterruption: () => {
         const pending = store.drainQueuedMessages();
         return pending.length > 0;
-      } : undefined,
-      getRunControl: store ? () => store.getExecutionRunControl() : undefined,
+      },
+      getRunControl: () => store.getExecutionRunControl(),
     };
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
@@ -2466,7 +2462,7 @@ export class AgentHarness {
       context,
       goal,
       agentType,
-      cwd: effectiveWorkingDir,
+      cwd: workingDir,
       runtime,
       executionRuntime,
     });

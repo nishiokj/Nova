@@ -3,81 +3,29 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { parseArgs } from 'node:util';
+import { pathToFileURL } from 'node:url';
+import { stringify as yamlStringify } from 'yaml';
 import { BENCHMARK_PROFILES, DEFAULT_BENCHMARK } from './benchmark_profiles.mjs';
 
-const DEFAULTS = {
-  benchmark: DEFAULT_BENCHMARK,
-  replications: 1,
-  seed: 42,
-  maxConcurrency: 1,
-};
-
-function parseArgs(argv) {
-  const out = { ...DEFAULTS };
-  for (let i = 2; i < argv.length; i += 1) {
-    const arg = argv[i];
-    const next = argv[i + 1];
-    if (arg === '--benchmark') {
-      out.benchmark = next;
-      i += 1;
-      continue;
-    }
-    if (arg === '--dataset') {
-      out.dataset = next;
-      i += 1;
-      continue;
-    }
-    if (arg === '--output') {
-      out.output = next;
-      i += 1;
-      continue;
-    }
-    if (arg === '--image') {
-      out.image = next;
-      i += 1;
-      continue;
-    }
-    if (arg === '--limit') {
-      out.limit = next;
-      i += 1;
-      continue;
-    }
-    if (arg === '--timeout-ms') {
-      out.timeoutMs = next;
-      i += 1;
-      continue;
-    }
-    if (arg === '--replications') {
-      out.replications = next;
-      i += 1;
-      continue;
-    }
-    if (arg === '--seed') {
-      out.seed = next;
-      i += 1;
-      continue;
-    }
-    if (arg === '--max-concurrency') {
-      out.maxConcurrency = next;
-      i += 1;
-      continue;
-    }
-    throw new Error(`Unknown arg: ${arg}`);
-  }
-  return out;
-}
+const WORKSPACE_ROOT = resolve(process.cwd());
+const SDK_FALLBACK = resolve(WORKSPACE_ROOT, '../Experiments/sdk/dist/src/index.js');
 
 function toPositiveInt(raw, label) {
-  const n = Number.parseInt(String(raw), 10);
-  if (!Number.isFinite(n) || n <= 0) {
-    throw new Error(`${label} must be a positive integer; got ${raw}`);
+  const value = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer (got: ${raw})`);
   }
-  return n;
+  return value;
 }
 
-function countJsonl(path) {
-  const raw = readFileSync(path, 'utf8');
-  return raw
+function resolvePath(input) {
+  return isAbsolute(input) ? input : resolve(WORKSPACE_ROOT, input);
+}
+
+function countJsonlRows(path) {
+  const content = readFileSync(path, 'utf8');
+  return content
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0).length;
@@ -86,261 +34,318 @@ function countJsonl(path) {
 function resolveBenchmarkProfile(raw) {
   const requested = String(raw ?? DEFAULT_BENCHMARK).trim();
   if (!requested) {
-    throw new Error(`--benchmark must be non-empty (available: ${Object.keys(BENCHMARK_PROFILES).join(', ')})`);
+    throw new Error('benchmark name cannot be empty');
   }
+
   if (BENCHMARK_PROFILES[requested]) {
-    return {
-      key: requested,
-      profile: BENCHMARK_PROFILES[requested],
-    };
+    return { key: requested, profile: BENCHMARK_PROFILES[requested] };
   }
+
   const lowerRequested = requested.toLowerCase();
   for (const [key, profile] of Object.entries(BENCHMARK_PROFILES)) {
-    if (profile.aliases.some((alias) => alias.toLowerCase() === lowerRequested)) {
+    if ((profile.aliases ?? []).some((alias) => alias.toLowerCase() === lowerRequested)) {
       return { key, profile };
     }
   }
-  throw new Error(`Unknown benchmark '${requested}' (available: ${Object.keys(BENCHMARK_PROFILES).join(', ')})`);
+
+  throw new Error(`unknown benchmark '${requested}' (available: ${Object.keys(BENCHMARK_PROFILES).join(', ')})`);
 }
 
-function resolveTimeoutMs(explicitTimeoutRaw, profile) {
-  if (explicitTimeoutRaw !== undefined && explicitTimeoutRaw !== null) {
-    return toPositiveInt(explicitTimeoutRaw, '--timeout-ms');
-  }
-  if (typeof profile.timeoutMs === 'number' && profile.timeoutMs > 0) {
-    return profile.timeoutMs;
-  }
-  throw new Error('benchmark profile is missing timeoutMs');
+function asNonEmptyString(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
-function buildCredentialStagingEntries(homeDir) {
+function normalizeBindings(input, label) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error(`${label} must be a JSON object`);
+  }
+
+  const modelProvider = asNonEmptyString(input.model_provider) ?? asNonEmptyString(input.provider);
+  const model = asNonEmptyString(input.model);
+  if (!modelProvider || !model) {
+    throw new Error(`${label} must include non-empty model_provider (or provider) and model`);
+  }
+
+  return {
+    ...input,
+    model_provider: modelProvider,
+    model,
+  };
+}
+
+function parseJsonEnv(name, fallback) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`invalid JSON in ${name}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function resolveBenchmarkAdapterCommand(profile) {
+  const override = parseJsonEnv('AGENTLAB_BENCHMARK_ADAPTER_CMD_JSON', null);
+  if (override !== null) {
+    if (!Array.isArray(override) || override.length === 0 || override.some((value) => typeof value !== 'string' || value.trim().length === 0)) {
+      throw new Error('AGENTLAB_BENCHMARK_ADAPTER_CMD_JSON must be a non-empty JSON array of strings');
+    }
+    return override.map((value) => value.trim());
+  }
+
+  const pythonBin = asNonEmptyString(process.env.AGENTLAB_SWEBENCH_PYTHON) ?? 'python3';
+  const datasetName = asNonEmptyString(profile?.evaluator?.datasetName) ?? 'princeton-nlp/SWE-bench_Lite';
+  const split = asNonEmptyString(profile?.dataset?.splitId) ?? 'test';
+  const benchmarkName = asNonEmptyString(profile?.dataset?.suiteId) ?? 'swebench_lite_curated';
+
+  return [
+    pythonBin,
+    'scripts/agentlab/swebench_official_benchmark_adapter.py',
+    '--benchmark-name',
+    benchmarkName,
+    '--dataset-name',
+    datasetName,
+    '--split',
+    split,
+  ];
+}
+
+function buildCredentialStaging(homeDir) {
   const candidates = [
     {
-      hostPath: resolve(homeDir, '.config/rex/master.key'),
-      destinationPath: '/agentlab/deps/home/.config/rex/master.key',
+      source_from_host: resolve(homeDir, '.config/rex/master.key'),
+      destination_path: '/agentlab/deps/home/.config/rex/master.key',
       required: true,
-      readOnly: true,
     },
     {
-      hostPath: resolve(homeDir, '.graphd/graphd.db'),
-      destinationPath: '/agentlab/deps/home/.graphd/graphd.db',
+      source_from_host: resolve(homeDir, '.graphd/graphd.db'),
+      destination_path: '/agentlab/deps/home/.graphd/graphd.db',
       required: true,
-      readOnly: false,
     },
     {
-      hostPath: resolve(homeDir, '.graphd/graphd.db-wal'),
-      destinationPath: '/agentlab/deps/home/.graphd/graphd.db-wal',
+      source_from_host: resolve(homeDir, '.graphd/graphd.db-wal'),
+      destination_path: '/agentlab/deps/home/.graphd/graphd.db-wal',
       required: false,
-      readOnly: false,
     },
     {
-      hostPath: resolve(homeDir, '.graphd/graphd.db-shm'),
-      destinationPath: '/agentlab/deps/home/.graphd/graphd.db-shm',
+      source_from_host: resolve(homeDir, '.graphd/graphd.db-shm'),
+      destination_path: '/agentlab/deps/home/.graphd/graphd.db-shm',
       required: false,
-      readOnly: false,
     },
     {
-      hostPath: resolve(homeDir, '.config/rex/codex-auth.json'),
-      destinationPath: '/agentlab/deps/home/.config/rex/codex-auth.json',
+      source_from_host: resolve(homeDir, '.codex/auth.json'),
+      destination_path: '/agentlab/deps/home/.codex/auth.json',
       required: false,
-      readOnly: true,
     },
     {
-      hostPath: resolve(homeDir, '.codex/auth.json'),
-      destinationPath: '/agentlab/deps/home/.codex/auth.json',
+      source_from_host: resolve(homeDir, '.config/rex/codex-auth.json'),
+      destination_path: '/agentlab/deps/home/.config/rex/codex-auth.json',
       required: false,
-      readOnly: true,
     },
   ];
 
-  return candidates
-    .filter((entry) => existsSync(entry.hostPath))
-    .map((entry) => ({
-      source_from_host: entry.hostPath,
-      destination_path: entry.destinationPath,
-      required: entry.required,
-      read_only: entry.readOnly,
-    }));
+  return candidates.filter((entry) => existsSync(entry.source_from_host));
 }
 
-function resolvePath(input, cwd) {
-  return isAbsolute(input) ? input : resolve(cwd, input);
+async function loadSdk() {
+  try {
+    return await import('@agentlab/sdk');
+  } catch {
+    if (!existsSync(SDK_FALLBACK)) {
+      throw new Error(`AgentLab SDK not found at ${SDK_FALLBACK}`);
+    }
+    return import(pathToFileURL(SDK_FALLBACK).href);
+  }
 }
 
-function main() {
-  const args = parseArgs(process.argv);
-  const cwd = process.cwd();
-  const { key: benchmarkKey, profile } = resolveBenchmarkProfile(args.benchmark);
-  const datasetInput = args.dataset ?? profile.defaultDataset;
-  const outputInput = args.output ?? profile.defaultOutput;
-  const image = args.image ?? profile.defaultImage;
+function pruneSpec(spec) {
+  const out = JSON.parse(JSON.stringify(spec));
 
-  const datasetAbs = resolvePath(datasetInput, cwd);
+  if (Array.isArray(out.runtime?.dependencies?.file_staging) && out.runtime.dependencies.file_staging.length === 0) {
+    delete out.runtime.dependencies.file_staging;
+  }
+  if (Array.isArray(out.runtime?.dependencies?.services) && out.runtime.dependencies.services.length === 0) {
+    delete out.runtime.dependencies.services;
+  }
+  if (
+    out.runtime?.dependencies &&
+    Object.keys(out.runtime.dependencies).length === 0
+  ) {
+    delete out.runtime.dependencies;
+  }
+
+  const overrides = out.runtime?.agent?.overrides;
+  if (overrides) {
+    if (Array.isArray(overrides.args) && overrides.args.length === 0) {
+      delete overrides.args;
+    }
+    if (Array.isArray(overrides.env_from_host) && overrides.env_from_host.length === 0) {
+      delete overrides.env_from_host;
+    }
+    if (overrides.env && Object.keys(overrides.env).length === 0) {
+      delete overrides.env;
+    }
+    if (Object.keys(overrides).length === 0) {
+      delete out.runtime.agent.overrides;
+    }
+  }
+
+  return out;
+}
+
+async function main() {
+  const { values } = parseArgs({
+    options: {
+      benchmark: { type: 'string', default: DEFAULT_BENCHMARK },
+      dataset: { type: 'string' },
+      output: { type: 'string' },
+      image: { type: 'string' },
+      'agent-cmd': { type: 'string', default: 'rex' },
+      limit: { type: 'string' },
+      'timeout-ms': { type: 'string' },
+      replications: { type: 'string', default: '1' },
+      seed: { type: 'string', default: '42' },
+      'max-concurrency': { type: 'string', default: '1' },
+      owner: { type: 'string', default: process.env.AGENTLAB_EXPERIMENT_OWNER ?? process.env.USER ?? 'unknown' },
+      'skip-credential-staging': { type: 'boolean', default: false },
+      'disable-benchmark-adapter': { type: 'boolean', default: false },
+    },
+    allowPositionals: false,
+  });
+
+  const { key: benchmarkKey, profile } = resolveBenchmarkProfile(values.benchmark);
+  const datasetInput = values.dataset ?? profile.defaultDataset;
+  const outputInput = values.output ?? profile.defaultOutput;
+  const image = values.image ?? profile.defaultImage;
+  const agentCmd = asNonEmptyString(values['agent-cmd']) ?? 'rex';
+
+  const datasetAbs = resolvePath(datasetInput);
   if (!existsSync(datasetAbs)) {
     throw new Error(`dataset not found: ${datasetAbs}`);
   }
 
-  const outputAbs = resolvePath(outputInput, cwd);
+  const outputAbs = resolvePath(outputInput);
   mkdirSync(dirname(outputAbs), { recursive: true });
 
-  const datasetCount = countJsonl(datasetAbs);
-  const limit = args.limit ? toPositiveInt(args.limit, '--limit') : datasetCount;
-  const safeLimit = Math.min(limit, datasetCount);
-  const timeoutMs = resolveTimeoutMs(args.timeoutMs, profile);
-  const replications = toPositiveInt(args.replications, '--replications');
-  const seed = toPositiveInt(args.seed, '--seed');
-  const maxConcurrency = toPositiveInt(args.maxConcurrency, '--max-concurrency');
+  const datasetRows = countJsonlRows(datasetAbs);
+  const requestedLimit = values.limit ? toPositiveInt(values.limit, '--limit') : datasetRows;
+  const effectiveLimit = Math.min(datasetRows, requestedLimit);
+  const timeoutMs = values['timeout-ms']
+    ? toPositiveInt(values['timeout-ms'], '--timeout-ms')
+    : (typeof profile.timeoutMs === 'number' ? profile.timeoutMs : 600_000);
+  const replications = toPositiveInt(values.replications, '--replications');
+  const seed = toPositiveInt(values.seed, '--seed');
+  const maxConcurrency = toPositiveInt(values['max-concurrency'], '--max-concurrency');
 
-  const outputDir = dirname(outputAbs);
-  const datasetRel = relative(outputDir, datasetAbs);
+  const baselineBindings = normalizeBindings(
+    parseJsonEnv('AGENTLAB_BASELINE_BINDINGS_JSON', {
+      model_provider: 'z.ai-coder',
+      model: 'glm-5',
+      agent_type: 'standard',
+    }),
+    'AGENTLAB_BASELINE_BINDINGS_JSON',
+  );
+  const treatmentBindings = normalizeBindings(
+    parseJsonEnv('AGENTLAB_TREATMENT_BINDINGS_JSON', {
+      model_provider: 'codex',
+      model: 'gpt-5.3-codex-spark',
+      agent_type: 'standard',
+    }),
+    'AGENTLAB_TREATMENT_BINDINGS_JSON',
+  );
 
-  const stagingEntries = buildCredentialStagingEntries(homedir());
-  if (stagingEntries.length === 0) {
-    console.warn('warning: no local credential files found to stage into the container');
+  const sdk = await loadSdk();
+  const { ExperimentBuilder, Metric } = sdk;
+
+  const datasetRel = relative(dirname(outputAbs), datasetAbs);
+  const datasetPath = datasetRel.startsWith('..') ? datasetAbs : datasetRel;
+  const builder = ExperimentBuilder.create(profile.experiment.id, profile.experiment.name)
+    .description(profile.experiment.description)
+    .owner(values.owner)
+    .tags(profile.experiment.tags)
+    .datasetJsonl(datasetPath, {
+      suiteId: profile.dataset.suiteId,
+      schemaVersion: profile.dataset.schemaVersion,
+      splitId: profile.dataset.splitId,
+      limit: effectiveLimit,
+    })
+    .customAgentImage(image, [
+      agentCmd,
+      'run',
+      '--input-file',
+      '${AGENTLAB_TASK_PATH}',
+      '--bindings-file',
+      '${AGENTLAB_BINDINGS_PATH}',
+      '--output',
+      '${AGENTLAB_RESULT_PATH}',
+      '--events',
+      '${AGENTLAB_TRAJECTORY_PATH}',
+      '--session-key',
+      '${AGENTLAB_TRIAL_ID}',
+      '--working-dir',
+      '/agentlab/workspace',
+      '--dangerous',
+    ])
+    .useBuiltinAdapter()
+    .agentEnv({ HOME: '/agentlab/deps/home' })
+    .sanitizationProfile('hermetic_functional')
+    .replications(replications)
+    .randomSeed(seed)
+    .maxConcurrency(maxConcurrency)
+    .baseline('glm_5', baselineBindings)
+    .addVariant('gpt_5_3_codex_spark', treatmentBindings)
+    .metric(Metric.fromOutput('success', '/metrics/success', {
+      primary: true,
+      weight: 1,
+      direction: 'maximize',
+    }))
+    .timeoutMs(timeoutMs)
+    .networkMode('full')
+    .sandboxImage(image);
+
+  let benchmarkAdapterCommand = null;
+  if (!values['disable-benchmark-adapter']) {
+    benchmarkAdapterCommand = resolveBenchmarkAdapterCommand(profile);
+    builder.benchmark({
+      policy: {
+        task_model: 'independent',
+        evaluator_mode: 'official',
+        scoring_lifecycle: 'predict_then_score',
+        chain_failure_policy: 'continue_with_flag',
+      },
+      adapter: {
+        command: benchmarkAdapterCommand,
+      },
+    });
   }
 
-  const spec = {
-    version: '0.5',
-    experiment: {
-      workload_type: 'agent_loop',
-      id: profile.experiment.id,
-      name: profile.experiment.name,
-      tags: profile.experiment.tags,
-      description: profile.experiment.description,
-      owner: 'jevinnishioka',
-    },
-    dataset: {
-      suite_id: profile.dataset.suiteId,
-      provider: 'local_jsonl',
-      path: datasetRel,
-      schema_version: profile.dataset.schemaVersion,
-      split_id: profile.dataset.splitId,
-      limit: safeLimit,
-    },
-    design: {
-      sanitization_profile: 'hermetic_functional',
-      comparison: 'paired',
-      replications,
-      random_seed: seed,
-      shuffle_tasks: true,
-      max_concurrency: maxConcurrency,
-    },
-    metrics: [
-      { id: 'duration_ms', source: 'runner', weight: 0, primary: false },
-      {
-        id: 'tokens_in',
-        source: 'events',
-        event_type: 'model_call_end',
-        event_field: 'usage.tokens_in',
-        aggregate: 'sum',
-        weight: 0,
-        primary: false,
-      },
-      {
-        id: 'tokens_out',
-        source: 'events',
-        event_type: 'model_call_end',
-        event_field: 'usage.tokens_out',
-        aggregate: 'sum',
-        weight: 0,
-        primary: false,
-      },
-      {
-        id: 'turn_count',
-        source: 'events',
-        event_type: 'model_call_end',
-        aggregate: 'count',
-        weight: 0,
-        primary: false,
-      },
-      {
-        id: 'success',
-        source: 'output',
-        json_pointer: '/metrics/success',
-        weight: 1,
-        direction: 'maximize',
-        primary: true,
-      },
-      {
-        id: 'latency_ms',
-        source: 'output',
-        json_pointer: '/metrics/latency_ms',
-        weight: 0,
-        direction: 'minimize',
-        primary: false,
-      },
-    ],
-    artifacts: {
-      collect: ['artifacts/**', 'output/**', '**/*.patch'],
-      diff: true,
-    },
-    baseline: {
-      variant_id: 'glm_5',
-      bindings: {
-        model_provider: 'z.ai-coder',
-        model: 'glm-5',
-        agent_type: 'standard',
-      },
-    },
-    variant_plan: [
-      {
-        variant_id: 'gpt_5_3_codex_spark',
-        bindings: {
-          model_provider: 'codex',
-          model: 'gpt-5.3-codex-spark',
-          agent_type: 'standard',
-        },
-      },
-    ],
-    runtime: {
-      agent: {
-        mode: 'custom_image',
-        custom_image: {
-          image,
-          entrypoint: ['bun', '/opt/rex/packages/infra/harness-daemon/bin/rex.js', 'run-agent-loop'],
-        },
-        overrides: {
-          env: {
-            HOME: '/agentlab/deps/home',
-            REX_EXPERIMENT_PROXY: '1',
-            REX_PROXY_ALLOW_OUTBOUND: '1',
-          },
-          env_from_host: [],
-        },
-      },
-      dependencies: {
-        file_staging: stagingEntries,
-      },
-      policy: {
-        timeout_ms: timeoutMs,
-        network: {
-          mode: 'full',
-          allowed_hosts: [],
-        },
-        sandbox: {
-          mode: 'container',
-          image,
-        },
-      },
-    },
-    validity: {
-      fail_on_state_leak: true,
-      fail_on_profile_invariant_violation: true,
-    },
-  };
+  if (!values['skip-credential-staging']) {
+    const staging = buildCredentialStaging(homedir());
+    if (staging.length > 0) {
+      builder.dependencyFileStaging(staging);
+    }
+  }
 
-  writeFileSync(outputAbs, `${JSON.stringify(spec, null, 2)}\n`, 'utf8');
-  console.log(`wrote experiment config: ${outputAbs}`);
-  console.log(`dataset rows=${datasetCount}, limit=${safeLimit}`);
-  console.log(`image=${image}`);
-  console.log(`benchmark=${benchmarkKey}`);
-  console.log(`timeout_ms=${timeoutMs}`);
-  console.log(`credential staging entries=${stagingEntries.length}`);
+  const built = builder.build();
+  built.experiment.workload_type = 'agent_loop';
+  const spec = pruneSpec(built);
+  writeFileSync(outputAbs, `${yamlStringify(spec)}\n`, 'utf8');
+
+  console.log(`wrote experiment: ${outputAbs}`);
+  console.log(`benchmark: ${benchmarkKey}`);
+  console.log(`dataset rows=${datasetRows}, limit=${effectiveLimit}`);
+  console.log(`image: ${image}`);
+  console.log(`agent_cmd: ${agentCmd}`);
+  console.log(`timeout_ms: ${timeoutMs}`);
+  if (benchmarkAdapterCommand) {
+    console.log(`benchmark_adapter_cmd: ${JSON.stringify(benchmarkAdapterCommand)}`);
+  } else {
+    console.log('benchmark_adapter_cmd: disabled');
+  }
 }
 
-try {
-  main();
-} catch (error) {
+main().catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
-}
+});

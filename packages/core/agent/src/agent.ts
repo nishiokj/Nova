@@ -16,7 +16,9 @@ import {
   TimeoutError,
   DEFAULT_RESILIENCE_CONFIG,
   getProviderCircuitState,
+  vocabForProvider,
 } from 'llm';
+import { getAgentPrompt } from './prompts.js';
 import type { ToolRegistry } from 'tools';
 import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema, MessageItem, ContextItem, ArtifactItem, LLMItem, ContentBlock } from 'types';
 import { isLLMMessageItem, isLLMFunctionCallItem, isLLMFunctionCallOutputItem } from 'types';
@@ -377,20 +379,9 @@ export class Agent {
    * @returns termination reason if bound hit, null otherwise
    */
   private checkBounds(
-    metrics: AgentMetrics,
     workItem: WorkItem,
     elapsedMs: number
-  ): 'max_tool_calls_exceeded' | 'max_duration_exceeded' | null {
-    if (metrics.toolCallsMade >= workItem.bounds.maxToolCalls) {
-      this.emit(createEvent('agent_bounds_hit', {
-        agentType: this.config.type,
-        boundType: 'tool_calls',
-        current: metrics.toolCallsMade,
-        max: workItem.bounds.maxToolCalls,
-      }, workItem.workId));
-      return 'max_tool_calls_exceeded';
-    }
-
+  ): 'max_duration_exceeded' | null {
     if (elapsedMs >= workItem.bounds.maxDurationMs) {
       this.emit(createEvent('agent_bounds_hit', {
         agentType: this.config.type,
@@ -452,207 +443,232 @@ export class Agent {
     tools: ToolDefinition[] | undefined;
     toolChoice: 'none' | 'auto' | undefined;
   }> {
-    return Effect.promise(async () => {
-    const { system, taskContext } = this.buildSystemPromptComponents(workItem, cwd);
+    return Effect.gen(this, function* () {
+      const { system, taskContext } = this.buildSystemPromptComponents(workItem, cwd);
 
-    const allTools = [
-      ...this.toolRegistry.getDefinitions(),
-      ...(this.agentRegistry?.listToolDefinitions() ?? []),
-    ];
-    const allowedTools = this.filterAllowedTools(allTools);
+      const allTools = [
+        ...this.toolRegistry.getDefinitions(),
+        ...(this.agentRegistry?.listToolDefinitions() ?? []),
+      ];
+      const allowedTools = this.filterAllowedTools(allTools);
 
-    const isLastIteration = iteration === maxIterations - 1;
-    const lastIterationInstruction = isLastIteration
-      ? '\n\nIMPORTANT: This is your final iteration. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.'
-      : '';
+      const isLastIteration = iteration === maxIterations - 1;
+      const lastIterationInstruction = isLastIteration
+        ? '\n\nIMPORTANT: This is your final iteration. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.'
+        : '';
 
-    // Memory injection (recent + evidence retrieval)
-    let recentConversationContent: string | null = null;
-    if (this.memoryInjector?.injectRecentConversations && iteration === 0) {
-      try {
-        recentConversationContent = await this.memoryInjector.injectRecentConversations({
-          limit: 10,
-          maxTokens: 600,
-        });
-      } catch {
-        recentConversationContent = null;
+      // Memory injection (recent + evidence retrieval)
+      let recentConversationContent: string | null = null;
+      if (this.memoryInjector?.injectRecentConversations && iteration === 0) {
+        const injector = this.memoryInjector;
+        recentConversationContent = yield* Effect.tryPromise({
+          try: () => injector.injectRecentConversations!({ limit: 10, maxTokens: 600 }),
+          catch: () => null as never,
+        }).pipe(Effect.catchAll(() => Effect.succeed(null)));
       }
-    }
 
-    let memoryContent: string | null = null;
-    if (this.memoryInjector) {
-      try {
-        const query = this.buildMemoryQuery(workItem, globalContext);
-        const querySummary = this.memoryInjector.summarizeQueryPlan?.(query);
-        const plan = this.memoryInjector.explainQueryPlan?.(query);
-        const intent = plan?.intent ?? 'unknown';
-        const isConceptIntent = intent === 'decision'
-          || intent === 'preference'
-          || intent === 'principle'
-          || intent === 'tradeoff';
-        const isRecallIntent = intent === 'recall';
-        const eventQuery = querySummary || query;
-        const queryKey = this.normalizeMemoryQueryKey(eventQuery);
-        const cacheKey = this.getMemoryCacheKey(workItem);
-        const recentMessageItems = globalContext.getItemsByType('message') as MessageItem[];
-        const shouldUseEvidence = !!this.memoryInjector.injectEvidence
-          && !isConceptIntent
-          && !isRecallIntent;
-        const cached = this.memoryInjectionCache.get(cacheKey);
-        const canReuseCached = !!shouldUseEvidence && !!cached && cached.queryKey === queryKey;
+      let memoryContent: string | null = null;
+      if (this.memoryInjector) {
+        const injectorResult = yield* this.buildMemoryInjection(
+          workItem, globalContext, taskContext, cwd, iteration
+        ).pipe(Effect.catchAll(() => Effect.succeed(null as string | null)));
+        memoryContent = injectorResult;
+      }
 
-        let evidenceResult: {
-          content: string;
-          atoms: unknown[];
-          trainingSignal?: Record<string, unknown>;
-          metrics: {
-            totalTokens: number;
-            attentionTax: number;
-            coverage: Record<string, number>;
-            discriminatorsIncluded: number;
-            latencyMs: number;
-          };
-        } | null = null;
+      // Combine task context with memory injection
+      const combinedMemoryContent = [recentConversationContent, memoryContent]
+        .filter((section): section is string => typeof section === 'string' && section.trim().length > 0)
+        .join('\n\n');
+      const contextWithMemory = combinedMemoryContent
+        ? `${taskContext}\n\n${combinedMemoryContent}`
+        : taskContext;
 
-        if (canReuseCached) {
-          memoryContent = cached.content;
-          this.emitMemoryInjected(workItem, {
-            query: eventQuery,
-            resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
-            memoryContent: memoryContent ?? undefined,
-            contextWithMemory: memoryContent ? `${taskContext}\n\n${memoryContent}` : undefined,
-            itemCount: cached.itemCount,
-            success: memoryContent !== null,
-            iteration,
-            latencyMs: cached.latencyMs,
-            coverage: cached.coverage,
-            discriminatorsIncluded: cached.discriminatorsIncluded,
-            totalTokens: cached.totalTokens,
-            trainingSignal: cached.trainingSignal,
-          });
-        } else {
-          if (shouldUseEvidence && this.memoryInjector.injectEvidence) {
-            const recentMessages = recentMessageItems
-              .filter(item => item.role === 'user')
-              .map(item => {
-                if (typeof item.content === 'string') return item.content;
-                if (Array.isArray(item.content)) {
-                  return item.content
-                    .map(block => (block.type === 'text' ? block.text : ''))
-                    .join(' ');
-                }
-                return '';
-              })
-              .filter(text => text && text.trim().length > 0)
-              .slice(-3);
+      const messages = this.buildMessages(
+        system,
+        contextWithMemory + lastIterationInstruction,
+        workItem,
+        globalContext,
+        localContext
+      );
 
-            const touchedFiles = globalContext.getReadFilesArray().map((filePath) => {
-              if (path.isAbsolute(filePath)) {
-                return path.relative(cwd, filePath);
-              }
-              return filePath;
-            });
+      const tools = allowedTools.length > 0 ? allowedTools : undefined;
+      const toolChoice = isLastIteration && tools ? 'none' as const : undefined;
 
-            evidenceResult = await this.memoryInjector.injectEvidence({
-              task: {
-                objective: workItem.objective,
-                recentMessages,
-                touchedFiles,
-                iteration,
-                sessionId: this.sessionKey,
-                runId: this.requestId || undefined,
-                workItemId: workItem.workId,
-              },
-              budget: {
-                maxTokens: 1000,
-                maxItems: 3,
-                topK: 12,
+      return { messages, tools, toolChoice };
+    });
+  }
+
+  /**
+   * Memory injection logic extracted for Effect composition.
+   * Returns the memory content string or null.
+   */
+  private buildMemoryInjection(
+    workItem: WorkItem,
+    globalContext: ContextWindow,
+    taskContext: string,
+    cwd: string,
+    iteration: number
+  ): Effect.Effect<string | null, Error> {
+    return Effect.gen(this, function* () {
+      const injector = this.memoryInjector!;
+      const query = this.buildMemoryQuery(workItem, globalContext);
+      const querySummary = injector.summarizeQueryPlan?.(query);
+      const plan = injector.explainQueryPlan?.(query);
+      const intent = plan?.intent ?? 'unknown';
+      const isConceptIntent = intent === 'decision'
+        || intent === 'preference'
+        || intent === 'principle'
+        || intent === 'tradeoff';
+      const isRecallIntent = intent === 'recall';
+      const eventQuery = querySummary || query;
+      const queryKey = this.normalizeMemoryQueryKey(eventQuery);
+      const cacheKey = this.getMemoryCacheKey(workItem);
+      const recentMessageItems = globalContext.getItemsByType('message') as MessageItem[];
+      const shouldUseEvidence = !!injector.injectEvidence
+        && !isConceptIntent
+        && !isRecallIntent;
+      const cached = this.memoryInjectionCache.get(cacheKey);
+      const canReuseCached = !!shouldUseEvidence && !!cached && cached.queryKey === queryKey;
+
+      if (canReuseCached) {
+        const memoryContent = cached.content;
+        this.emitMemoryInjected(workItem, {
+          query: eventQuery,
+          resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
+          memoryContent: memoryContent ?? undefined,
+          contextWithMemory: memoryContent ? `${taskContext}\n\n${memoryContent}` : undefined,
+          itemCount: cached.itemCount,
+          success: memoryContent !== null,
+          iteration,
+          latencyMs: cached.latencyMs,
+          coverage: cached.coverage,
+          discriminatorsIncluded: cached.discriminatorsIncluded,
+          totalTokens: cached.totalTokens,
+          trainingSignal: cached.trainingSignal,
+        });
+        return memoryContent;
+      }
+
+      let evidenceResult: {
+        content: string;
+        atoms: unknown[];
+        trainingSignal?: Record<string, unknown>;
+        metrics: {
+          totalTokens: number;
+          attentionTax: number;
+          coverage: Record<string, number>;
+          discriminatorsIncluded: number;
+          latencyMs: number;
+        };
+      } | null = null;
+
+      if (shouldUseEvidence && injector.injectEvidence) {
+        const recentMessages = recentMessageItems
+          .filter(item => item.role === 'user')
+          .map(item => {
+            if (typeof item.content === 'string') return item.content;
+            if (Array.isArray(item.content)) {
+              return item.content
+                .map(block => (block.type === 'text' ? block.text : ''))
+                .join(' ');
+            }
+            return '';
+          })
+          .filter(text => text && text.trim().length > 0)
+          .slice(-3);
+
+        const touchedFiles = globalContext.getReadFilesArray().map((filePath) => {
+          if (path.isAbsolute(filePath)) {
+            return path.relative(cwd, filePath);
+          }
+          return filePath;
+        });
+
+        evidenceResult = yield* Effect.tryPromise({
+          try: () => injector.injectEvidence!({
+            task: {
+              objective: workItem.objective,
+              recentMessages,
+              touchedFiles,
+              iteration,
+              sessionId: this.sessionKey,
+              runId: this.requestId || undefined,
+              workItemId: workItem.workId,
+            },
+            budget: {
+              maxTokens: 1000,
+              maxItems: 3,
+              topK: 12,
               filters: {
                 intent,
                 mode: 'memory_injection',
               },
-                minCoverage: {},
-              },
-            });
-          }
+              minCoverage: {},
+            },
+          }),
+          catch: (e) => e instanceof Error ? e : new Error(String(e)),
+        });
+      }
 
-          if (evidenceResult?.content) {
-            memoryContent = evidenceResult.content;
-            const contextWithMemory = `${taskContext}\n\n${memoryContent}`;
-            this.memoryInjectionCache.set(cacheKey, {
-              queryKey,
-              query,
-              content: memoryContent,
-              itemCount: evidenceResult.atoms?.length ?? 0,
-              latencyMs: evidenceResult.metrics?.latencyMs,
-              coverage: evidenceResult.metrics?.coverage,
-              discriminatorsIncluded: evidenceResult.metrics?.discriminatorsIncluded,
-              totalTokens: evidenceResult.metrics?.totalTokens,
-              trainingSignal: evidenceResult.trainingSignal,
-            });
-            this.emitMemoryInjected(workItem, {
-              query: eventQuery,
-              resultPreview: memoryContent.slice(0, 500),
-              memoryContent,
-              contextWithMemory,
-              itemCount: evidenceResult.atoms?.length ?? 0,
-              success: true,
-              iteration,
-              latencyMs: evidenceResult.metrics?.latencyMs,
-              coverage: evidenceResult.metrics?.coverage,
-              discriminatorsIncluded: evidenceResult.metrics?.discriminatorsIncluded,
-              totalTokens: evidenceResult.metrics?.totalTokens,
-              trainingSignal: evidenceResult.trainingSignal,
-            });
-          } else {
-            this.memoryInjectionCache.set(cacheKey, {
-              queryKey,
-              query,
-              content: null,
-              itemCount: 0,
-            });
-            this.emitMemoryInjected(workItem, {
-              query: eventQuery,
-              itemCount: 0,
-              success: false,
-              iteration,
-            });
-          }
-        }
-      } catch {
+      if (evidenceResult?.content) {
+        const memoryContent = evidenceResult.content;
+        const contextWithMemory = `${taskContext}\n\n${memoryContent}`;
+        this.memoryInjectionCache.set(cacheKey, {
+          queryKey,
+          query,
+          content: memoryContent,
+          itemCount: evidenceResult.atoms?.length ?? 0,
+          latencyMs: evidenceResult.metrics?.latencyMs,
+          coverage: evidenceResult.metrics?.coverage,
+          discriminatorsIncluded: evidenceResult.metrics?.discriminatorsIncluded,
+          totalTokens: evidenceResult.metrics?.totalTokens,
+          trainingSignal: evidenceResult.trainingSignal,
+        });
+        this.emitMemoryInjected(workItem, {
+          query: eventQuery,
+          resultPreview: memoryContent.slice(0, 500),
+          memoryContent,
+          contextWithMemory,
+          itemCount: evidenceResult.atoms?.length ?? 0,
+          success: true,
+          iteration,
+          latencyMs: evidenceResult.metrics?.latencyMs,
+          coverage: evidenceResult.metrics?.coverage,
+          discriminatorsIncluded: evidenceResult.metrics?.discriminatorsIncluded,
+          totalTokens: evidenceResult.metrics?.totalTokens,
+          trainingSignal: evidenceResult.trainingSignal,
+        });
+        return memoryContent;
+      }
+
+      this.memoryInjectionCache.set(cacheKey, {
+        queryKey,
+        query,
+        content: null,
+        itemCount: 0,
+      });
+      this.emitMemoryInjected(workItem, {
+        query: eventQuery,
+        itemCount: 0,
+        success: false,
+        iteration,
+      });
+      return null;
+    }).pipe(
+      Effect.catchAll(() => {
         // Silent failure - continue without memory
         // Fire memory_injected hook even on failure for observability
+        const injector = this.memoryInjector!;
         this.emitMemoryInjected(workItem, {
-          query: this.memoryInjector.summarizeQueryPlan?.(this.buildMemoryQuery(workItem, globalContext))
+          query: injector.summarizeQueryPlan?.(this.buildMemoryQuery(workItem, globalContext))
             || this.buildMemoryQuery(workItem, globalContext),
           itemCount: 0,
           success: false,
           iteration,
         });
-      }
-    }
-
-    // Combine task context with memory injection
-    const combinedMemoryContent = [recentConversationContent, memoryContent]
-      .filter((section): section is string => typeof section === 'string' && section.trim().length > 0)
-      .join('\n\n');
-    const contextWithMemory = combinedMemoryContent
-      ? `${taskContext}\n\n${combinedMemoryContent}`
-      : taskContext;
-
-    const messages = this.buildMessages(
-      system,
-      contextWithMemory + lastIterationInstruction,
-      workItem,
-      globalContext,
-      localContext
+        return Effect.succeed(null);
+      })
     );
-
-    const tools = allowedTools.length > 0 ? allowedTools : undefined;
-    const toolChoice = isLastIteration && tools ? 'none' as const : undefined;
-
-    return { messages, tools, toolChoice };
-    });
   }
 
   /**
@@ -1139,7 +1155,7 @@ export class Agent {
 
         // 1. Pre-checks: bounds and context management
         const elapsedMs = Date.now() - startTime;
-        const boundHit = this.checkBounds(metrics, workItem, elapsedMs);
+        const boundHit = this.checkBounds(workItem, elapsedMs);
         if (boundHit) {
           result.terminationReason = boundHit;
           break;
@@ -1293,20 +1309,18 @@ export class Agent {
         const toolCallsSucceededBefore = metrics.toolCallsSucceeded;
         const toolCallsFailedBefore = metrics.toolCallsFailed;
 
-        yield* Effect.promise(() =>
-          this.processToolCalls(
-            toolCalls,
-            globalContext,
-            localContext,
-            localReadFiles,
-            result,
-            metrics,
-            workItem,
-            cwd,
-            workItem.workId,
-            signal,
-            runControl
-          )
+        yield* this.processToolCalls(
+          toolCalls,
+          globalContext,
+          localContext,
+          localReadFiles,
+          result,
+          metrics,
+          workItem,
+          cwd,
+          workItem.workId,
+          signal,
+          runControl
         );
 
         const successCount = metrics.toolCallsSucceeded - toolCallsSucceededBefore;
@@ -1626,13 +1640,21 @@ export class Agent {
 
   /**
    * Build system prompt components for caching optimization.
-   * Static content goes in system prompt (cached), dynamic content goes in messages.
+   * Rebuilds the prompt with provider-aware tool vocabulary so the model
+   * sees tool names matching its actual tool definitions.
    */
   private buildSystemPromptComponents(workItem: WorkItem, cwd: string): { system: string; taskContext: string } {
+    // Rebuild prompt with provider-correct tool names
+    const vocab = vocabForProvider(this.llmConfig.provider ?? 'anthropic');
+    const basePrompt = getAgentPrompt(this.config.type, vocab);
+    const behavioralRules = this.config.envPrompt
+      ? `${basePrompt}\n\n${this.config.envPrompt}`
+      : basePrompt;
+
     const { system, taskContext } = buildSystemMessage(
       workItem.goal,
       workItem.objective,
-      this.config.systemPrompt,
+      behavioralRules,
       cwd
     );
     return { system, taskContext };
@@ -1900,43 +1922,138 @@ export class Agent {
   /**
    * Apply preToolUse hook, returning effective args or block info.
    */
-  private async applyPreToolUseHook(
+  private applyPreToolUseHook(
     name: string,
     args: Record<string, unknown>,
-  ): Promise<{ action: 'proceed'; effectiveArgs: Record<string, unknown> } | { action: 'block'; errorMessage: string }> {
+  ): Effect.Effect<{ action: 'proceed'; effectiveArgs: Record<string, unknown> } | { action: 'block'; errorMessage: string }, Error> {
     if (!this.hooks?.preToolUse) {
-      return { action: 'proceed', effectiveArgs: args };
+      return Effect.succeed({ action: 'proceed', effectiveArgs: args });
     }
-    const hookResult = await this.hooks.preToolUse(name, args);
-    if (hookResult.action === 'block') {
-      return { action: 'block', errorMessage: hookResult.message ?? 'Blocked by hook' };
-    }
-    if (hookResult.action === 'modify' && hookResult.modifiedArgs) {
-      return { action: 'proceed', effectiveArgs: hookResult.modifiedArgs };
-    }
-    return { action: 'proceed', effectiveArgs: args };
+    return Effect.tryPromise({
+      try: () => this.hooks!.preToolUse!(name, args),
+      catch: (error) => error instanceof Error ? error : new Error(String(error)),
+    }).pipe(
+      Effect.map((hookResult) => {
+        if (hookResult.action === 'block') {
+          return { action: 'block', errorMessage: hookResult.message ?? 'Blocked by hook' } as const;
+        }
+        if (hookResult.action === 'modify' && hookResult.modifiedArgs) {
+          return { action: 'proceed', effectiveArgs: hookResult.modifiedArgs } as const;
+        }
+        return { action: 'proceed', effectiveArgs: args } as const;
+      })
+    );
   }
 
   /**
    * Apply postToolUse hook, returning the (possibly modified) result.
    */
-  private async applyPostToolUseHook(
+  private applyPostToolUseHook(
     name: string,
     args: Record<string, unknown>,
     toolResult: ToolResult,
-  ): Promise<ToolResult> {
-    if (!this.hooks?.postToolUse) return toolResult;
-    const hookResult = await this.hooks.postToolUse(name, args, toolResult);
-    if (hookResult.action === 'modify' && hookResult.modifiedResult) {
-      return hookResult.modifiedResult;
+  ): Effect.Effect<ToolResult, Error> {
+    if (!this.hooks?.postToolUse) {
+      return Effect.succeed(toolResult);
     }
-    return toolResult;
+    return Effect.tryPromise({
+      try: () => this.hooks!.postToolUse!(name, args, toolResult),
+      catch: (error) => error instanceof Error ? error : new Error(String(error)),
+    }).pipe(
+      Effect.map((hookResult) => {
+        if (hookResult.action === 'modify' && hookResult.modifiedResult) {
+          return hookResult.modifiedResult;
+        }
+        return toolResult;
+      })
+    );
+  }
+
+  private executePreparedToolCall(
+    prepared: {
+      call: { id: string; name: string; arguments: Record<string, unknown> };
+      canonicalName: string;
+      isAgentTool: boolean;
+    },
+    workItem: WorkItem,
+    globalContext: ContextWindow,
+    localContext: ContextWindow,
+    cwd: string,
+    workItemId?: string,
+    signal?: AbortSignal,
+    runControl?: AgentRunParams['runControl']
+  ): Effect.Effect<{
+    call: { id: string; name: string; arguments: Record<string, unknown> };
+    isAgentTool: boolean;
+    toolResult: ToolResult;
+    toolDurationMs: number;
+  }, never> {
+    const toolStartTime = Date.now();
+    return Effect.gen(this, function* () {
+      const { call, canonicalName, isAgentTool } = prepared;
+      const preHook = yield* this.applyPreToolUseHook(canonicalName, call.arguments);
+      if (preHook.action === 'block') {
+        return {
+          call,
+          isAgentTool,
+          toolResult: errorResult(canonicalName, preHook.errorMessage, 0),
+          toolDurationMs: Date.now() - toolStartTime,
+        };
+      }
+
+      const effectiveArgs = preHook.effectiveArgs;
+      this.emit(createEvent('tool_call', {
+        toolName: canonicalName,
+        arguments: effectiveArgs,
+        phase: 'starting',
+      }, workItemId));
+
+      const normalizedCall = { ...call, name: canonicalName, arguments: effectiveArgs };
+      const rawResult = isAgentTool
+        ? yield* this.executeAgentToolCall(
+            normalizedCall,
+            workItem,
+            globalContext,
+            localContext,
+            cwd,
+            signal,
+            runControl
+          )
+        : yield* Effect.tryPromise({
+            try: () => this.toolRegistry.execute(canonicalName, effectiveArgs, {
+              cwd,
+              signal,
+              execution: runControl?.execution,
+              control: runControl?.control,
+            }),
+            catch: (error) => error instanceof Error ? error : new Error(String(error)),
+          });
+      const toolResult = yield* this.applyPostToolUseHook(canonicalName, effectiveArgs, rawResult);
+      return {
+        call,
+        isAgentTool,
+        toolResult,
+        toolDurationMs: Date.now() - toolStartTime,
+      };
+    }).pipe(
+      Effect.catchAll((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        const toolResult = errorResult(prepared.canonicalName, message, 0);
+        toolResult.output = `Error: ${message}`;
+        return Effect.succeed({
+          call: prepared.call,
+          isAgentTool: prepared.isAgentTool,
+          toolResult,
+          toolDurationMs: Date.now() - toolStartTime,
+        });
+      })
+    );
   }
 
   /**
    * Process tool calls.
    */
-  private async processToolCalls(
+  private processToolCalls(
     toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
     globalContext: ContextWindow,
     localContext: ContextWindow,
@@ -1948,216 +2065,231 @@ export class Agent {
     workItemId?: string,
     signal?: AbortSignal,
     runControl?: AgentRunParams['runControl']
-  ): Promise<void> {
-    const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
-    const itemWorkId = workItemId ?? workItem.workId;
-
-    // Build a map from lowercase names to canonical names for case-insensitive lookup
-    const canonicalNames = new Map<string, string>();
-    for (const toolName of this.config.tools) {
-      canonicalNames.set(toolName.toLowerCase(), toolName);
-    }
-    const pendingParallel: Array<{
-      call: { id: string; name: string; arguments: Record<string, unknown> };
-      run: () => Promise<{ toolResult: ToolResult; toolDurationMs: number }>;
-    }> = [];
-
-    const invalidatePath = (pathValue: unknown): void => {
-      if (typeof pathValue !== 'string' || pathValue.length === 0) {
-        return;
-      }
-      result.invalidatedPaths.push(pathValue);
-      localReadFiles.delete(pathValue);
-      localContext.invalidateFileContent(pathValue);
-    };
-
-    const handleToolResult = (
-      call: { id: string; name: string; arguments: Record<string, unknown> },
-      toolResult: ToolResult,
-      toolDurationMs: number,
-      isAgentTool: boolean
-    ): boolean => {
-      if (toolResult.isSuccess) {
-        metrics.toolCallsSucceeded++;
-
-        const nameLower = call.name.toLowerCase();
-        if (nameLower === 'read') {
-          const readPath = call.arguments.path;
-          if (typeof readPath === 'string') {
-            localReadFiles.add(readPath);
-            if (!localContext.hasReadFile(readPath)) {
-              const rawOutput = toolResult.output ?? '';
-              localContext.addFileContent(readPath, truncateToolOutput(rawOutput, call.name), undefined, workItem.workId);
-            }
-          }
-        }
-
-        if (nameLower === 'write' || nameLower === 'edit') {
-          invalidatePath(call.arguments.path);
-        } else if (nameLower === 'batchedit') {
-          const edits = call.arguments.edits;
-          if (Array.isArray(edits)) {
-            for (const edit of edits) {
-              if (!edit || typeof edit !== 'object') continue;
-              const editArgs = edit as Record<string, unknown>;
-              invalidatePath(editArgs.path);
-            }
-          }
-        }
-      } else {
-        metrics.toolCallsFailed++;
-        if (toolResult.error) {
-          result.toolErrors.push(`${call.name}: ${toolResult.error}`);
-        }
-      }
-
-      // For event emission, include error message for failed tools (output is empty in errorResult)
-      const failureMessage = toolResult.isSuccess ? '' : (toolResult.error || 'Unknown error');
-      const eventResultPreview = toolResult.isSuccess
-        ? toolResult.output.slice(0, 10000)
-        : failureMessage.slice(0, 10000);
-      const auditResult = toolResult.isSuccess ? toolResult.output : failureMessage;
-      this.emit(createEvent('tool_call', {
-        toolName: call.name,
-        arguments: call.arguments,
-        phase: 'completed',
-        result: eventResultPreview,
-        success: toolResult.isSuccess,
-        durationMs: toolDurationMs,
-      }, workItemId));
-
-      // Fire tool_call_completed hook for workitem logging (captures full args + full result)
-      this.internalHookQueue.enqueue({
-        type: 'tool_call_completed',
-        tool: call.name,
-        args: call.arguments,
-        success: toolResult.isSuccess,
-        result: auditResult,
-        durationMs: toolDurationMs,
-      }, this.buildHookContext(workItem));
-
-      // Truncate tool outputs at storage to reduce context size
-      // File reads get higher limit (50KB) vs general tools (8KB)
-      // For failed tools, include the error message so the LLM knows what went wrong
-      const rawOutput = toolResult.isSuccess
-        ? toolResult.output
-        : failureMessage;
-
-      localContext.appendItem({
-        type: 'function_call_output',
-        callId: call.id,
-        output: truncateToolOutput(rawOutput, call.name),
-        isError: !toolResult.isSuccess,
-        durationMs: toolDurationMs,
-        timestamp: Date.now(),
-        workItemId: itemWorkId,
-      });
-
-      // Don't propagate sub-agent user input requests
-      if (isAgentTool && result.needsUserInput) {
-        result.needsUserInput = false;
-        result.userPrompt = undefined;
-      }
-
-      return false;
-    };
-
-    const executeToolCall = async (params: {
-      call: { id: string; name: string; arguments: Record<string, unknown> };
+  ): Effect.Effect<void, Error> {
+    type ToolCall = { id: string; name: string; arguments: Record<string, unknown> };
+    type PreparedCall = {
+      call: ToolCall;
       canonicalName: string;
-      effectiveArgs: Record<string, unknown>;
       isAgentTool: boolean;
-    }): Promise<{ toolResult: ToolResult; toolDurationMs: number }> => {
-      const { call, canonicalName, effectiveArgs, isAgentTool } = params;
-      const toolStartTime = Date.now();
-      try {
-        // Use canonical name for execution, but pass original call for agent tools (which need call.id)
-        const normalizedCall = { ...call, name: canonicalName, arguments: effectiveArgs };
-        const rawResult = isAgentTool
-          ? await this.executeAgentToolCall(
-              normalizedCall,
-              workItem,
-              globalContext,
-              localContext,
-              cwd,
-              signal,
-              runControl
-            )
-          : await this.toolRegistry.execute(canonicalName, effectiveArgs, {
-              cwd,
-              signal,
-              execution: runControl?.execution,
-              control: runControl?.control,
-            });
-        const toolResult = await this.applyPostToolUseHook(canonicalName, effectiveArgs, rawResult);
-        return { toolResult, toolDurationMs: Date.now() - toolStartTime };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const toolResult = errorResult(canonicalName, message, 0);
-        toolResult.output = `Error: ${message}`;
-        return { toolResult, toolDurationMs: Date.now() - toolStartTime };
-      }
     };
+    type PlannedStep =
+      | { type: 'parallel'; calls: PreparedCall[] }
+      | { type: 'single'; call: PreparedCall }
+      | { type: 'disallowed'; call: ToolCall }
+      | { type: 'prompt_invalid'; call: ToolCall }
+      | { type: 'prompt'; call: ToolCall; questions: UserPromptQuestion[] };
 
-    const flushParallel = async (): Promise<boolean> => {
-      if (pendingParallel.length === 0) return false;
-      const batch = pendingParallel.splice(0, pendingParallel.length);
-      const results = await Promise.all(batch.map((item) => item.run()));
-      for (let i = 0; i < batch.length; i++) {
-        const { call } = batch[i];
-        const { toolResult, toolDurationMs } = results[i];
-        const shouldStop = handleToolResult(call, toolResult, toolDurationMs, false);
-        if (shouldStop) {
-          return true;
+    return Effect.gen(this, function* () {
+      const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
+      const itemWorkId = workItemId ?? workItem.workId;
+      const canonicalNames = new Map<string, string>();
+      for (const toolName of this.config.tools) {
+        canonicalNames.set(toolName.toLowerCase(), toolName);
+      }
+
+      const invalidatePath = (pathValue: unknown): void => {
+        if (typeof pathValue !== 'string' || pathValue.length === 0) {
+          return;
         }
-      }
-      return false;
-    };
+        result.invalidatedPaths.push(pathValue);
+        localReadFiles.delete(pathValue);
+        localContext.invalidateFileContent(pathValue);
+      };
 
-    for (const call of toolCalls) {
-      const controlDirective = this.resolveControlDirective(signal, runControl);
-      if (this.applyControlDirective(result, controlDirective)) {
-        await flushParallel();
-        return;
-      }
+      const recordToolResult = (
+        call: ToolCall,
+        toolResult: ToolResult,
+        toolDurationMs: number,
+        isAgentTool: boolean
+      ): void => {
+        if (toolResult.isSuccess) {
+          metrics.toolCallsSucceeded++;
 
-      metrics.toolCallsMade++;
-      const nameLower = call.name.toLowerCase();
+          const nameLower = call.name.toLowerCase();
+          if (nameLower === 'read') {
+            const readPath = call.arguments.path;
+            if (typeof readPath === 'string') {
+              localReadFiles.add(readPath);
+              if (!localContext.hasReadFile(readPath)) {
+                const rawOutput = toolResult.output ?? '';
+                localContext.addFileContent(readPath, truncateToolOutput(rawOutput, call.name), undefined, workItem.workId);
+              }
+            }
+          }
 
-      if (this.config.tools.length === 0 || !allowedTools.has(nameLower)) {
-        const shouldStop = await flushParallel();
-        if (shouldStop) return;
+          if (nameLower === 'write' || nameLower === 'edit') {
+            invalidatePath(call.arguments.path);
+          } else if (nameLower === 'batchedit') {
+            const edits = call.arguments.edits;
+            if (Array.isArray(edits)) {
+              for (const edit of edits) {
+                if (!edit || typeof edit !== 'object') continue;
+                const editArgs = edit as Record<string, unknown>;
+                invalidatePath(editArgs.path);
+              }
+            }
+          }
+        } else {
+          metrics.toolCallsFailed++;
+          if (toolResult.error) {
+            result.toolErrors.push(`${call.name}: ${toolResult.error}`);
+          }
+        }
 
-        const errorMsg = `Tool "${call.name}" is not allowed for this agent`;
-        result.toolErrors.push(errorMsg);
+        const failureMessage = toolResult.isSuccess ? '' : (toolResult.error || 'Unknown error');
+        const eventResultPreview = toolResult.isSuccess
+          ? toolResult.output.slice(0, 10000)
+          : failureMessage.slice(0, 10000);
+        const auditResult = toolResult.isSuccess ? toolResult.output : failureMessage;
+        this.emit(createEvent('tool_call', {
+          toolName: call.name,
+          arguments: call.arguments,
+          phase: 'completed',
+          result: eventResultPreview,
+          success: toolResult.isSuccess,
+          durationMs: toolDurationMs,
+        }, workItemId));
+
+        this.internalHookQueue.enqueue({
+          type: 'tool_call_completed',
+          tool: call.name,
+          args: call.arguments,
+          success: toolResult.isSuccess,
+          result: auditResult,
+          durationMs: toolDurationMs,
+        }, this.buildHookContext(workItem));
+
+        const rawOutput = toolResult.isSuccess ? toolResult.output : failureMessage;
+        localContext.appendItem({
+          type: 'function_call_output',
+          callId: call.id,
+          output: truncateToolOutput(rawOutput, call.name),
+          isError: !toolResult.isSuccess,
+          durationMs: toolDurationMs,
+          timestamp: Date.now(),
+          workItemId: itemWorkId,
+        });
+
+        if (isAgentTool && result.needsUserInput) {
+          result.needsUserInput = false;
+          result.userPrompt = undefined;
+        }
+      };
+
+      const recordDisallowed = (call: ToolCall): void => {
+        const message = `Tool "${call.name}" is not allowed for this agent`;
+        result.toolErrors.push(message);
         metrics.toolCallsFailed++;
         localContext.appendItem({
           type: 'function_call_output',
           callId: call.id,
-          output: errorMsg,
+          output: message,
           isError: true,
           timestamp: Date.now(),
           workItemId: itemWorkId,
         });
-        continue;
+      };
+
+      const plannedSteps: PlannedStep[] = [];
+      let parallelBuffer: PreparedCall[] = [];
+      const flushParallelBuffer = (): void => {
+        if (parallelBuffer.length === 0) return;
+        plannedSteps.push({ type: 'parallel', calls: parallelBuffer });
+        parallelBuffer = [];
+      };
+
+      for (const call of toolCalls) {
+        const controlDirective = this.resolveControlDirective(signal, runControl);
+        if (this.applyControlDirective(result, controlDirective)) {
+          flushParallelBuffer();
+          break;
+        }
+
+        metrics.toolCallsMade++;
+        const nameLower = call.name.toLowerCase();
+
+        if (this.config.tools.length === 0 || !allowedTools.has(nameLower)) {
+          flushParallelBuffer();
+          plannedSteps.push({ type: 'disallowed', call });
+          continue;
+        }
+
+        const canonicalName = canonicalNames.get(nameLower) ?? call.name;
+        const isAgentTool = this.agentRegistry?.has(canonicalName) ?? false;
+
+        if (nameLower === 'promptuser') {
+          flushParallelBuffer();
+          const args = call.arguments;
+          const questions = Array.isArray(args.questions)
+            ? args.questions.filter((q): q is UserPromptQuestion =>
+                !!q && typeof q === 'object' && typeof (q as Record<string, unknown>).question === 'string'
+              )
+            : [];
+          if (questions.length === 0) {
+            plannedSteps.push({ type: 'prompt_invalid', call });
+            continue;
+          }
+          plannedSteps.push({ type: 'prompt', call, questions });
+          break;
+        }
+
+        const prepared: PreparedCall = { call, canonicalName, isAgentTool };
+        if (!isAgentTool && this.toolRegistry.isParallelSafe(canonicalName)) {
+          parallelBuffer.push(prepared);
+          continue;
+        }
+
+        flushParallelBuffer();
+        plannedSteps.push({ type: 'single', call: prepared });
       }
+      flushParallelBuffer();
 
-      // Normalize tool name to canonical form for case-insensitive lookup
-      const canonicalName = canonicalNames.get(nameLower) ?? call.name;
+      for (const step of plannedSteps) {
+        if (step.type === 'parallel') {
+          const executions = yield* Effect.forEach(
+            step.calls,
+            (prepared) => this.executePreparedToolCall(
+              prepared,
+              workItem,
+              globalContext,
+              localContext,
+              cwd,
+              workItemId,
+              signal,
+              runControl
+            ),
+            { concurrency: 'unbounded' }
+          );
+          for (const execution of executions) {
+            recordToolResult(execution.call, execution.toolResult, execution.toolDurationMs, execution.isAgentTool);
+          }
+          continue;
+        }
 
-      // Intercept PromptUser tool - signal pause for user input
-      if (nameLower === 'promptuser') {
-        await flushParallel();
-        const args = call.arguments;
-        const questions = Array.isArray(args.questions)
-          ? args.questions.filter((q): q is UserPromptQuestion =>
-              !!q && typeof q === 'object' && typeof (q as Record<string, unknown>).question === 'string'
-            )
-          : [];
-        if (questions.length === 0) {
+        if (step.type === 'single') {
+          const execution = yield* this.executePreparedToolCall(
+            step.call,
+            workItem,
+            globalContext,
+            localContext,
+            cwd,
+            workItemId,
+            signal,
+            runControl
+          );
+          recordToolResult(execution.call, execution.toolResult, execution.toolDurationMs, execution.isAgentTool);
+          continue;
+        }
+
+        if (step.type === 'disallowed') {
+          recordDisallowed(step.call);
+          continue;
+        }
+
+        if (step.type === 'prompt_invalid') {
           localContext.appendItem({
             type: 'function_call_output',
-            callId: call.id,
+            callId: step.call.id,
             output: 'PromptUser requires a non-empty questions array',
             isError: true,
             timestamp: Date.now(),
@@ -2166,89 +2298,20 @@ export class Agent {
           continue;
         }
 
-        // Build UserPromptInfo from validated args
         result.needsUserInput = true;
-        result.userPrompt = {
-          questions,
-        };
+        result.userPrompt = { questions: step.questions };
         result.terminationReason = 'user_input_required';
-
         localContext.appendItem({
           type: 'function_call_output',
-          callId: call.id,
+          callId: step.call.id,
           output: 'Waiting for user input...',
           isError: false,
           timestamp: Date.now(),
           workItemId: itemWorkId,
         });
-
         return;
       }
-
-      const isAgentTool = this.agentRegistry?.has(canonicalName) ?? false;
-      const isParallelSafe = !isAgentTool && this.toolRegistry.isParallelSafe(canonicalName);
-
-      if (isParallelSafe) {
-        const preHook = await this.applyPreToolUseHook(canonicalName, call.arguments);
-        if (preHook.action === 'block') {
-          const toolResult = errorResult(canonicalName, preHook.errorMessage, 0);
-          const stop = handleToolResult(call, toolResult, 0, false);
-          if (stop) return;
-          continue;
-        }
-        const effectiveArgs = preHook.effectiveArgs;
-
-        this.emit(createEvent('tool_call', {
-          toolName: canonicalName,
-          arguments: effectiveArgs,
-          phase: 'starting',
-        }, workItemId));
-
-        const capturedArgs = effectiveArgs;
-        const capturedCanonicalName = canonicalName;
-        const capturedCall = call;
-        const run = () =>
-          executeToolCall({
-            call: capturedCall,
-            canonicalName: capturedCanonicalName,
-            effectiveArgs: capturedArgs,
-            isAgentTool: false,
-          });
-
-        pendingParallel.push({ call, run });
-        continue;
-      }
-
-      const shouldStop = await flushParallel();
-      if (shouldStop) return;
-
-      const seqPreHook = await this.applyPreToolUseHook(canonicalName, call.arguments);
-      if (seqPreHook.action === 'block') {
-        const toolResult = errorResult(canonicalName, seqPreHook.errorMessage, 0);
-        const stop = handleToolResult(call, toolResult, 0, isAgentTool);
-        if (stop) return;
-        continue;
-      }
-      const effectiveArgs = seqPreHook.effectiveArgs;
-
-      this.emit(createEvent('tool_call', {
-        toolName: canonicalName,
-        arguments: effectiveArgs,
-        phase: 'starting',
-      }, workItemId));
-
-      const { toolResult, toolDurationMs } = await executeToolCall({
-        call,
-        canonicalName,
-        effectiveArgs,
-        isAgentTool,
-      });
-      const stop = handleToolResult(call, toolResult, toolDurationMs, isAgentTool);
-      if (stop) return;
-    }
-
-    const shouldStop = await flushParallel();
-    if (shouldStop) return;
+    });
   }
 
   /**
@@ -2369,7 +2432,7 @@ export class Agent {
     }
   }
 
-  private async executeAgentToolCall(
+  private executeAgentToolCall(
     call: { id: string; name: string; arguments: Record<string, unknown> },
     parentWorkItem: WorkItem,
     globalContext: ContextWindow,
@@ -2377,119 +2440,119 @@ export class Agent {
     cwd: string,
     signal?: AbortSignal,
     runControl?: AgentRunParams['runControl']
-  ) {
-    if (!this.agentRegistry) {
-      return errorResult(call.name, 'Agent tool registry not available', 0);
-    }
-
-    // Prevent recursive self-calls
-    if (call.name.toLowerCase() === this.config.type.toLowerCase()) {
-      return errorResult(call.name, `Agent '${this.config.type}' cannot call itself`, 0);
-    }
-
-    let agentConfig: AgentConfig;
-    let llmConfig: LLMRequestConfig;
-    try {
-      // Get agent capabilities (tools, budget, llmParams) from registry
-      agentConfig = this.agentRegistry.getConfig(call.name);
-
-      // Build LLM config from model selection (source of truth) + agent's llmParams
-      // NO FALLBACK: model selection MUST exist
-      const modelSelection = this.getModelSelection?.(agentConfig.type);
-      if (!modelSelection) {
-        return errorResult(
-          call.name,
-          `No model configured for agent type '${agentConfig.type}'. Please select a model using /models before using this agent.`,
-          0
-        );
+  ): Effect.Effect<ToolResult, never> {
+    return Effect.gen(this, function* () {
+      if (!this.agentRegistry) {
+        return errorResult(call.name, 'Agent tool registry not available', 0);
       }
-      llmConfig = buildLLMRequestConfig(modelSelection, agentConfig.llmParams);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return errorResult(call.name, message, 0);
-    }
 
-    const args = call.arguments ?? {};
-    const objective = typeof args.objective === 'string' ? args.objective.trim() : '';
-    if (!objective) {
-      return errorResult(call.name, 'Missing required argument: objective', 0);
-    }
+      // Prevent recursive self-calls
+      if (call.name.toLowerCase() === this.config.type.toLowerCase()) {
+        return errorResult(call.name, `Agent '${this.config.type}' cannot call itself`, 0);
+      }
 
-    const goal =
-      typeof args.goal === 'string' && args.goal.trim().length > 0
-        ? args.goal.trim()
-        : parentWorkItem.goal;
-    const delta = typeof args.delta === 'string' ? args.delta : undefined;
-    const toolHint = typeof args.toolHint === 'string'
-      ? String(args.toolHint)
-      : undefined;
-    const rawTargetPaths = args.targetPaths;
-    const targetPaths = Array.isArray(rawTargetPaths)
-      ? rawTargetPaths.filter((p) => typeof p === 'string')
-      : undefined;
-    const params =
-      args.params && typeof args.params === 'object' && !Array.isArray(args.params)
-        ? (args.params as Record<string, unknown>)
+      let agentConfig: AgentConfig;
+      let llmConfig: LLMRequestConfig;
+      try {
+        agentConfig = this.agentRegistry.getConfig(call.name);
+
+        const modelSelection = this.getModelSelection?.(agentConfig.type);
+        if (!modelSelection) {
+          return errorResult(
+            call.name,
+            `No model configured for agent type '${agentConfig.type}'. Please select a model using /models before using this agent.`,
+            0
+          );
+        }
+        llmConfig = buildLLMRequestConfig(modelSelection, agentConfig.llmParams);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return errorResult(call.name, message, 0);
+      }
+
+      const args = call.arguments ?? {};
+      const objective = typeof args.objective === 'string' ? args.objective.trim() : '';
+      if (!objective) {
+        return errorResult(call.name, 'Missing required argument: objective', 0);
+      }
+
+      const goal =
+        typeof args.goal === 'string' && args.goal.trim().length > 0
+          ? args.goal.trim()
+          : parentWorkItem.goal;
+      const delta = typeof args.delta === 'string' ? args.delta : undefined;
+      const toolHint = typeof args.toolHint === 'string'
+        ? String(args.toolHint)
         : undefined;
+      const rawTargetPaths = args.targetPaths;
+      const targetPaths = Array.isArray(rawTargetPaths)
+        ? rawTargetPaths.filter((p) => typeof p === 'string')
+        : undefined;
+      const params =
+        args.params && typeof args.params === 'object' && !Array.isArray(args.params)
+          ? (args.params as Record<string, unknown>)
+          : undefined;
 
-    const subWorkItem = createWorkItem({
-      goal,
-      objective,
-      delta,
-      toolHint,
-      targetPaths: targetPaths && targetPaths.length > 0 ? targetPaths : undefined,
-      params,
-      agent: agentConfig.type,
-      // Use agent's configured budget as work item bounds
-      bounds: {
-        maxToolCalls: agentConfig.budget.maxToolCalls,
-        maxDurationMs: agentConfig.budget.maxDurationMs,
-        maxLlmCalls: agentConfig.budget.maxIterations,
-      },
-    });
+      const subWorkItem = createWorkItem({
+        goal,
+        objective,
+        delta,
+        toolHint,
+        targetPaths: targetPaths && targetPaths.length > 0 ? targetPaths : undefined,
+        params,
+        agent: agentConfig.type,
+        bounds: {
+          maxToolCalls: agentConfig.budget.maxToolCalls,
+          maxDurationMs: agentConfig.budget.maxDurationMs,
+          maxLlmCalls: agentConfig.budget.maxIterations,
+        },
+      });
 
-    const agent = new Agent(agentConfig, {
-      llm: this.llm,
-      toolRegistry: this.toolRegistry,
-      emit: this.emit,
-      requestId: this.requestId,
-      sessionKey: this.sessionKey,
-      agentRegistry: this.agentRegistry,
-      llmConfig,
-      hooks: this.hooks,
-      internalHookQueue: this.internalHookQueue,
-      getModelSelection: this.getModelSelection,
-    });
+      const agent = new Agent(agentConfig, {
+        llm: this.llm,
+        toolRegistry: this.toolRegistry,
+        emit: this.emit,
+        requestId: this.requestId,
+        sessionKey: this.sessionKey,
+        agentRegistry: this.agentRegistry,
+        llmConfig,
+        hooks: this.hooks,
+        internalHookQueue: this.internalHookQueue,
+        getModelSelection: this.getModelSelection,
+      });
 
-    // Create merged context for sub-agent: combines global context with parent's discoveries
-    // This enables sub-agents to see artifacts and file content from parent without re-discovery
-    const mergedContextForSubAgent = this.createMergedContext(
-      globalContext,
-      parentLocalContext,
-      {
-        includeArtifacts: true,
-        includeFileContent: true,
-      }
-    );
+      const mergedContextForSubAgent = this.createMergedContext(
+        globalContext,
+        parentLocalContext,
+        { includeArtifacts: true, includeFileContent: true }
+      );
 
-    const subResult = await Effect.runPromise(
-      agent.run({
+      const subResult = yield* agent.run({
         globalContext: mergedContextForSubAgent,
         workItem: subWorkItem,
         cwd,
         signal,
         runControl,
-      })
-    );
+      });
 
-    // Track post-processing errors separately - we want to preserve sub-agent results
-    // even if artifact extraction or merging fails
+      return this.buildSubAgentToolResult(call, subWorkItem, agentConfig, subResult, parentLocalContext);
+    });
+  }
+
+  /**
+   * Build ToolResult from sub-agent execution, handling post-processing and validation.
+   */
+  private buildSubAgentToolResult(
+    call: { id: string; name: string },
+    subWorkItem: WorkItem,
+    agentConfig: AgentConfig,
+    subResult: AgentResult,
+    parentLocalContext: ContextWindow
+  ): ToolResult {
     let postProcessingError: string | null = null;
 
-    // Extract key findings from sub-agent's tool outputs to include in response
     let enhancedResponse = subResult.response;
     if (!enhancedResponse && subResult.localContext) {
-      // If no response but we have tool outputs, try to extract useful info
       const toolOutputs = subResult.localContext.getItemsByType('function_call_output') as Array<{
         output: string;
         isError?: boolean;
@@ -2502,15 +2565,12 @@ export class Agent {
       }>;
 
       if (toolOutputs.length > 0) {
-        // Build a summary of what was found
         const successfulOutputs = toolOutputs.filter(o => !o.isError && o.output);
         const errorOutputs = toolOutputs.filter(o => o.isError && o.output);
         const outputSummaries: string[] = [];
 
-        // First include successful outputs
         for (let i = 0; i < Math.min(successfulOutputs.length, 5); i++) {
           const output = successfulOutputs[i];
-          // Find the corresponding tool call to know what tool was used
           const matchingCall = toolCalls.find(tc => tc.callId === output.callId);
           const toolName = matchingCall?.name ?? 'unknown';
           const truncatedOutput = output.output.length > 2000
@@ -2519,7 +2579,6 @@ export class Agent {
           outputSummaries.push(`[${toolName}]: ${truncatedOutput}`);
         }
 
-        // If no successful outputs, include error outputs so parent knows what went wrong
         if (successfulOutputs.length === 0 && errorOutputs.length > 0) {
           for (let i = 0; i < Math.min(errorOutputs.length, 5); i++) {
             const output = errorOutputs[i];
@@ -2543,8 +2602,6 @@ export class Agent {
       }
     }
 
-    // Extract artifacts from structured output and add to parent's local context
-    // Wrapped in try-catch to preserve sub-agent results even if merging fails
     const artifacts = subResult.structuredOutput?.artifacts;
     let extractedArtifacts: RawArtifact[] = [];
 
@@ -2553,7 +2610,6 @@ export class Agent {
         extractedArtifacts.push(...artifacts.filter(isValidRawArtifact));
       }
 
-      // FALLBACK: If structured output parsing failed, extract directly from sub-agent's local context.
       if (extractedArtifacts.length === 0 && subResult.localContext) {
         const contextArtifacts = subResult.localContext.getArtifacts();
         if (contextArtifacts.length > 0) {
@@ -2571,25 +2627,14 @@ export class Agent {
         ), subWorkItem.workId);
       }
 
-      // Merge sub-agent's discoveries back into parent's local context
-      // This includes file reads, artifacts, and file content not captured above
       this.mergeSubAgentResults(parentLocalContext, subResult);
     } catch (mergeError) {
-      // Log but don't fail - the sub-agent's response is more important than artifact merging
       const message = mergeError instanceof Error ? mergeError.message : String(mergeError);
       const stack = mergeError instanceof Error ? mergeError.stack : undefined;
       postProcessingError = `Artifact extraction/merging failed: ${message}`;
       console.error(`[AGENT] Sub-agent post-processing error: ${message}`, stack ?? '');
     }
 
-    // Include full structured output so calling agent can see artifacts, patterns, etc.
-    // Also include explicit filesRead so calling agent knows not to re-read these
-    //
-    // CRITICAL: Include actual artifact content, not just count. The calling agent
-    // needs to see the rich semantic extractions (signatures, side effects, call graphs)
-    // to act without re-reading files.
-    // Explorer validation mirror for sub-agent calls.
-    // Keep strict behavior except for bounds exits where partial output is acceptable.
     const filesReadCount = (subResult.filesRead ?? []).length;
     const artifactCount = extractedArtifacts.length;
     let explorerValidationFailed = false;
@@ -2609,8 +2654,6 @@ export class Agent {
       }
     }
 
-    // Sub-agents with structured output stream their response field directly to TUI
-    // Mark this so parent knows not to repeat the content
     const responseStreamedToUser = !!agentConfig.outputSchema && !!enhancedResponse;
 
     const payload = {
@@ -2618,16 +2661,15 @@ export class Agent {
       workId: subWorkItem.workId,
       success: explorerValidationFailed ? false : subResult.success,
       response: enhancedResponse,
-      responseStreamedToUser, // True if response was already shown to user via streaming
-      filesRead: subResult.filesRead ?? [], // Explicit list - do not re-read these
-      artifacts: Array.isArray(artifacts) ? artifacts : [], // Full artifact content for downstream use
+      responseStreamedToUser,
+      filesRead: subResult.filesRead ?? [],
+      artifacts: Array.isArray(artifacts) ? artifacts : [],
       error: explorerValidationFailed ? explorerValidationError : subResult.error,
-      postProcessingError, // Non-null if artifact merging failed
+      postProcessingError,
       metrics: subResult.metrics,
     };
 
     if ((subResult.success && !explorerValidationFailed) || subResult.needsUserInput) {
-      // Even on success, include any post-processing errors in the result
       if (postProcessingError) {
         (payload as Record<string, unknown>).warning = postProcessingError;
       }
@@ -2695,38 +2737,41 @@ export class Agent {
     signal?: AbortSignal,
     runControl?: AgentRunParams['runControl']
   ): Effect.Effect<void> {
-    return Effect.promise(async () => {
-    const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
-    if (!allowedTools.has('read')) {
-      return;
-    }
+    return Effect.gen(this, function* () {
+      const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
+      if (!allowedTools.has('read')) {
+        return;
+      }
 
-    for (const targetPath of targetPaths) {
-      try {
+      for (const targetPath of targetPaths) {
         metrics.toolCallsMade++;
-        const result = await this.toolRegistry.execute('Read', { path: targetPath }, {
-          cwd,
-          signal,
-          execution: runControl?.execution,
-          control: runControl?.control,
-        });
-        if (result.isSuccess) {
+        const readResult = yield* Effect.tryPromise({
+          try: () => this.toolRegistry.execute('Read', { path: targetPath }, {
+            cwd,
+            signal,
+            execution: runControl?.execution,
+            control: runControl?.control,
+          }),
+          catch: (error) => error instanceof Error ? error : new Error(String(error)),
+        }).pipe(Effect.catchAll(() => Effect.succeed<ToolResult | null>(null)));
+        if (readResult === null) {
+          metrics.toolCallsFailed++;
+          continue;
+        }
+        if (readResult.isSuccess) {
           localReadFiles.add(targetPath);
           metrics.toolCallsSucceeded++;
 
-          const fileContent = typeof result.output === 'string'
-            ? result.output
-            : JSON.stringify(result.output);
+          const fileContent = typeof readResult.output === 'string'
+            ? readResult.output
+            : JSON.stringify(readResult.output);
 
           // Truncate file content at context storage (50KB limit for reads)
           localContext.addFileContent(targetPath, truncateToolOutput(fileContent, 'Read'), undefined, workItemId);
         } else {
           metrics.toolCallsFailed++;
         }
-      } catch {
-        metrics.toolCallsFailed++;
       }
-    }
     });
   }
 

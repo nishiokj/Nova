@@ -26,7 +26,7 @@ export interface OrchestratorRunParams {
   agentType: string;
   cwd: string;
   runtime?: OrchestratorRuntime;
-  executionRuntime?: ManagedRuntime.ManagedRuntime<never, never>;
+  executionRuntime: ManagedRuntime.ManagedRuntime<never, never>;
 }
 
 export interface OrchestratorRunner {
@@ -54,8 +54,6 @@ export class DefaultOrchestratorRunner implements OrchestratorRunner {
       params.cwd,
       params.runtime
     ) as Effect.Effect<OrchestratorResult, never>;
-    return params.executionRuntime
-      ? params.executionRuntime.runPromise(executeEffect)
-      : Effect.runPromise(executeEffect);
+    return params.executionRuntime.runPromise(executeEffect);
   }
 }

@@ -26,6 +26,7 @@ import {
   REX_TO_CODEX,
   formatToolForOpenAI,
   translateCodexArgsToRex,
+  translateRexArgsToCodex,
 } from './tool_skins.js';
 
 function parseApiError(provider: string, status: number, responseText: string): Error {
@@ -679,6 +680,12 @@ export class OpenAIProvider implements LLMProviderAdapter {
           if (typeof argsObj.input === 'string') {
             args = argsObj.input;
           }
+        }
+
+        // Translate Rex args → Codex args so the model sees its native param names
+        // in conversation history (e.g. path → file_path for read_file)
+        if (REX_TO_CODEX[rexName] && typeof args === 'object' && args !== null) {
+          args = translateRexArgsToCodex(rexName, args as Record<string, unknown>);
         }
 
         input.push({

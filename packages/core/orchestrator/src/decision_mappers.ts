@@ -9,7 +9,7 @@ import type {
   QualityGateDecision,
   BoundsDecision,
   PromptAnswerDecision,
-  CadenceDecision,
+
   AgentErrorDecision,
   WorkItemCompletedDecision,
   StopHookResult,
@@ -93,32 +93,6 @@ export function mapPromptDecisionToStopResult(decision: PromptAnswerDecision): S
     case 'escalate':
     case 'defer':
       return { decision: 'allow' };
-    default:
-      return assertNever(decision);
-  }
-}
-
-/**
- * Map cadence audit decision to stop result.
- */
-export function mapCadenceDecisionToStopResult(decision: CadenceDecision): StopHookResult {
-  switch (decision.action) {
-    case 'continue':
-      return { decision: 'allow' };
-    case 'inject_guidance':
-      return { decision: 'allow', systemMessage: decision.message };
-    case 'realign':
-      return { decision: 'block', reason: decision.guidance };
-    case 'split':
-      return { decision: 'allow', deferredWork: mapWorkItemsToDeferredWork(decision.workItems) };
-    case 'stop_work_item':
-      return {
-        decision: 'allow',
-        systemMessage: decision.reason,
-        terminationReason: 'observer_work_item_stopped',
-      };
-    case 'stop':
-      return { decision: 'allow', systemMessage: decision.reason, terminationReason: 'observer_stopped' };
     default:
       return assertNever(decision);
   }
