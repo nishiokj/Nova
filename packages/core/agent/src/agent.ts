@@ -1905,14 +1905,7 @@ export class Agent {
         context.addMessage('assistant', content, workItemId);
       }
       for (const tc of toolCalls) {
-        context.appendItem({
-          type: 'function_call',
-          callId: tc.id,
-          name: tc.name,
-          arguments: tc.arguments,
-          timestamp: Date.now(),
-          workItemId,
-        });
+        context.addFunctionCall(tc.id, tc.name, tc.arguments, workItemId);
       }
     } else {
       context.addMessage('assistant', content, workItemId);
@@ -2102,10 +2095,11 @@ export class Agent {
         toolDurationMs: number,
         isAgentTool: boolean
       ): void => {
+        const nameLower = call.name.toLowerCase();
+        let addedFileContent = false;
         if (toolResult.isSuccess) {
           metrics.toolCallsSucceeded++;
 
-          const nameLower = call.name.toLowerCase();
           if (nameLower === 'read') {
             const readPath = call.arguments.path;
             if (typeof readPath === 'string') {
@@ -2113,6 +2107,7 @@ export class Agent {
               if (!localContext.hasReadFile(readPath)) {
                 const rawOutput = toolResult.output ?? '';
                 localContext.addFileContent(readPath, truncateToolOutput(rawOutput, call.name), undefined, workItem.workId);
+                addedFileContent = true;
               }
             }
           }
@@ -2160,15 +2155,11 @@ export class Agent {
         }, this.buildHookContext(workItem));
 
         const rawOutput = toolResult.isSuccess ? toolResult.output : failureMessage;
-        localContext.appendItem({
-          type: 'function_call_output',
-          callId: call.id,
-          output: truncateToolOutput(rawOutput, call.name),
-          isError: !toolResult.isSuccess,
-          durationMs: toolDurationMs,
-          timestamp: Date.now(),
-          workItemId: itemWorkId,
-        });
+        const isReadWithFileContent = nameLower === 'read' && addedFileContent;
+        const outputForContext = isReadWithFileContent
+          ? `[file content stored in context: ${call.arguments.path}]`
+          : truncateToolOutput(rawOutput, call.name);
+        localContext.addFunctionCallOutput(call.id, outputForContext, !toolResult.isSuccess, toolDurationMs, itemWorkId);
 
         if (isAgentTool && result.needsUserInput) {
           result.needsUserInput = false;
@@ -2180,14 +2171,7 @@ export class Agent {
         const message = `Tool "${call.name}" is not allowed for this agent`;
         result.toolErrors.push(message);
         metrics.toolCallsFailed++;
-        localContext.appendItem({
-          type: 'function_call_output',
-          callId: call.id,
-          output: message,
-          isError: true,
-          timestamp: Date.now(),
-          workItemId: itemWorkId,
-        });
+        localContext.addFunctionCallOutput(call.id, message, true, undefined, itemWorkId);
       };
 
       const plannedSteps: PlannedStep[] = [];
@@ -2287,28 +2271,14 @@ export class Agent {
         }
 
         if (step.type === 'prompt_invalid') {
-          localContext.appendItem({
-            type: 'function_call_output',
-            callId: step.call.id,
-            output: 'PromptUser requires a non-empty questions array',
-            isError: true,
-            timestamp: Date.now(),
-            workItemId: itemWorkId,
-          });
+          localContext.addFunctionCallOutput(step.call.id, 'PromptUser requires a non-empty questions array', true, undefined, itemWorkId);
           continue;
         }
 
         result.needsUserInput = true;
         result.userPrompt = { questions: step.questions };
         result.terminationReason = 'user_input_required';
-        localContext.appendItem({
-          type: 'function_call_output',
-          callId: step.call.id,
-          output: 'Waiting for user input...',
-          isError: false,
-          timestamp: Date.now(),
-          workItemId: itemWorkId,
-        });
+        localContext.addFunctionCallOutput(step.call.id, 'Waiting for user input...', false, undefined, itemWorkId);
         return;
       }
     });

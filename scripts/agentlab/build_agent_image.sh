@@ -70,7 +70,7 @@ FROM ${BASE_IMAGE}
 WORKDIR /opt/rex
 
 RUN apt-get update \\
-  && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \\
+  && apt-get install -y --no-install-recommends python3 make g++ ca-certificates git \\
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json bun.lock tsconfig.base.json ./

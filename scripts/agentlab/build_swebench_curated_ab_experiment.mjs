@@ -363,7 +363,7 @@ async function main() {
       '--session-key',
       '${AGENTLAB_TRIAL_ID}',
       '--working-dir',
-      '/agentlab/workspace',
+      '/agentlab/workspace/repo',
       '--dangerous',
     ])
     .useBuiltinAdapter()
