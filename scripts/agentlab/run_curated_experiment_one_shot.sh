@@ -51,8 +51,22 @@ if [[ ! -x "$AGENTLAB_SWEBENCH_PYTHON" ]]; then
   bash "$SCRIPTS_DIR/setup_swebench_evaluator.sh"
 fi
 
-if [[ ! -x "$AGENTLAB_SWEBENCH_PYTHON" ]]; then
-  echo "evaluator python not executable after setup: $AGENTLAB_SWEBENCH_PYTHON" >&2
+swebench_import_ok() {
+  "$AGENTLAB_SWEBENCH_PYTHON" -c "import swebench" >/dev/null 2>&1
+}
+
+if [[ ! -x "$AGENTLAB_SWEBENCH_PYTHON" || ! swebench_import_ok ]]; then
+  if [[ "$AUTO_SETUP" != "1" ]]; then
+    echo "SWE-bench evaluator is not ready at: $AGENTLAB_SWEBENCH_PYTHON" >&2
+    echo "run: bash scripts/agentlab/setup_swebench_evaluator.sh" >&2
+    exit 1
+  fi
+  bash "$SCRIPTS_DIR/setup_swebench_evaluator.sh"
+fi
+
+if [[ ! -x "$AGENTLAB_SWEBENCH_PYTHON" || ! swebench_import_ok ]]; then
+  echo "SWE-bench evaluator import failed for: $AGENTLAB_SWEBENCH_PYTHON" >&2
+  "$AGENTLAB_SWEBENCH_PYTHON" -c "import swebench" 2>&1 || true
   exit 1
 fi
 

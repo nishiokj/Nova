@@ -12,6 +12,9 @@ MATERIALIZE="${AGENTLAB_MATERIALIZE:-full}"
 BUILD_EXPERIMENT="${AGENTLAB_BUILD_EXPERIMENT:-1}"
 EXPERIMENT_LIMIT="${AGENTLAB_LIMIT:-}"
 PROGRESS_INTERVAL_SEC="${AGENTLAB_PROGRESS_INTERVAL_SEC:-15}"
+RUN_MODE="${AGENTLAB_RUN_MODE:-run_dev}"
+SETUP_CMD_DEFAULT="/bin/bash /opt/rex/scripts/agentlab/setup_swebench_trial_workspace.sh"
+SETUP_CMD="${AGENTLAB_SETUP_COMMAND:-$SETUP_CMD_DEFAULT}"
 
 usage() {
   cat <<USAGE
@@ -33,6 +36,8 @@ Environment overrides:
   AGENTLAB_BUILD_EXPERIMENT 1 to rebuild experiment before run (default), 0 to skip.
   AGENTLAB_LIMIT            If rebuild is enabled, pass --limit to the builder.
   AGENTLAB_PROGRESS_INTERVAL_SEC Seconds between progress updates (default: 15).
+  AGENTLAB_RUN_MODE         run_dev (default, enables setup command) | run
+  AGENTLAB_SETUP_COMMAND    Setup command passed to lab-cli run-dev --setup.
 USAGE
 }
 
@@ -57,6 +62,11 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ "$RUN_MODE" != "run_dev" && "$RUN_MODE" != "run" ]]; then
+  echo "invalid AGENTLAB_RUN_MODE: $RUN_MODE (expected run_dev or run)" >&2
+  exit 1
+fi
+
 if [[ ! -f "$EXPERIMENT_PATH" ]]; then
   echo "experiment file not found: $EXPERIMENT_PATH" >&2
   exit 1
@@ -66,6 +76,14 @@ if ! docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
   echo "docker image not found: $IMAGE_TAG" >&2
   echo "build it first: bash scripts/agentlab/build_agent_image.sh --tag $IMAGE_TAG" >&2
   exit 1
+fi
+
+if [[ "$RUN_MODE" == "run_dev" && "$SETUP_CMD" == "$SETUP_CMD_DEFAULT" ]]; then
+  if ! docker run --rm --entrypoint /bin/sh "$IMAGE_TAG" -lc "test -x /opt/rex/scripts/agentlab/setup_swebench_trial_workspace.sh"; then
+    echo "image $IMAGE_TAG does not contain setup_swebench_trial_workspace.sh" >&2
+    echo "rebuild image: bash scripts/agentlab/build_agent_image.sh --tag $IMAGE_TAG" >&2
+    exit 1
+  fi
 fi
 
 if [[ "$BUILD_EXPERIMENT" == "1" ]]; then
@@ -218,15 +236,19 @@ TAIL_PID=$!
 
 (
   cd "$ROOT_DIR"
-  if [[ "$RUN_CMD_MODE" == "positional" ]]; then
-    "$RUNNER_BIN" run "$EXPERIMENT_REL" \
-      --executor "$EXECUTOR" \
-      --materialize "$MATERIALIZE"
+  if [[ "$RUN_MODE" == "run_dev" ]]; then
+    "$RUNNER_BIN" run-dev "$EXPERIMENT_REL" --setup "$SETUP_CMD"
   else
-    "$RUNNER_BIN" run \
-      --experiment "$EXPERIMENT_REL" \
-      --executor "$EXECUTOR" \
-      --materialize "$MATERIALIZE"
+    if [[ "$RUN_CMD_MODE" == "positional" ]]; then
+      "$RUNNER_BIN" run "$EXPERIMENT_REL" \
+        --executor "$EXECUTOR" \
+        --materialize "$MATERIALIZE"
+    else
+      "$RUNNER_BIN" run \
+        --experiment "$EXPERIMENT_REL" \
+        --executor "$EXECUTOR" \
+        --materialize "$MATERIALIZE"
+    fi
   fi
 ) >"$RUN_OUTPUT_LOG" 2>&1 &
 RUN_PID=$!
