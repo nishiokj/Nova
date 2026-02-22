@@ -16,6 +16,9 @@ export const BENCHMARK_PROFILES = {
       schemaVersion: 'task_boundary_v1',
       splitId: 'test',
     },
+    evaluator: {
+      datasetName: 'princeton-nlp/SWE-bench_Lite',
+    },
   },
 };
 

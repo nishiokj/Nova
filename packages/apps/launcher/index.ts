@@ -10,7 +10,7 @@
 
 import { spawn, type Subprocess } from 'bun';
 import { createConnection } from 'net';
-import { mkdirSync, existsSync, writeFileSync } from 'fs';
+import { mkdirSync, existsSync, writeFileSync, statSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
@@ -53,6 +53,11 @@ const getDaemonPath = () => {
   const distPath = path.join(root, 'packages', 'infra', 'harness-daemon', 'dist', 'index.js');
   const srcPath = path.join(root, 'packages', 'infra', 'harness-daemon', 'src', 'index.ts');
   return existsSync(distPath) ? distPath : srcPath;
+};
+
+const getHarnessCliPath = () => {
+  const root = getProjectRoot();
+  return path.join(root, 'packages', 'infra', 'harness-daemon', 'bin', 'rex.js');
 };
 
 const getTuiPath = () => {
@@ -115,6 +120,14 @@ const resolveConfigPath = (): string | undefined => {
   return projectConfig ?? undefined;
 };
 
+const resolveHeadlessConfigPath = (): string | undefined => {
+  if (process.env.HARNESS_CONFIG_PATH) {
+    return process.env.HARNESS_CONFIG_PATH;
+  }
+  const projectConfig = findProjectConfigPath(process.cwd());
+  return projectConfig ?? undefined;
+};
+
 /**
  * Check if daemon is running by attempting a TCP connection
  */
@@ -140,6 +153,83 @@ async function isPortRunning(host: string, port: number): Promise<boolean> {
 
 async function isDaemonRunning(): Promise<boolean> {
   return isPortRunning(DAEMON_HOST, DAEMON_PORT);
+}
+
+function isExistingFile(targetPath: string): boolean {
+  try {
+    return statSync(targetPath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+async function runHarnessCli(rawArgs: string[]): Promise<number> {
+  const harnessCliPath = getHarnessCliPath();
+  if (!existsSync(harnessCliPath)) {
+    throw new Error(`harness CLI not found: ${harnessCliPath}`);
+  }
+
+  const configPath = resolveHeadlessConfigPath();
+  const proc = spawn({
+    cmd: ['bun', harnessCliPath, ...rawArgs],
+    cwd: getProjectRoot(),
+    env: {
+      ...process.env,
+      ...(configPath ? { HARNESS_CONFIG_PATH: configPath } : {}),
+      EVENT_BUS_HOST: DAEMON_HOST,
+      EVENT_BUS_PORT: String(DAEMON_PORT),
+    },
+    stdout: 'inherit',
+    stderr: 'inherit',
+    stdin: 'inherit',
+  });
+
+  await proc.exited;
+  return proc.exitCode ?? 0;
+}
+
+async function maybeRunHeadless(rawArgs: string[]): Promise<boolean> {
+  const withoutLauncherFlags = rawArgs.filter(
+    (arg) => arg !== '--restart' && arg !== '--daemon-only'
+  );
+  const normalized = [...withoutLauncherFlags];
+
+  if (normalized.length === 0) return false;
+
+  const command = normalized[0];
+  if (command === 'run') {
+    const code = await runHarnessCli(normalized);
+    process.exit(code);
+  }
+
+  let hasExplicitHeadlessFlags = false;
+  for (const arg of normalized) {
+    if (
+      arg === '--input' ||
+      arg.startsWith('--input=') ||
+      arg === '--input-file' ||
+      arg.startsWith('--input-file=')
+    ) {
+      hasExplicitHeadlessFlags = true;
+      break;
+    }
+  }
+
+  if (hasExplicitHeadlessFlags) {
+    const code = await runHarnessCli(['run', ...normalized]);
+    process.exit(code);
+  }
+
+  if (command.startsWith('-')) {
+    return false;
+  }
+
+  const inputPath = path.resolve(command);
+  if (!isExistingFile(inputPath)) return false;
+
+  const passthrough = normalized.slice(1);
+  const code = await runHarnessCli(['run', '--input-file', inputPath, ...passthrough]);
+  process.exit(code);
 }
 
 /**
@@ -247,6 +337,10 @@ async function killExistingDaemon(): Promise<void> {
  * Main entry point
  */
 async function main(): Promise<void> {
+  if (await maybeRunHeadless(process.argv.slice(2))) {
+    return;
+  }
+
   // Handle --restart flag: kill existing daemon before proceeding
   if (process.argv.includes('--restart')) {
     console.log('[rex] Restarting daemon...');

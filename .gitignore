@@ -89,3 +89,6 @@ harness_manifest.json
 
 # Project config (local overrides)
 .config/settings.local.json
+
+.venv_duckdb
+.venv*

@@ -23,7 +23,10 @@ export async function executeRead(
   args: Record<string, unknown>,
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
-  const path = args.path as string;
+  const path = args.path as string | undefined;
+  if (!path) {
+    return errorResult('Read', 'file_path parameter is required. Provide the path to the file you want to read.', 0);
+  }
   const cwd = context?.workdirOverride ?? process.cwd();
   const encoding = (args.encoding as BufferEncoding) ?? 'utf-8';
   const maxBytes = (args.maxBytes as number) ?? 100000;

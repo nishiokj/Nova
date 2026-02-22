@@ -22,11 +22,18 @@
 Run this in `/Users/jevinnishioka/Desktop/jesus` before any trial execution:
 
 ```bash
-docker build -f Dockerfile.rex-harness -t rex-harness:swebench-lite-v1 .
-docker image inspect rex-harness:swebench-lite-v1 --format '{{.Id}}'
+bash scripts/agentlab/build_agent_image.sh --tag rex-harness:swebench-lite
+docker image inspect rex-harness:swebench-lite --format '{{.Id}}'
 ```
 
 Use that tag (or digest) in `runtime.policy.sandbox.image` of the generated artifact.
+
+## One-Time SWE-bench Evaluator Setup (Host)
+
+```bash
+bash scripts/agentlab/setup_swebench_evaluator.sh
+export AGENTLAB_SWEBENCH_PYTHON=/Users/jevinnishioka/Desktop/jesus/.venv_swebench/bin/python
+```
 
 ## Artifact Generation (Build Script Only)
 1. Use the builder script (for example: `scripts/agentlab/build_swebench_curated_ab_experiment.mjs`).
@@ -38,10 +45,7 @@ Use that tag (or digest) in `runtime.policy.sandbox.image` of the generated arti
 Run from `/Users/jevinnishioka/Desktop/jesus`:
 
 ```bash
-./lab run \
-  --experiment .lab/experiments/swebench_lite_curated_glm5_vs_codex_spark.yaml \
-  --executor local_docker \
-  --materialize outputs_only
+AGENTLAB_LIMIT=1 bash scripts/agentlab/run_curated_experiment.sh
 ```
 
 ## Trial Mounts and Write Locations
@@ -66,7 +70,7 @@ For each trial, Runner creates host dirs under `.lab/runs/<run_id>/trials/<trial
 8. Runner starts one Docker container with `runtime.policy.sandbox.image`.
 9. Runner passes the runtime command from `runtime.agent.*`.
 10. Container starts with cwd `/workspace`.
-11. Harness daemon CLI (`run-agent-loop` mode) reads `AGENTLAB_TASK_PATH` + `AGENTLAB_BINDINGS_PATH`.
+11. Harness daemon CLI (`run` mode) reads task/bindings from explicit flags.
 12. Harness daemon starts internal bus server (`127.0.0.1:9555`) inside the same container.
 13. Harness daemon creates `HarnessClient` and connects to that local bus.
 14. Harness daemon sends `init` with deterministic trial session key.
@@ -83,13 +87,17 @@ For each trial, Runner creates host dirs under `.lab/runs/<run_id>/trials/<trial
 The runtime entrypoint is:
 
 ```bash
-rex run-agent-loop
+rex run \
+  --input-file ${AGENTLAB_TASK_PATH} \
+  --bindings-file ${AGENTLAB_BINDINGS_PATH} \
+  --output ${AGENTLAB_RESULT_PATH} \
+  --events ${AGENTLAB_TRAJECTORY_PATH}
 ```
 
 Required behavior:
-1. Reads task + bindings payload files from `AGENTLAB_TASK_PATH` and `AGENTLAB_BINDINGS_PATH` (no stdin dependence).
-2. Writes `agent_result_v1` JSON to `AGENTLAB_RESULT_PATH`.
-3. Emits trajectory JSONL to `AGENTLAB_TRAJECTORY_PATH` when configured.
+1. Reads task + bindings payload files from explicit CLI flags (`--input-file`, `--bindings-file`).
+2. Writes `agent_result_v1` JSON to the explicit `--output` path.
+3. Emits trajectory JSONL to the explicit `--events` path when configured.
 4. Uses `HarnessClient` interface for init/model/run/event subscription.
 5. Exits non-zero on unrecoverable harness startup/runtime failure.
 
@@ -113,10 +121,32 @@ Runner behavior:
 3. `result.json` is the canonical per-trial output artifact.
 
 ## Benchmark Grading Location
-SWE-bench grading adapter runs on the **host** after trials finish. It reads trial artifacts from run dir and writes:
+SWE-bench grading adapter runs on the **host** after trials finish. The experiment builder wires:
+
+```yaml
+benchmark:
+  adapter:
+    command:
+      - python3
+      - scripts/agentlab/swebench_official_benchmark_adapter.py
+      - --benchmark-name
+      - swebench_lite_curated
+      - --dataset-name
+      - princeton-nlp/SWE-bench_Lite
+      - --split
+      - test
+```
+
+Adapter behavior:
+1. Maps trial evidence to SWE-bench prediction records.
+2. Invokes official evaluator: `python -m swebench.harness.run_evaluation`.
+3. Writes AgentLab benchmark artifacts:
 - `benchmark/predictions.jsonl`
 - `benchmark/scores.jsonl`
 - `benchmark/summary.json`
+
+Current boundary caveat:
+- If no valid patch can be extracted from trial artifacts, adapter marks trial `verdict=missing` (official evaluator cannot score an empty patch).
 
 ## Acceptance Criteria
 1. Generated artifact comes only from the build script.

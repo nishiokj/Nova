@@ -30,18 +30,17 @@ export type {
 
 export { DEFAULT_AGENT_BUDGET, DEFAULT_LLM_PARAMS, noopEmit, noopHookQueue } from './types.js';
 export {
-  EXPLORER_PROMPT,
-  RUNTIME_SCRIPT_PROMPT,
-  STANDARD_PROMPT,
-  WATCHER_PROMPT,
-  ASYNC_MODE_ADDENDUM,
-  ASYNC_AGENT_PROMPT,
+  buildExplorerPrompt,
+  buildRuntimeScriptPrompt,
+  buildStandardPrompt,
+  buildCodingAgentPrompt,
+  buildPlannerPrompt,
+  buildAsyncAgentPrompt,
+  buildPlanningPromptAddendum,
   getAgentPrompt,
-  getAsyncModeAddendum,
-  getAsyncAgentPrompt,
   buildAgentConfig,
   buildEnvironmentPrompt,
-  PLANNING_PROMPT_ADDENDUM,
-  getPlanningPromptAddendum,
+  REX_VOCAB,
+  vocabForProvider,
 } from './prompts.js';
-export type { EnvironmentContext } from './prompts.js';
+export type { EnvironmentContext, ToolVocabulary } from './prompts.js';

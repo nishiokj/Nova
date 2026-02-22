@@ -77,8 +77,10 @@ export const DEFAULT_LLM_PARAMS: LLMParams = {
 export interface AgentConfig {
   /** Agent type identifier */
   type: AgentType;
-  /** System prompt defining agent behavior */
+  /** System prompt defining agent behavior (pre-built with default vocab) */
   systemPrompt: string;
+  /** Pre-rendered environment context block, stored separately for runtime prompt rebuild */
+  envPrompt?: string;
   /** Tools this agent can access (discretionary) */
   tools: string[];
   /** Resource budget */

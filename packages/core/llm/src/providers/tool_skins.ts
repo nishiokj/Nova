@@ -198,12 +198,15 @@ export function translateCodexArgsToRex(
 
     case 'read_file': {
       const result: Record<string, unknown> = {
-        path: args.file_path,
+        path: args.file_path ?? args.path,
       };
-      if (args.offset !== undefined) {
-        result.startLine = args.offset;
-        if (args.limit !== undefined) {
-          result.endLine = (args.offset as number) + (args.limit as number) - 1;
+      const offset = args.offset ?? args.startLine;
+      if (offset !== undefined) {
+        result.startLine = offset;
+        const limit = args.limit ?? args.endLine;
+        if (limit !== undefined) {
+          // If model sent endLine (Rex-style), use directly; otherwise compute from offset+limit
+          result.endLine = args.endLine ?? ((offset as number) + (limit as number) - 1);
         }
       }
       return result;
@@ -213,25 +216,133 @@ export function translateCodexArgsToRex(
       const result: Record<string, unknown> = {
         pattern: args.pattern,
       };
-      if (args.include !== undefined) result.glob = args.include;
+      if ((args.include ?? args.glob) !== undefined) result.glob = args.include ?? args.glob;
       if (args.path !== undefined) result.path = args.path;
-      if (args.limit !== undefined) result.maxResults = args.limit;
+      if ((args.limit ?? args.maxResults) !== undefined) result.maxResults = args.limit ?? args.maxResults;
       return result;
     }
 
     case 'list_dir': {
-      const dirPath = (args.dir_path as string) ?? '.';
+      const dirPath = (args.dir_path ?? args.pattern) as string | undefined ?? '.';
       const result: Record<string, unknown> = {
         pattern: dirPath.endsWith('/') ? `${dirPath}**/*` : `${dirPath}/**/*`,
       };
-      if (args.limit !== undefined) result.maxResults = args.limit;
-      if (args.depth !== undefined) result.maxDepth = args.depth;
+      if ((args.limit ?? args.maxResults) !== undefined) result.maxResults = args.limit ?? args.maxResults;
+      if ((args.depth ?? args.maxDepth) !== undefined) result.maxDepth = args.depth ?? args.maxDepth;
       return result;
     }
 
     default:
       return args;
   }
+}
+
+/**
+ * Translate Rex arguments to Codex arguments (outbound: executor → model).
+ * Reverse of translateCodexArgsToRex so the model sees its native arg names
+ * in conversation history.
+ */
+export function translateRexArgsToCodex(
+  rexName: string,
+  args: Record<string, unknown>
+): Record<string, unknown> {
+  switch (rexName) {
+    case 'Bash': {
+      const result: Record<string, unknown> = {
+        command: args.command,
+      };
+      if (args.timeout !== undefined) {
+        result.timeout_ms = (args.timeout as number) * 1000;
+      }
+      return result;
+    }
+
+    case 'Read': {
+      const result: Record<string, unknown> = {
+        file_path: args.path,
+      };
+      if (args.startLine !== undefined) {
+        result.offset = args.startLine;
+        if (args.endLine !== undefined) {
+          result.limit = (args.endLine as number) - (args.startLine as number) + 1;
+        }
+      }
+      return result;
+    }
+
+    case 'Grep': {
+      const result: Record<string, unknown> = {
+        pattern: args.pattern,
+      };
+      if (args.glob !== undefined) result.include = args.glob;
+      if (args.path !== undefined) result.path = args.path;
+      if (args.maxResults !== undefined) result.limit = args.maxResults;
+      return result;
+    }
+
+    case 'Glob': {
+      const result: Record<string, unknown> = {
+        dir_path: args.pattern,
+      };
+      if (args.maxResults !== undefined) result.limit = args.maxResults;
+      if (args.maxDepth !== undefined) result.depth = args.maxDepth;
+      return result;
+    }
+
+    default:
+      return args;
+  }
+}
+
+// ============================================
+// TOOL VOCABULARY — Provider-specific tool names for system prompts.
+// Derived from the skin maps so prompt text stays coupled to tool definitions.
+// ============================================
+
+/**
+ * Tool vocabulary for system prompt parameterization.
+ * Each field maps a logical tool role to its provider-specific name.
+ */
+export interface ToolVocabulary {
+  read: string;
+  glob: string;
+  grep: string;
+  bash: string;
+  edit: string;
+  write: string;
+  explorer: string;
+  promptUser: string;
+}
+
+/** Rex (internal) tool names — used for Anthropic and other non-OpenAI providers. */
+export const REX_VOCAB: ToolVocabulary = {
+  read: 'Read',
+  glob: 'Glob',
+  grep: 'Grep',
+  bash: 'Bash',
+  edit: 'Edit',
+  write: 'Write',
+  explorer: 'Explorer',
+  promptUser: 'PromptUser',
+};
+
+/** Codex tool names — derived from REX_TO_CODEX map. Used for OpenAI/Codex providers. */
+export const CODEX_VOCAB: ToolVocabulary = {
+  read: REX_TO_CODEX['Read'] ?? 'Read',
+  glob: REX_TO_CODEX['Glob'] ?? 'Glob',
+  grep: REX_TO_CODEX['Grep'] ?? 'Grep',
+  bash: REX_TO_CODEX['Bash'] ?? 'Bash',
+  edit: 'apply_patch',
+  write: 'apply_patch',
+  explorer: 'Explorer',
+  promptUser: 'PromptUser',
+};
+
+/** Get the tool vocabulary for a canonical LLM provider. */
+export function vocabForProvider(canonicalProvider: string): ToolVocabulary {
+  return canonicalProvider === 'openai' || canonicalProvider === 'codex'
+    ? CODEX_VOCAB
+    : REX_VOCAB;
 }
 
 // ============================================

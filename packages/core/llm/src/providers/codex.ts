@@ -27,6 +27,7 @@ import {
   REX_TO_CODEX,
   formatToolForOpenAI,
   translateCodexArgsToRex,
+  translateRexArgsToCodex,
 } from './tool_skins.js';
 
 const DEFAULT_CODEX_REQUEST_TIMEOUT_MS = 120_000;
@@ -650,6 +651,19 @@ export class CodexProvider implements LLMProviderAdapter {
           const argsObj = args as Record<string, unknown>;
           if (typeof argsObj.input === 'string') {
             args = argsObj.input;
+          }
+        }
+
+        // Translate Rex args → Codex args so the model sees its native param names
+        // in conversation history (e.g. path → file_path for read_file).
+        // getItemsForLLM() emits arguments as JSON strings, so parse first.
+        if (rawName && REX_TO_CODEX[rawName] && name !== 'apply_patch') {
+          let argsObj = args;
+          if (typeof argsObj === 'string') {
+            try { argsObj = JSON.parse(argsObj); } catch { /* leave as-is */ }
+          }
+          if (typeof argsObj === 'object' && argsObj !== null) {
+            args = JSON.stringify(translateRexArgsToCodex(rawName, argsObj as Record<string, unknown>));
           }
         }
 

@@ -6,15 +6,21 @@ export async function fetchAPI<T>(
   options?: RequestInit | number,
   timeoutMs = 5000
 ): Promise<T> {
-  const controller = new AbortController()
   const resolvedTimeoutMs = typeof options === 'number' ? options : timeoutMs
   const init = typeof options === 'number' ? undefined : options
-  const timeoutId = setTimeout(() => controller.abort(), resolvedTimeoutMs)
+
+  // Compose the caller's abort signal (if any) with our timeout signal.
+  const timeoutController = new AbortController()
+  const timeoutId = setTimeout(() => timeoutController.abort(), resolvedTimeoutMs)
+  const externalSignal = init?.signal
+  const signal = externalSignal
+    ? AbortSignal.any([externalSignal, timeoutController.signal])
+    : timeoutController.signal
 
   try {
     const res = await fetch(`${API_BASE}${endpoint}`, {
       ...init,
-      signal: controller.signal,
+      signal,
     })
     clearTimeout(timeoutId)
 
@@ -26,9 +32,10 @@ export async function fetchAPI<T>(
     clearTimeout(timeoutId)
     if (err instanceof Error) {
       if (err.name === 'AbortError') {
+        // If the caller aborted, propagate as AbortError (not a timeout message).
+        if (externalSignal?.aborted) throw err
         throw new Error('Request timeout - server not responding')
       }
-      // Connection refused / network error
       if (err.message === 'Failed to fetch' || err.name === 'TypeError') {
         throw new Error(`Cannot connect to GraphD at ${API_BASE} - is the server running?`)
       }

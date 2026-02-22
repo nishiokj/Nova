@@ -38,14 +38,6 @@ export interface ExecutionState {
   initialWorkResult?: AgentResult;
   /** Whether context was compacted recently (hysteresis gate) */
   compactedRecently: boolean;
-  /** Last cadence audit timestamp (ms) */
-  lastCadenceAuditMs: number;
-  /** Tool calls at last cadence audit */
-  lastCadenceAuditToolCalls: number;
-  /** Last agent result (for hook context) */
-  lastAgentResult?: AgentResult;
-  /** Last agent work ID (for hook context) */
-  lastAgentWorkId?: string;
   /** In-progress work items with their agents */
   inProgress: Map<string, InProgressWork>;
   /** Latest run-control snapshot applied by the orchestrator runtime */
@@ -69,10 +61,6 @@ export function createExecutionState(
     initialWorkResponse: '',
     initialWorkResult: undefined,
     compactedRecently: false,
-    lastCadenceAuditMs: Date.now(),
-    lastCadenceAuditToolCalls: 0,
-    lastAgentResult: undefined,
-    lastAgentWorkId: undefined,
     inProgress: new Map(),
     runControl,
   };
@@ -102,7 +90,6 @@ export function updateMetrics(
 ): void {
   state.totalLlmCalls += result.metrics.llmCallsMade;
   state.totalToolCalls += result.metrics.toolCallsMade;
-  state.lastAgentResult = result;
 }
 
 export function updateRunControl(
