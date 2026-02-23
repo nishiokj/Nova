@@ -79,7 +79,7 @@ COPY config ./config
 COPY scripts ./scripts
 COPY packages ./packages
 
-RUN bun install --frozen-lockfile
+RUN bun install --frozen-lockfile --ignore-scripts
 RUN bun run build:packages && bun run build:apps
 RUN test -f /opt/rex/packages/apps/launcher/dist/index.js
 RUN printf '#!/usr/bin/env sh\nexec bun /opt/rex/packages/apps/launcher/dist/index.js "\$@"\n' > /usr/local/bin/rex \

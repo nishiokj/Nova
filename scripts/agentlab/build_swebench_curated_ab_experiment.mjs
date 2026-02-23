@@ -94,18 +94,15 @@ function resolveBenchmarkAdapterCommand(profile) {
     return override.map((value) => value.trim());
   }
 
-  const pythonBin = asNonEmptyString(process.env.AGENTLAB_SWEBENCH_PYTHON) ?? 'python3';
-  const datasetName = asNonEmptyString(profile?.evaluator?.datasetName) ?? 'princeton-nlp/SWE-bench_Lite';
+  const pythonBin = asNonEmptyString(process.env.AGENTLAB_BENCHMARK_GRADER_PYTHON) ?? 'python3';
   const split = asNonEmptyString(profile?.dataset?.splitId) ?? 'test';
   const benchmarkName = asNonEmptyString(profile?.dataset?.suiteId) ?? 'swebench_lite_curated';
 
   return [
     pythonBin,
-    'scripts/agentlab/swebench_official_benchmark_adapter.py',
+    '/opt/rex/scripts/agentlab/swebench_task_container_grader.py',
     '--benchmark-name',
     benchmarkName,
-    '--dataset-name',
-    datasetName,
     '--split',
     split,
     '--workspace-repo-relpath',
@@ -204,6 +201,16 @@ function sanitizeStringArray(input) {
     .filter((value) => value.length > 0);
 }
 
+function maybeEnableBuiltinAdapter(builder) {
+  const candidate =
+    (typeof builder.useBuiltinAdapter === 'function' && builder.useBuiltinAdapter.bind(builder)) ||
+    (typeof builder.useBuiltInAdapter === 'function' && builder.useBuiltInAdapter.bind(builder));
+  if (candidate) {
+    candidate();
+  }
+  return builder;
+}
+
 function stripLegacyInputOutputTokens(command) {
   const stripped = [];
   for (let index = 0; index < command.length; index += 1) {
@@ -226,6 +233,11 @@ function migrateRuntimeAgentToHardCut(spec) {
   const legacyAgent = runtime?.agent;
   if (!runtime || !legacyAgent || typeof legacyAgent !== 'object' || Array.isArray(legacyAgent)) {
     return out;
+  }
+
+  const runtimeCommand = sanitizeStringArray(legacyAgent.command);
+  if (runtimeCommand.length > 0) {
+    legacyAgent.command = stripLegacyInputOutputTokens(runtimeCommand);
   }
 
   const legacyCustomImage =
@@ -354,12 +366,8 @@ async function main() {
     .customAgentImage(image, [
       agentCmd,
       'run',
-      '--input-file',
-      '${AGENTLAB_TASK_PATH}',
       '--bindings-file',
       '${AGENTLAB_BINDINGS_PATH}',
-      '--output',
-      '${AGENTLAB_RESULT_PATH}',
       '--events',
       '${AGENTLAB_TRAJECTORY_PATH}',
       '--session-key',
@@ -368,7 +376,6 @@ async function main() {
       '/agentlab/workspace/repo',
       '--dangerous',
     ])
-    .useBuiltinAdapter()
     .agentEnv({
       HOME: '/agentlab/deps/home',
       AGENTLAB_SESSION_CONTEXT_ROOT: '/agentlab/state/.haiku/sessions',
@@ -388,19 +395,47 @@ async function main() {
     .timeoutMs(timeoutMs)
     .networkMode('full')
     .sandboxImage(image);
+  maybeEnableBuiltinAdapter(builder);
 
   let benchmarkAdapterCommand = null;
   if (!values['disable-benchmark-adapter']) {
     benchmarkAdapterCommand = resolveBenchmarkAdapterCommand(profile);
+    const benchmarkName = asNonEmptyString(profile?.dataset?.suiteId) ?? 'swebench_lite_curated';
+    const split = asNonEmptyString(profile?.dataset?.splitId) ?? 'test';
     builder.benchmark({
       policy: {
         task_model: 'independent',
-        evaluator_mode: 'official',
-        scoring_lifecycle: 'predict_then_score',
+        evaluator_mode: 'custom',
+        scoring_lifecycle: 'integrated_score',
         chain_failure_policy: 'continue_with_flag',
       },
       adapter: {
         command: benchmarkAdapterCommand,
+        manifest: {
+          schema_version: 'benchmark_adapter_manifest_v1',
+          adapter_id: 'jesus.swebench_in_container',
+          adapter_version: 'v1',
+          benchmark: {
+            name: benchmarkName,
+            split,
+          },
+          execution_mode: 'integrated_score',
+          record_schemas: {
+            prediction: 'benchmark_prediction_record_v1',
+            score: 'benchmark_score_record_v1',
+          },
+          evaluator: {
+            name: 'swebench.in_container_proxy',
+            mode: 'custom',
+            command: benchmarkAdapterCommand,
+          },
+          capabilities: {
+            supports_containerized_scoring: true,
+            supports_official_evaluator: false,
+            requires_network_for_scoring: false,
+            deterministic_scoring: true,
+          },
+        },
       },
     });
   }

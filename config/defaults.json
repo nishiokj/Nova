@@ -32,9 +32,9 @@
         "temperature": 0.3
       },
       "budget": {
-        "max_iterations": 8,
+        "max_iterations": 12,
         "max_tool_calls": 60,
-        "max_duration_ms": 90000
+        "max_duration_ms": 120000
       },
       "tools": ["Read", "Glob", "Grep", "Bash"],
       "output_schema": "explorer"

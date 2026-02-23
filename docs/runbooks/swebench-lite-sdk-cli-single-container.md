@@ -45,7 +45,7 @@ export AGENTLAB_SWEBENCH_PYTHON=/Users/jevinnishioka/Desktop/jesus/.venv_swebenc
 Run from `/Users/jevinnishioka/Desktop/jesus`:
 
 ```bash
-AGENTLAB_LIMIT=1 bash scripts/agentlab/run_curated_experiment.sh
+AGENTLAB_LIMIT=1 bash scripts/agentlab/run_curated_experiment_one_shot.sh
 ```
 
 ## Trial Mounts and Write Locations
