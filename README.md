@@ -172,7 +172,7 @@ bun run lint                   # Typecheck all packages
 
 ## AgentLab Experiment (Curated A/B)
 
-`/jesus` includes a Dockerized SWE-bench Lite curated A/B experiment between:
+`/jesus` includes a SWE-bench Lite curated A/B experiment that now runs with per-task task images and an injected frozen `rex` artifact:
 
 - `glm-5` (`z.ai-coder`)
 - `gpt-5.3-codex-spark` (`codex`)
@@ -180,13 +180,14 @@ bun run lint                   # Typecheck all packages
 Source files:
 
 - Experiment builder: `scripts/agentlab/build_swebench_curated_ab_experiment.mjs`
-- Agent image build script: `scripts/agentlab/build_agent_image.sh`
+- Agent freezer (artifact tarball): `scripts/agentlab/freeze_agent.sh`
+- Dataset upgrader (v1 -> v2): `scripts/agentlab/enrich_dataset_v2.mjs`
 - In-container benchmark grader: `scripts/agentlab/swebench_task_container_grader.py`
-- Run wrapper (prints run id): `scripts/agentlab/run_curated_experiment_one_shot.sh`
-- Agent runtime command in experiment: `rex run --input-file ${AGENTLAB_TASK_PATH} --bindings-file ${AGENTLAB_BINDINGS_PATH} --output ${AGENTLAB_RESULT_PATH}`
+- Run entrypoint (prints run id): `scripts/agentlab/run_curated_experiment.sh`
+- Agent runtime command in experiment: `/opt/agent/bin/rex run --bindings-file ${AGENTLAB_BINDINGS_PATH} --events ${AGENTLAB_TRAJECTORY_PATH} --session-key ${AGENTLAB_TRIAL_ID} --working-dir ${WORKSPACE} --dangerous`
 - Agent runtime entrypoint: `packages/infra/harness-daemon/src/cli/run.ts` (`rex run`)
-- Runner/agent file contract: `AGENTLAB_TASK_PATH` + `AGENTLAB_BINDINGS_PATH` in, `AGENTLAB_RESULT_PATH` (`result.json`) out
-- Curated dataset: `.lab/experiments/data/swebench_lite_curated.task_boundary_v1.jsonl`
+- Runner/agent file contract: `AGENTLAB_TASK_PATH` + `AGENTLAB_BINDINGS_PATH` in, `AGENTLAB_RESULT_PATH` (`result.json`) out; runner appends these CLI args via `runtime.agent.io`
+- Curated datasets: `v1` source `.lab/experiments/data/swebench_lite_curated.task_boundary_v1.jsonl`, `v2` per-task image `.lab/experiments/data/swebench_lite_curated.task_boundary_v2.jsonl`
 
 Benchmark extensibility:
 - The builder now accepts `--benchmark` and resolves benchmark metadata from a profile map.
@@ -197,18 +198,15 @@ Run a smoke pass (2 trials total: 1 task x 2 variants):
 
 ```bash
 cd /Users/jevinnishioka/Desktop/jesus
-bash scripts/agentlab/build_agent_image.sh --tag rex-harness:swebench-lite
-AGENTLAB_LIMIT=1 bash scripts/agentlab/run_curated_experiment_one_shot.sh
+AGENTLAB_LIMIT=1 bash scripts/agentlab/run_curated_experiment.sh
 ```
 
 Run against all curated tasks:
 
 ```bash
 cd /Users/jevinnishioka/Desktop/jesus
-AGENTLAB_LIMIT=50 bash scripts/agentlab/run_curated_experiment_one_shot.sh
+AGENTLAB_LIMIT=50 bash scripts/agentlab/run_curated_experiment.sh
 ```
-
-If you need raw control, use `scripts/agentlab/run_curated_experiment.sh` (lower-level runner).
 
 ## Key Design Principles
 

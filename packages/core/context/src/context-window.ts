@@ -583,7 +583,9 @@ export class ContextWindow {
     this.compact({
       deduplicateByPath: true,
       maxFileContentCount: 30,
-      truncateOutputsTo: 8_000,
+      maxFunctionCallCount: 220,
+      maxFunctionCallOutputCount: 220,
+      truncateOutputsTo: 3_000,
     });
   }
 
@@ -906,12 +908,16 @@ export class ContextWindow {
     const {
       maxFileContentAgeMs,
       maxFileContentCount,
+      maxFunctionCallCount,
+      maxFunctionCallOutputCount,
       deduplicateByPath = false,
       truncateOutputsTo,
     } = options;
 
     let itemsRemoved = 0;
     let fileContentRemoved = 0;
+    let functionCallsRemoved = 0;
+    let functionCallOutputsRemoved = 0;
     let outputsTruncated = 0;
     let bytesRecovered = 0;
     const now = Date.now();
@@ -922,14 +928,30 @@ export class ContextWindow {
 
     // First pass: identify items to remove
     const toRemove = new Set<number>();
+    const markForRemoval = (
+      index: number,
+      kind: 'file_content' | 'function_call' | 'function_call_output',
+      bytes: number,
+      path?: string
+    ): void => {
+      if (toRemove.has(index)) return;
+      toRemove.add(index);
+      bytesRecovered += bytes;
+      if (kind === 'file_content') {
+        fileContentRemoved++;
+        if (path) pathsRemoved.add(path);
+      } else if (kind === 'function_call') {
+        functionCallsRemoved++;
+      } else {
+        functionCallOutputsRemoved++;
+      }
+    };
 
     this._items.forEach((item, index) => {
       if (item.type === 'file_content') {
         // Age-based removal
         if (maxFileContentAgeMs && now - item.timestamp > maxFileContentAgeMs) {
-          toRemove.add(index);
-          bytesRecovered += item.content.length;
-          pathsRemoved.add(item.path);
+          markForRemoval(index, 'file_content', item.content.length, item.path);
           return;
         }
 
@@ -938,12 +960,10 @@ export class ContextWindow {
           const existing = newestByPath.get(item.path);
           if (existing) {
             if (item.timestamp >= existing.item.timestamp) {
-              toRemove.add(existing.index);
-              bytesRecovered += existing.item.content.length;
+              markForRemoval(existing.index, 'file_content', existing.item.content.length, existing.item.path);
               newestByPath.set(item.path, { item, index });
             } else {
-              toRemove.add(index);
-              bytesRecovered += item.content.length;
+              markForRemoval(index, 'file_content', item.content.length, item.path);
             }
           } else {
             newestByPath.set(item.path, { item, index });
@@ -965,9 +985,52 @@ export class ContextWindow {
       if (excess > 0) {
         for (let i = 0; i < excess; i++) {
           const { item, index } = fileItems[i];
-          toRemove.add(index);
-          bytesRecovered += (item as FileContentItem).content.length;
-          pathsRemoved.add((item as FileContentItem).path);
+          const fileItem = item as FileContentItem;
+          markForRemoval(index, 'file_content', fileItem.content.length, fileItem.path);
+        }
+      }
+    }
+
+    // Keep recent function call history; older tool traces are high-volume and low-value.
+    if (typeof maxFunctionCallCount === 'number') {
+      const callItems = this._items
+        .map((item, index) => ({ item, index }))
+        .filter(
+          ({ item, index }) => item.type === 'function_call' && !toRemove.has(index)
+        )
+        .sort((a, b) => a.item.timestamp - b.item.timestamp);
+
+      const excess = callItems.length - Math.max(0, maxFunctionCallCount);
+      if (excess > 0) {
+        for (let i = 0; i < excess; i++) {
+          const { item, index } = callItems[i];
+          const call = item as FunctionCallItem;
+          const argsSize = (() => {
+            try {
+              return JSON.stringify(call.arguments).length;
+            } catch {
+              return 0;
+            }
+          })();
+          markForRemoval(index, 'function_call', call.name.length + argsSize);
+        }
+      }
+    }
+
+    if (typeof maxFunctionCallOutputCount === 'number') {
+      const outputItems = this._items
+        .map((item, index) => ({ item, index }))
+        .filter(
+          ({ item, index }) => item.type === 'function_call_output' && !toRemove.has(index)
+        )
+        .sort((a, b) => a.item.timestamp - b.item.timestamp);
+
+      const excess = outputItems.length - Math.max(0, maxFunctionCallOutputCount);
+      if (excess > 0) {
+        for (let i = 0; i < excess; i++) {
+          const { item, index } = outputItems[i];
+          const output = item as FunctionCallOutputItem;
+          markForRemoval(index, 'function_call_output', output.output.length);
         }
       }
     }
@@ -976,7 +1039,6 @@ export class ContextWindow {
     if (toRemove.size > 0) {
       this._items = this._items.filter((_, index) => !toRemove.has(index));
       itemsRemoved = toRemove.size;
-      fileContentRemoved = toRemove.size;
       this._version++;
     }
 
@@ -1017,6 +1079,8 @@ export class ContextWindow {
     return {
       itemsRemoved,
       fileContentRemoved,
+      functionCallsRemoved,
+      functionCallOutputsRemoved,
       outputsTruncated,
       bytesRecovered,
     };

@@ -2553,12 +2553,16 @@ export class AgentHarness {
       const result = context.compact({
         deduplicateByPath: true,
         maxFileContentCount: 15,
+        maxFunctionCallCount: 150,
+        maxFunctionCallOutputCount: 150,
         truncateOutputsTo: 3000,
       });
 
       this.logger.info('Manual context compaction', {
         sessionKey,
         itemsRemoved: result.itemsRemoved,
+        functionCallsRemoved: result.functionCallsRemoved ?? 0,
+        functionCallOutputsRemoved: result.functionCallOutputsRemoved ?? 0,
         bytesRecovered: result.bytesRecovered,
       });
 
