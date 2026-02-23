@@ -108,6 +108,8 @@ function resolveBenchmarkAdapterCommand(profile) {
     datasetName,
     '--split',
     split,
+    '--workspace-repo-relpath',
+    'repo',
   ];
 }
 
@@ -335,7 +337,7 @@ async function main() {
   );
 
   const sdk = await loadSdk();
-  const { ExperimentBuilder, Metric } = sdk;
+  const { ExperimentBuilder, ExperimentType, Metric } = sdk;
 
   const datasetRel = relative(dirname(outputAbs), datasetAbs);
   const datasetPath = datasetRel.startsWith('..') ? datasetAbs : datasetRel;
@@ -367,8 +369,12 @@ async function main() {
       '--dangerous',
     ])
     .useBuiltinAdapter()
-    .agentEnv({ HOME: '/agentlab/deps/home' })
+    .agentEnv({
+      HOME: '/agentlab/deps/home',
+      AGENTLAB_SESSION_CONTEXT_ROOT: '/agentlab/state/.haiku/sessions',
+    })
     .sanitizationProfile('hermetic_functional')
+    .policies(ExperimentType.AB_TEST)
     .replications(replications)
     .randomSeed(seed)
     .maxConcurrency(maxConcurrency)

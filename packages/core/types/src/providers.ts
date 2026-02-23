@@ -336,6 +336,18 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
         context_window: 32000,
         reasoning: ['on', 'off'],
       },
+      {
+        id: 'qwen3-coder-next',
+        name: 'Qwen3 Coder Next',
+        context_window: 32_000,
+        reasoning: ['on', 'off'],
+      },
+      {
+        id: 'qwen/qwen3-coder-next',
+        name: 'Qwen3 Coder Next',
+        context_window: 32_000,
+        reasoning: ['on', 'off'],
+      },
     ],
     authRequired: false,
     testEndpoint: 'http://localhost:1234/v1/models',

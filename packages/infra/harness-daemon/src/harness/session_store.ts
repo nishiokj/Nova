@@ -50,7 +50,11 @@ Acknowledge the interruption and adjust your approach accordingly.`;
 
 function resolveContextFilePath(workingDir: string, sessionKey: string): string {
   const date = new Date().toISOString().split('T')[0];
-  const sessionsRoot = path.join(workingDir, '.haiku', 'sessions');
+  const configuredRoot = process.env.AGENTLAB_SESSION_CONTEXT_ROOT?.trim()
+    || process.env.HAIKU_SESSIONS_ROOT?.trim();
+  const sessionsRoot = configuredRoot
+    ? (path.isAbsolute(configuredRoot) ? configuredRoot : path.resolve(workingDir, configuredRoot))
+    : path.join(workingDir, '.haiku', 'sessions');
   const todayPath = path.join(sessionsRoot, date, sessionKey, 'context.md');
 
   if (existsSync(todayPath)) {

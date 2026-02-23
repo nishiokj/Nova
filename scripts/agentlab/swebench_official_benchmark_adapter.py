@@ -20,6 +20,7 @@ ADAPTER_ID = "jesus.swebench_official"
 ADAPTER_VERSION = "v1"
 PREFERRED_PATCH_KEYS = ("model_patch", "patch", "diff", "git_patch", "final_patch")
 DIFF_MARKERS = ("diff --git ", "--- ", "Index: ", "@@ ")
+EXCLUDED_REPO_PATH_PREFIXES = (".haiku", ".lab", ".agentlab")
 
 
 class AdapterError(RuntimeError):
@@ -123,9 +124,24 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("AGENTLAB_SWEBENCH_SOFT_FAIL", "").strip() in {"1", "true", "yes"},
         help="Emit error verdicts instead of failing the adapter when evaluator invocation fails.",
     )
+    parser.add_argument(
+        "--workspace-repo-relpath",
+        default=os.environ.get("AGENTLAB_SWEBENCH_REPO_RELPATH", "repo"),
+        help="Relative path under trial workspace that contains the task repository checkout.",
+    )
+    parser.add_argument(
+        "--allow-answer-patch-fallback",
+        action="store_true",
+        default=os.environ.get("AGENTLAB_SWEBENCH_ALLOW_ANSWER_PATCH_FALLBACK", "").strip().lower()
+        in {"1", "true", "yes"},
+        help="Allow patch extraction from trial output answer/ext when workspace repo diff is unavailable.",
+    )
     args = parser.parse_args()
     if args.max_workers <= 0:
         raise AdapterError("--max-workers must be > 0")
+    repo_relpath = Path(args.workspace_repo_relpath)
+    if repo_relpath.is_absolute() or ".." in repo_relpath.parts:
+        raise AdapterError("--workspace-repo-relpath must be a safe relative path")
     return args
 
 
@@ -165,44 +181,28 @@ def try_extract_patch_from_answer(payload: dict[str, Any]) -> tuple[str, str] | 
     return None
 
 
-def list_git_repositories(workspace_dir: Path, max_depth: int = 4) -> list[Path]:
-    repos: list[Path] = []
-    seen: set[Path] = set()
-
-    if (workspace_dir / ".git").exists():
-        repos.append(workspace_dir)
-        seen.add(workspace_dir)
-
-    queue: list[tuple[Path, int]] = [(workspace_dir, 0)]
-    while queue:
-        current, depth = queue.pop(0)
-        if depth >= max_depth:
-            continue
-        try:
-            entries = list(current.iterdir())
-        except OSError:
-            continue
-        for entry in entries:
-            if not entry.is_dir():
-                continue
-            if entry.name == ".git":
-                repo_root = entry.parent
-                if repo_root not in seen:
-                    repos.append(repo_root)
-                    seen.add(repo_root)
-                continue
-            queue.append((entry, depth + 1))
-    return repos
-
-
-def run_checked(command: list[str], cwd: Path | None = None, check: bool = False) -> subprocess.CompletedProcess[str]:
+def run_checked(
+    command: list[str],
+    cwd: Path | None = None,
+    check: bool = False,
+    stdin_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         cwd=str(cwd) if cwd else None,
         text=True,
+        input=stdin_text,
         capture_output=True,
         check=check,
     )
+
+
+def is_excluded_repo_relpath(rel_path: str) -> bool:
+    rel = Path(rel_path)
+    if rel.is_absolute():
+        return True
+    first = rel.parts[0] if rel.parts else ""
+    return first in EXCLUDED_REPO_PATH_PREFIXES
 
 
 def git_patch_for_repo(repo_dir: Path) -> str:
@@ -212,7 +212,10 @@ def git_patch_for_repo(repo_dir: Path) -> str:
     if not status.stdout.strip():
         return ""
 
-    diff = run_checked(["git", "-C", str(repo_dir), "diff", "--binary", "--no-color", "HEAD"], check=False)
+    diff_cmd = ["git", "-C", str(repo_dir), "diff", "--binary", "--no-color", "HEAD", "--", "."]
+    for prefix in EXCLUDED_REPO_PATH_PREFIXES:
+        diff_cmd.append(f":(exclude){prefix}/**")
+    diff = run_checked(diff_cmd, check=False)
     patch_chunks = [diff.stdout] if diff.returncode in {0, 1} else []
 
     untracked = run_checked(
@@ -221,6 +224,8 @@ def git_patch_for_repo(repo_dir: Path) -> str:
     )
     if untracked.returncode == 0:
         for rel in [line.strip() for line in untracked.stdout.splitlines() if line.strip()]:
+            if is_excluded_repo_relpath(rel):
+                continue
             rel_path = repo_dir / rel
             if not rel_path.exists() or not rel_path.is_file():
                 continue
@@ -231,29 +236,53 @@ def git_patch_for_repo(repo_dir: Path) -> str:
             if patch.returncode in {0, 1} and patch.stdout:
                 patch_chunks.append(patch.stdout)
 
-    combined = "".join(patch_chunks).strip()
-    return combined
+    normalized_chunks: list[str] = []
+    for chunk in patch_chunks:
+        if not chunk:
+            continue
+        normalized_chunks.append(chunk if chunk.endswith("\n") else f"{chunk}\n")
+    return "".join(normalized_chunks)
 
 
-def try_extract_patch_from_workspace(trial_dir: Path | None) -> tuple[str, str] | None:
+def patch_reverse_applies(repo_dir: Path, patch: str) -> tuple[bool, str | None]:
+    if not patch.strip():
+        return False, "empty patch"
+    check = run_checked(
+        ["git", "-C", str(repo_dir), "apply", "--check", "--reverse", "--whitespace=nowarn", "-"],
+        check=False,
+        stdin_text=patch,
+    )
+    if check.returncode == 0:
+        return True, None
+    detail = check.stderr.strip() or check.stdout.strip() or f"exit={check.returncode}"
+    return False, detail
+
+
+def try_extract_patch_from_workspace(
+    trial_dir: Path | None,
+    workspace_repo_relpath: str,
+) -> tuple[str, str, str | None]:
     if trial_dir is None:
-        return None
+        return "", "", "missing trial_dir for workspace patch extraction"
     workspace_dir = trial_dir / "workspace"
     if not workspace_dir.exists():
-        return None
+        return "", "", f"missing workspace directory: {workspace_dir}"
 
-    candidates = list_git_repositories(workspace_dir)
-    best_patch = ""
-    best_source = ""
-    for repo_dir in candidates:
-        patch = git_patch_for_repo(repo_dir)
-        if len(patch) > len(best_patch):
-            best_patch = patch
-            best_source = f"workspace.git_diff:{repo_dir.relative_to(workspace_dir) if repo_dir != workspace_dir else '.'}"
+    repo_dir = workspace_dir / workspace_repo_relpath
+    if not repo_dir.exists():
+        return "", "", f"missing workspace repo boundary path: workspace/{workspace_repo_relpath}"
+    if not (repo_dir / ".git").exists():
+        return "", "", f"workspace repo boundary is not a git repository: workspace/{workspace_repo_relpath}"
 
-    if not best_patch:
-        return None
-    return best_patch, best_source
+    patch = git_patch_for_repo(repo_dir)
+    if not patch:
+        return "", "", f"no git diff found under workspace/{workspace_repo_relpath}"
+    if not has_patch_markers(patch):
+        return "", "", "workspace git diff did not produce recognized patch markers"
+    valid, validation_error = patch_reverse_applies(repo_dir, patch)
+    if not valid:
+        return "", "", f"workspace git diff failed git-apply validation: {validation_error}"
+    return patch, f"workspace.git_diff:{workspace_repo_relpath}", None
 
 
 def parse_trial_paths(run_dir: Path, record: dict[str, Any]) -> tuple[Path | None, Path | None, Path | None]:
@@ -283,7 +312,7 @@ def parse_trial_paths(run_dir: Path, record: dict[str, Any]) -> tuple[Path | Non
     return trial_dir, trial_input_path, trial_output_path
 
 
-def extract_trial_prediction(run_dir: Path, record: dict[str, Any]) -> TrialPrediction:
+def extract_trial_prediction(run_dir: Path, record: dict[str, Any], args: argparse.Namespace) -> TrialPrediction:
     ids = record.get("ids")
     if not isinstance(ids, dict):
         raise AdapterError("evidence record missing /ids object")
@@ -298,7 +327,7 @@ def extract_trial_prediction(run_dir: Path, record: dict[str, Any]) -> TrialPred
     instance_id = None
     repo = None
     base_commit = None
-    no_patch_reason = "no trial output patch or workspace git diff"
+    no_patch_reason = None
     patch = ""
     patch_source = ""
 
@@ -329,25 +358,33 @@ def extract_trial_prediction(run_dir: Path, record: dict[str, Any]) -> TrialPred
                 if isinstance(task_input.get("instance_id"), str):
                     instance_id = task_input["instance_id"]
 
-    if trial_output_path is not None and trial_output_path.exists():
+    workspace_patch, workspace_patch_source, workspace_patch_reason = try_extract_patch_from_workspace(
+        trial_dir,
+        args.workspace_repo_relpath,
+    )
+    if workspace_patch:
+        patch, patch_source = workspace_patch, workspace_patch_source
+    else:
+        no_patch_reason = workspace_patch_reason
+
+    if not patch and args.allow_answer_patch_fallback and trial_output_path is not None and trial_output_path.exists():
         try:
             trial_output = read_json(trial_output_path)
             extracted = try_extract_patch_from_answer(trial_output)
             if extracted is not None:
                 patch, patch_source = extracted
                 no_patch_reason = None
+            elif no_patch_reason is None:
+                no_patch_reason = "no workspace git diff and no patch-like trial output answer"
         except Exception as exc:  # pragma: no cover - defensive
-            no_patch_reason = f"failed to parse trial output patch: {exc}"
-
-    if not patch:
-        workspace_patch = try_extract_patch_from_workspace(trial_dir)
-        if workspace_patch is not None:
-            patch, patch_source = workspace_patch
-            no_patch_reason = None
+            if no_patch_reason is None:
+                no_patch_reason = f"failed to parse trial output patch: {exc}"
 
     if not patch:
         patch = ""
         patch_source = ""
+        if no_patch_reason is None:
+            no_patch_reason = "no patch extracted from workspace boundary"
 
     if not instance_id:
         no_patch_reason = no_patch_reason or "missing swebench instance_id in trial input"
@@ -537,6 +574,12 @@ def main() -> int:
             "requires_network_for_scoring": True,
             "deterministic_scoring": False,
         },
+        "patch_extraction": {
+            "strategy": "workspace_repo_git_diff",
+            "workspace_repo_relpath": args.workspace_repo_relpath,
+            "answer_patch_fallback_enabled": bool(args.allow_answer_patch_fallback),
+            "excluded_path_prefixes": list(EXCLUDED_REPO_PATH_PREFIXES),
+        },
     }
     write_json(manifest_path, manifest)
 
@@ -544,7 +587,7 @@ def main() -> int:
     trials: list[TrialPrediction] = []
     for record in records:
         try:
-            trials.append(extract_trial_prediction(run_dir, record))
+            trials.append(extract_trial_prediction(run_dir, record, args))
         except Exception as exc:
             ids = record.get("ids", {})
             fallback = TrialPrediction(

@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNNER_BIN_DEFAULT="$ROOT_DIR/../Experiments/rust/target/release/lab-cli"
 RUNNER_BIN="${AGENTLAB_RUNNER_BIN:-$RUNNER_BIN_DEFAULT}"
+SWEBENCH_VENV_DEFAULT="$ROOT_DIR/.venv_swebench"
 EXPERIMENT_REL=".lab/experiments/swebench_lite_curated_glm5_vs_codex_spark.yaml"
 EXPERIMENT_PATH="$ROOT_DIR/$EXPERIMENT_REL"
 IMAGE_TAG="${AGENTLAB_IMAGE_TAG:-rex-harness:swebench-lite}"
@@ -11,6 +12,7 @@ EXECUTOR="${AGENTLAB_EXECUTOR:-local_docker}"
 MATERIALIZE="${AGENTLAB_MATERIALIZE:-full}"
 BUILD_EXPERIMENT="${AGENTLAB_BUILD_EXPERIMENT:-1}"
 EXPERIMENT_LIMIT="${AGENTLAB_LIMIT:-}"
+MAX_CONCURRENCY="${AGENTLAB_MAX_CONCURRENCY:-}"
 PROGRESS_INTERVAL_SEC="${AGENTLAB_PROGRESS_INTERVAL_SEC:-15}"
 RUN_MODE="${AGENTLAB_RUN_MODE:-run_dev}"
 SETUP_CMD_DEFAULT="/bin/bash /opt/rex/scripts/agentlab/setup_swebench_trial_workspace.sh"
@@ -35,6 +37,7 @@ Environment overrides:
   AGENTLAB_IMAGE_TAG        Docker image tag to require before run.
   AGENTLAB_BUILD_EXPERIMENT 1 to rebuild experiment before run (default), 0 to skip.
   AGENTLAB_LIMIT            If rebuild is enabled, pass --limit to the builder.
+  AGENTLAB_MAX_CONCURRENCY  If rebuild is enabled, pass --max-concurrency to the builder.
   AGENTLAB_PROGRESS_INTERVAL_SEC Seconds between progress updates (default: 15).
   AGENTLAB_RUN_MODE         run_dev (default, enables setup command) | run
   AGENTLAB_SETUP_COMMAND    Setup command passed to lab-cli run-dev --setup.
@@ -44,6 +47,13 @@ USAGE
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
+fi
+
+if [[ -z "${AGENTLAB_SWEBENCH_VENV:-}" ]]; then
+  export AGENTLAB_SWEBENCH_VENV="$SWEBENCH_VENV_DEFAULT"
+fi
+if [[ -z "${AGENTLAB_SWEBENCH_PYTHON:-}" && -x "$AGENTLAB_SWEBENCH_VENV/bin/python" ]]; then
+  export AGENTLAB_SWEBENCH_PYTHON="$AGENTLAB_SWEBENCH_VENV/bin/python"
 fi
 
 if [[ ! -x "$RUNNER_BIN" ]]; then
@@ -72,6 +82,13 @@ if [[ ! -f "$EXPERIMENT_PATH" ]]; then
   exit 1
 fi
 
+if [[ -n "$MAX_CONCURRENCY" ]]; then
+  if ! [[ "$MAX_CONCURRENCY" =~ ^[0-9]+$ ]] || [[ "$MAX_CONCURRENCY" -le 0 ]]; then
+    echo "invalid AGENTLAB_MAX_CONCURRENCY: $MAX_CONCURRENCY (expected positive integer)" >&2
+    exit 1
+  fi
+fi
+
 if ! docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
   echo "docker image not found: $IMAGE_TAG" >&2
   echo "build it first: bash scripts/agentlab/build_agent_image.sh --tag $IMAGE_TAG" >&2
@@ -94,6 +111,9 @@ if [[ "$BUILD_EXPERIMENT" == "1" ]]; then
   BUILD_CMD=(node scripts/agentlab/build_swebench_curated_ab_experiment.mjs)
   if [[ -n "$EXPERIMENT_LIMIT" ]]; then
     BUILD_CMD+=(--limit "$EXPERIMENT_LIMIT")
+  fi
+  if [[ -n "$MAX_CONCURRENCY" ]]; then
+    BUILD_CMD+=(--max-concurrency "$MAX_CONCURRENCY")
   fi
   (
     cd "$ROOT_DIR"

@@ -11,6 +11,7 @@ import { dirname, join } from 'path';
 import { homedir } from 'os';
 import { GraphStore } from 'graphd';
 import { SUPPORTED_PROVIDER_IDS, getProviderDefinition } from 'types';
+import { stderrLogger, type HarnessLogger } from './harness_infra.js';
 
 /**
  * Provider API keys configuration type.
@@ -78,16 +79,18 @@ export class LocalProviderManager {
   private store: GraphStore;
   private masterKey: Buffer | null = null;
   private masterKeyPath: string;
+  private logger: HarnessLogger;
 
-  constructor(graphdDbPath: string) {
+  constructor(graphdDbPath: string, logger: HarnessLogger = stderrLogger) {
     this.store = new GraphStore(graphdDbPath);
     this.store.initialize();
     this.masterKeyPath = join(homedir(), '.config', 'rex', 'master.key');
+    this.logger = logger;
 
     // Ensure local user exists
     this.ensureLocalUser();
 
-    console.log(`[local-providers] Initialized with GraphD at ${graphdDbPath}`);
+    this.logger.info(`[local-providers] Initialized with GraphD at ${graphdDbPath}`);
   }
 
   /**
@@ -149,7 +152,7 @@ export class LocalProviderManager {
         encrypted.iv
       );
 
-      console.log(`[local-providers] Saved ${provider} key to GraphD`);
+      this.logger.info(`[local-providers] Saved ${provider} key to GraphD`);
       return { success: true };
     } catch (err) {
       return {
@@ -166,7 +169,7 @@ export class LocalProviderManager {
     try {
       this.store.deleteProviderCredential(LOCAL_USER_ID, provider);
 
-      console.log(`[local-providers] Deleted ${provider} key from GraphD`);
+      this.logger.info(`[local-providers] Deleted ${provider} key from GraphD`);
       return { success: true };
     } catch (err) {
       return {
@@ -200,7 +203,7 @@ export class LocalProviderManager {
         .replace(/\[201~/g, '')
         .trim() ?? null;
     } catch (err) {
-      console.error(`[local-providers] Failed to get ${provider} key:`, err);
+      this.logger.error(`[local-providers] Failed to get ${provider} key: ${err}`);
       return null;
     }
   }
@@ -219,11 +222,11 @@ export class LocalProviderManager {
         const keyPreview = key.length > 12
           ? `${key.slice(0, 8)}...${key.slice(-4)} (len=${key.length})`
           : `${key.slice(0, 8)}... (len=${key.length})`;
-        console.log(`[local-providers] Found stored key for ${provider}: ${keyPreview}`);
+        this.logger.info(`[local-providers] Found stored key for ${provider}: ${keyPreview}`);
       }
     }
 
-    console.log(`[local-providers] getProviders returning ${Object.keys(providers).length} keys`);
+    this.logger.info(`[local-providers] getProviders returning ${Object.keys(providers).length} keys`);
     return providers;
   }
 
@@ -268,7 +271,7 @@ export class LocalProviderManager {
     }
 
     // Generate new key
-    console.log(`[local-providers] Generating master key at ${this.masterKeyPath}`);
+    this.logger.info(`[local-providers] Generating master key at ${this.masterKeyPath}`);
     const newKey = randomBytes(KEY_LENGTH);
     const keyDir = dirname(this.masterKeyPath);
     if (!existsSync(keyDir)) {

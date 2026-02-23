@@ -323,7 +323,7 @@ class HarnessProviderKeyService implements ProviderKeyService {
     this.logger = logger;
     if (graphdDbPath) {
       try {
-        this.localProviders = new LocalProviderManager(graphdDbPath);
+        this.localProviders = new LocalProviderManager(graphdDbPath, logger);
         this.logger.info('HarnessProviderKeyService initialized with GraphD', { dbPath: graphdDbPath });
       } catch (err) {
         this.logger.warning('Failed to initialize LocalProviderManager', { error: String(err) });

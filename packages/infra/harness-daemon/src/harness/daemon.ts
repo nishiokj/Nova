@@ -79,11 +79,11 @@ export class HarnessDaemon {
     if (this.idleTimeoutMs <= 0 || this.shutdownRequested) return;
 
     this.cancelIdleTimer();
-    console.log(`[harness-daemon] No clients connected, will shutdown in ${this.idleTimeoutMs / 1000}s`);
+    process.stderr.write(`[harness-daemon] No clients connected, will shutdown in ${this.idleTimeoutMs / 1000}s\n`);
 
     this.idleTimer = setTimeout(() => {
       if (this.bus && this.bus.getConnectionCount() === 0) {
-        console.log('[harness-daemon] Idle timeout reached, shutting down');
+        process.stderr.write('[harness-daemon] Idle timeout reached, shutting down\n');
         this.shutdownRequested = true;
         void this.stop().then(() => process.exit(0));
       }
@@ -91,7 +91,7 @@ export class HarnessDaemon {
   }
 
   private handleConnect(connectionId: string): void {
-    console.log(`[harness-daemon] Client connected: ${connectionId}`);
+    process.stderr.write(`[harness-daemon] Client connected: ${connectionId}\n`);
     this.cancelIdleTimer();
   }
 
@@ -99,7 +99,7 @@ export class HarnessDaemon {
     this.gateway?.handleDisconnect(connectionId);
 
     const remaining = this.bus?.getConnectionCount() ?? 0;
-    console.log(`[harness-daemon] Client disconnected: ${connectionId}, remaining: ${remaining}`);
+    process.stderr.write(`[harness-daemon] Client disconnected: ${connectionId}, remaining: ${remaining}\n`);
 
     if (remaining === 0) {
       this.startIdleTimer();
@@ -121,7 +121,7 @@ export class HarnessDaemon {
     if (!this.authService && this.authConfig) {
       this.authService = createAuthServiceFromConfig(this.authConfig);
       if (this.authService) {
-        console.log('[harness-daemon] Auth service initialized');
+        process.stderr.write('[harness-daemon] Auth service initialized\n');
       }
     }
 
@@ -175,7 +175,7 @@ export class HarnessDaemon {
    * This method is a no-op and will be removed in a future version.
    */
   setDangerousMode(_enabled: boolean): void {
-    console.warn('[harness-daemon] setDangerousMode() is deprecated - dangerous mode is now per-session. Use set_dangerous_mode command via bridge.');
+    process.stderr.write('[harness-daemon] setDangerousMode() is deprecated - dangerous mode is now per-session. Use set_dangerous_mode command via bridge.\n');
   }
 
   /**
@@ -197,7 +197,7 @@ function parseDaemonArgs(): HarnessDaemonOptions {
     const arg = args[i];
     if (arg === '--dangerous') {
       options.dangerousMode = true;
-      console.log('[harness-daemon] WARNING: Running in dangerous mode - all permission checks disabled');
+      process.stderr.write('[harness-daemon] WARNING: Running in dangerous mode - all permission checks disabled\n');
     } else if (arg === '--port' && i + 1 < args.length) {
       options.port = parseInt(args[++i], 10);
     } else if (arg === '--host' && i + 1 < args.length) {
@@ -218,10 +218,10 @@ export async function runHarnessDaemon(): Promise<void> {
   const options = parseDaemonArgs();
   const daemon = new HarnessDaemon(options);
   const address = await daemon.start();
-  console.log(`[harness-daemon] bus listening on ${address.host}:${address.port}`);
+  process.stderr.write(`[harness-daemon] bus listening on ${address.host}:${address.port}\n`);
 
   const shutdown = async (signal: string) => {
-    console.log(`[harness-daemon] received ${signal}, shutting down`);
+    process.stderr.write(`[harness-daemon] received ${signal}, shutting down\n`);
     await daemon.stop();
     process.exit(0);
   };
@@ -232,7 +232,7 @@ export async function runHarnessDaemon(): Promise<void> {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   runHarnessDaemon().catch((error) => {
-    console.error('[harness-daemon] fatal error:', error);
+    process.stderr.write(`[harness-daemon] fatal error: ${error}\n`);
     process.exit(1);
   });
 }

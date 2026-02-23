@@ -36,7 +36,7 @@
         "max_tool_calls": 60,
         "max_duration_ms": 90000
       },
-      "tools": ["Read", "Glob", "Grep", "Bash", "ExpandConversation"],
+      "tools": ["Read", "Glob", "Grep", "Bash"],
       "output_schema": "explorer"
     },
 
@@ -52,7 +52,7 @@
         "max_tool_calls": 225,
         "max_duration_ms": 1000000
       },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "PromptUser", "ExpandConversation", "coding", "explorer", "WebSearch"],
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "coding", "explorer", "WebSearch"],
   "output_schema": "goal_driven"
     },
 
@@ -69,7 +69,7 @@
         "max_tool_calls": 250,
         "max_duration_ms": 1000000
       },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "PromptUser", "ExpandConversation", "explorer"],
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "explorer"],
       "output_schema": "goal_driven"
     },
 
@@ -100,7 +100,7 @@
         "max_tool_calls": 45,
         "max_duration_ms": 180000
       },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "PromptUser", "ExpandConversation"],
+      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill"],
       "output_schema": "agent_action"
     },
 
@@ -132,7 +132,7 @@
         "max_tool_calls": 60,
         "max_duration_ms": 180000
       },
-      "tools": ["Read", "Glob", "Grep", "PromptUser"],
+      "tools": ["Read", "Glob", "Grep"],
       "output_schema": "planner_output"
     }
   },

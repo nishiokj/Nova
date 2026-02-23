@@ -15,6 +15,17 @@ export interface HarnessLogger {
 }
 
 /**
+ * Minimal stderr logger for use during startup (before file logger exists)
+ * and in modules that don't have access to the harness file logger.
+ */
+export const stderrLogger: HarnessLogger = {
+  info: (msg, meta) => process.stderr.write(`[INFO] ${msg}${meta ? ' ' + JSON.stringify(meta) : ''}\n`),
+  debug: (msg, meta) => process.stderr.write(`[DEBUG] ${msg}${meta ? ' ' + JSON.stringify(meta) : ''}\n`),
+  warning: (msg, meta) => process.stderr.write(`[WARN] ${msg}${meta ? ' ' + JSON.stringify(meta) : ''}\n`),
+  error: (msg, meta) => process.stderr.write(`[ERROR] ${msg}${meta ? ' ' + JSON.stringify(meta) : ''}\n`),
+};
+
+/**
  * File-based logger for TUI compatibility.
  * Writes to logs/harness.log since console is captured by TUI.
  */
