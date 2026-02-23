@@ -19,8 +19,9 @@ import {
   vocabForProvider,
 } from 'llm';
 import { getAgentPrompt } from './prompts.js';
+import { MemoryBridge } from './memory-bridge.js';
 import type { ToolRegistry } from 'tools';
-import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema, MessageItem, ContextItem, ArtifactItem, LLMItem, ContentBlock } from 'types';
+import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema, ContextItem, ArtifactItem, LLMItem, ContentBlock } from 'types';
 import { isLLMMessageItem, isLLMFunctionCallItem, isLLMFunctionCallOutputItem } from 'types';
 import { createEvent, errorResult, successResult } from 'types';
 import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS, unwrapStructuredOutput } from 'shared';
@@ -149,47 +150,6 @@ export interface ModelSelection {
 }
 
 /**
- * Memory injector interface for injecting relevant memory into agent context.
- */
-export interface MemoryInjector {
-  injectRecentConversations?: (params: { limit?: number; maxTokens: number; connectors?: string }) => Promise<string | null>;
-  summarizeQueryPlan?: (query: string) => string;
-  explainQueryPlan?: (query: string) => { intent?: string } | undefined;
-  injectEvidence?: (params: {
-    task: {
-      objective: string;
-      recentMessages: string[];
-      touchedFiles?: string[];
-      iteration: number;
-      sessionId: string;
-      runId?: string;
-      workItemId?: string;
-    };
-    budget: {
-      maxTokens: number;
-      maxItems?: number;
-      topK?: number;
-      filters?: Record<string, unknown>;
-      minCoverage?: Partial<Record<string, number>>;
-    };
-    options?: {
-      trace?: boolean;
-    };
-  }) => Promise<{
-    content: string;
-    atoms: unknown[];
-    trainingSignal?: Record<string, unknown>;
-    metrics: {
-      totalTokens: number;
-      attentionTax: number;
-      coverage: Record<string, number>;
-      discriminatorsIncluded: number;
-      latencyMs: number;
-    };
-  } | null>;
-}
-
-/**
  * Pure execution agent.
  */
 export class Agent {
@@ -203,34 +163,18 @@ export class Agent {
   private hooks?: AgentHooks;
   private internalHookQueue: InternalHookQueue;
   private getModelSelection?: (agentType: string) => ModelSelection | null;
-  private memoryInjector?: MemoryInjector;
+  private memoryBridge?: MemoryBridge;
   private sessionKey: string;
-  private memoryInjectionCache = new Map<string, {
-    queryKey: string;
-    query: string;
-    content: string | null;
-    itemCount: number;
-    latencyMs?: number;
-    coverage?: Record<string, number>;
-    discriminatorsIncluded?: number;
-    totalTokens?: number;
-    trainingSignal?: Record<string, unknown>;
-  }>();
 
   private sanitizeContextPathSegment(value: string): string {
     return value.replace(/[^A-Za-z0-9._-]/g, '_');
   }
 
   private resolveLocalContextFilePath(globalContext: ContextWindow, workItemId: string): string | undefined {
-    if (!globalContext.filePath) {
-      return undefined;
-    }
+    if (!globalContext.filePath) return undefined;
     const sessionDir = path.dirname(globalContext.filePath);
-    const localDir = path.join(sessionDir, 'work-contexts');
-    const safeRequestId = this.sanitizeContextPathSegment(this.requestId || 'request');
-    const safeAgentType = this.sanitizeContextPathSegment(this.config.type || 'agent');
-    const safeWorkId = this.sanitizeContextPathSegment(workItemId || 'work');
-    return path.join(localDir, `${safeRequestId}__${safeAgentType}__${safeWorkId}.md`);
+    const safe = (v: string) => this.sanitizeContextPathSegment(v);
+    return path.join(sessionDir, 'work-contexts', `${safe(this.requestId || 'request')}__${safe(this.config.type || 'agent')}__${safe(workItemId || 'work')}.md`);
   }
 
   constructor(config: AgentConfig, runtime: {
@@ -244,7 +188,7 @@ export class Agent {
     hooks?: AgentHooks;
     internalHookQueue?: InternalHookQueue;
     getModelSelection?: (agentType: string) => ModelSelection | null;
-    memoryInjector?: MemoryInjector;
+    memoryInjector?: import('./memory-bridge.js').MemoryInjector;
   }) {
     this.config = config;
     this.llm = runtime.llm;
@@ -257,7 +201,15 @@ export class Agent {
     this.hooks = runtime.hooks;
     this.internalHookQueue = runtime.internalHookQueue ?? noopHookQueue;
     this.getModelSelection = runtime.getModelSelection;
-    this.memoryInjector = runtime.memoryInjector;
+    if (runtime.memoryInjector) {
+      this.memoryBridge = new MemoryBridge(runtime.memoryInjector, {
+        sessionKey: this.sessionKey,
+        requestId: this.requestId,
+        agentType: this.config.type,
+        emit: this.emit,
+        hookQueue: this.internalHookQueue,
+      });
+    }
   }
 
   /**
@@ -317,38 +269,6 @@ export class Agent {
     result.terminationReason = directive.terminationReason ?? 'user_stopped';
     result.error = directive.reason ?? 'Execution stopped';
     return true;
-  }
-
-  /**
-   * Emit memory_injected event via both internal hook queue and event emitter.
-   */
-  private emitMemoryInjected(workItem: WorkItem, data: {
-    query: string;
-    resultPreview?: string;
-    memoryContent?: string;
-    contextWithMemory?: string;
-    itemCount: number;
-    success: boolean;
-    iteration: number;
-    latencyMs?: number;
-    coverage?: Record<string, number>;
-    discriminatorsIncluded?: number;
-    totalTokens?: number;
-    trainingSignal?: Record<string, unknown>;
-  }): void {
-    this.internalHookQueue.enqueue({
-      type: 'memory_injected',
-      ...data,
-    }, this.buildHookContext(workItem));
-    this.emit(createEvent('memory_injected', data, workItem.workId));
-  }
-
-  private normalizeMemoryQueryKey(value: string): string {
-    return value.trim().replace(/\s+/g, ' ').toLowerCase();
-  }
-
-  private getMemoryCacheKey(workItem: WorkItem): string {
-    return workItem.workId || this.sessionKey || 'default';
   }
 
   /**
@@ -466,31 +386,11 @@ export class Agent {
         lastIterationInstruction = '\n\nWARNING: You have ONE iteration remaining after this one. On your final iteration you will NOT be able to make tool calls. You MUST produce artifacts for all files you have read in your next response. If you have not yet extracted artifacts, include them NOW. Every file read without a corresponding artifact is a validation failure.';
       }
 
-      // Memory injection (recent + evidence retrieval)
-      let recentConversationContent: string | null = null;
-      if (this.memoryInjector?.injectRecentConversations && iteration === 0) {
-        const injector = this.memoryInjector;
-        recentConversationContent = yield* Effect.tryPromise({
-          try: () => injector.injectRecentConversations!({ limit: 10, maxTokens: 600 }),
-          catch: () => null as never,
-        }).pipe(Effect.catchAll(() => Effect.succeed(null)));
-      }
-
-      let memoryContent: string | null = null;
-      if (this.memoryInjector) {
-        const injectorResult = yield* this.buildMemoryInjection(
-          workItem, globalContext, taskContext, cwd, iteration
-        ).pipe(Effect.catchAll(() => Effect.succeed(null as string | null)));
-        memoryContent = injectorResult;
-      }
-
-      // Combine task context with memory injection
-      const combinedMemoryContent = [recentConversationContent, memoryContent]
-        .filter((section): section is string => typeof section === 'string' && section.trim().length > 0)
-        .join('\n\n');
-      const contextWithMemory = combinedMemoryContent
-        ? `${taskContext}\n\n${combinedMemoryContent}`
-        : taskContext;
+      // Memory injection (recent conversations + evidence retrieval)
+      const memoryContent = this.memoryBridge
+        ? yield* this.memoryBridge.inject(workItem, globalContext, taskContext, cwd, iteration)
+        : null;
+      const contextWithMemory = memoryContent ? `${taskContext}\n\n${memoryContent}` : taskContext;
 
       const messages = this.buildMessages(
         system,
@@ -505,179 +405,6 @@ export class Agent {
 
       return { messages, tools, toolChoice };
     });
-  }
-
-  /**
-   * Memory injection logic extracted for Effect composition.
-   * Returns the memory content string or null.
-   */
-  private buildMemoryInjection(
-    workItem: WorkItem,
-    globalContext: ContextWindow,
-    taskContext: string,
-    cwd: string,
-    iteration: number
-  ): Effect.Effect<string | null, Error> {
-    return Effect.gen(this, function* () {
-      const injector = this.memoryInjector!;
-      const query = this.buildMemoryQuery(workItem, globalContext);
-      const querySummary = injector.summarizeQueryPlan?.(query);
-      const plan = injector.explainQueryPlan?.(query);
-      const intent = plan?.intent ?? 'unknown';
-      const isConceptIntent = intent === 'decision'
-        || intent === 'preference'
-        || intent === 'principle'
-        || intent === 'tradeoff';
-      const isRecallIntent = intent === 'recall';
-      const eventQuery = querySummary || query;
-      const queryKey = this.normalizeMemoryQueryKey(eventQuery);
-      const cacheKey = this.getMemoryCacheKey(workItem);
-      const recentMessageItems = globalContext.getItemsByType('message') as MessageItem[];
-      const shouldUseEvidence = !!injector.injectEvidence
-        && !isConceptIntent
-        && !isRecallIntent;
-      const cached = this.memoryInjectionCache.get(cacheKey);
-      const canReuseCached = !!shouldUseEvidence && !!cached && cached.queryKey === queryKey;
-
-      if (canReuseCached) {
-        const memoryContent = cached.content;
-        this.emitMemoryInjected(workItem, {
-          query: eventQuery,
-          resultPreview: memoryContent ? memoryContent.slice(0, 500) : undefined,
-          memoryContent: memoryContent ?? undefined,
-          contextWithMemory: memoryContent ? `${taskContext}\n\n${memoryContent}` : undefined,
-          itemCount: cached.itemCount,
-          success: memoryContent !== null,
-          iteration,
-          latencyMs: cached.latencyMs,
-          coverage: cached.coverage,
-          discriminatorsIncluded: cached.discriminatorsIncluded,
-          totalTokens: cached.totalTokens,
-          trainingSignal: cached.trainingSignal,
-        });
-        return memoryContent;
-      }
-
-      let evidenceResult: {
-        content: string;
-        atoms: unknown[];
-        trainingSignal?: Record<string, unknown>;
-        metrics: {
-          totalTokens: number;
-          attentionTax: number;
-          coverage: Record<string, number>;
-          discriminatorsIncluded: number;
-          latencyMs: number;
-        };
-      } | null = null;
-
-      if (shouldUseEvidence && injector.injectEvidence) {
-        const recentMessages = recentMessageItems
-          .filter(item => item.role === 'user')
-          .map(item => {
-            if (typeof item.content === 'string') return item.content;
-            if (Array.isArray(item.content)) {
-              return item.content
-                .map(block => (block.type === 'text' ? block.text : ''))
-                .join(' ');
-            }
-            return '';
-          })
-          .filter(text => text && text.trim().length > 0)
-          .slice(-3);
-
-        const touchedFiles = globalContext.getReadFilesArray().map((filePath) => {
-          if (path.isAbsolute(filePath)) {
-            return path.relative(cwd, filePath);
-          }
-          return filePath;
-        });
-
-        evidenceResult = yield* Effect.tryPromise({
-          try: () => injector.injectEvidence!({
-            task: {
-              objective: workItem.objective,
-              recentMessages,
-              touchedFiles,
-              iteration,
-              sessionId: this.sessionKey,
-              runId: this.requestId || undefined,
-              workItemId: workItem.workId,
-            },
-            budget: {
-              maxTokens: 1000,
-              maxItems: 3,
-              topK: 12,
-              filters: {
-                intent,
-                mode: 'memory_injection',
-              },
-              minCoverage: {},
-            },
-          }),
-          catch: (e) => e instanceof Error ? e : new Error(String(e)),
-        });
-      }
-
-      if (evidenceResult?.content) {
-        const memoryContent = evidenceResult.content;
-        const contextWithMemory = `${taskContext}\n\n${memoryContent}`;
-        this.memoryInjectionCache.set(cacheKey, {
-          queryKey,
-          query,
-          content: memoryContent,
-          itemCount: evidenceResult.atoms?.length ?? 0,
-          latencyMs: evidenceResult.metrics?.latencyMs,
-          coverage: evidenceResult.metrics?.coverage,
-          discriminatorsIncluded: evidenceResult.metrics?.discriminatorsIncluded,
-          totalTokens: evidenceResult.metrics?.totalTokens,
-          trainingSignal: evidenceResult.trainingSignal,
-        });
-        this.emitMemoryInjected(workItem, {
-          query: eventQuery,
-          resultPreview: memoryContent.slice(0, 500),
-          memoryContent,
-          contextWithMemory,
-          itemCount: evidenceResult.atoms?.length ?? 0,
-          success: true,
-          iteration,
-          latencyMs: evidenceResult.metrics?.latencyMs,
-          coverage: evidenceResult.metrics?.coverage,
-          discriminatorsIncluded: evidenceResult.metrics?.discriminatorsIncluded,
-          totalTokens: evidenceResult.metrics?.totalTokens,
-          trainingSignal: evidenceResult.trainingSignal,
-        });
-        return memoryContent;
-      }
-
-      this.memoryInjectionCache.set(cacheKey, {
-        queryKey,
-        query,
-        content: null,
-        itemCount: 0,
-      });
-      this.emitMemoryInjected(workItem, {
-        query: eventQuery,
-        itemCount: 0,
-        success: false,
-        iteration,
-      });
-      return null;
-    }).pipe(
-      Effect.catchAll(() => {
-        // Silent failure - continue without memory
-        // Fire memory_injected hook even on failure for observability
-        const injector = this.memoryInjector!;
-        this.emitMemoryInjected(workItem, {
-          query: injector.summarizeQueryPlan?.(this.buildMemoryQuery(workItem, globalContext))
-            || this.buildMemoryQuery(workItem, globalContext),
-          itemCount: 0,
-          success: false,
-          iteration,
-        });
-        return Effect.succeed(null);
-      })
-    );
   }
 
   /**
@@ -1013,22 +740,10 @@ export class Agent {
       // Bundle artifacts explicitly in result for clear contract
       result.artifacts = localContext.getArtifacts();
 
-      // Explorer validation: reading files should produce artifacts.
-      // Keep this strict for normal completions, but allow partial bound exits.
+      // Explorer produced no artifacts despite reading files — mark incomplete
+      // but preserve the response content which is still valuable.
       if (this.config.type === 'explorer' && result.filesRead.length > 0 && result.artifacts!.length === 0) {
-        if (isBoundsTerminationReason(result.terminationReason)) {
-          console.warn(
-            `[AGENT:explorer] BOUNDS EXIT WITH ZERO ARTIFACTS: ${result.filesRead.length} files read, `
-            + `termination=${result.terminationReason}`
-          );
-        } else {
-          result.success = false;
-          result.terminationReason = 'invalid_action';
-          result.error = `Explorer read ${result.filesRead.length} files but extracted 0 artifacts. `
-            + 'This is a hard failure. Every file read MUST produce artifacts. '
-            + `Files read: ${result.filesRead.slice(0, 5).join(', ')}${result.filesRead.length > 5 ? '...' : ''}`;
-          console.error(`[AGENT:explorer] VALIDATION FAILURE: ${result.filesRead.length} files read, 0 artifacts produced`);
-        }
+        result.isIncomplete = true;
       }
 
       // HARD VALIDATION: Detect and reject planning-speak responses
@@ -1616,38 +1331,6 @@ export class Agent {
   }
 
   /**
-   * Build a query for memory retrieval from workItem objective and recent user messages.
-   */
-  private buildMemoryQuery(workItem: WorkItem, globalContext: ContextWindow): string {
-    const parts: string[] = [];
-
-    // Include workItem objective
-    if (workItem?.objective) {
-      parts.push(workItem.objective);
-    }
-
-    // Include last 3 user messages from global context (avoid file_content/artifact leakage)
-    const userMessages = globalContext.items
-      .filter((item): item is MessageItem => item.type === 'message' && item.role === 'user')
-      .slice(-3)
-      .map((item) => {
-        if (typeof item.content === 'string') return item.content;
-        if (Array.isArray(item.content)) {
-          return item.content
-            .map((block) => (block.type === 'text' ? block.text : ''))
-            .join(' ');
-        }
-        return '';
-      })
-      .filter((c): c is string => typeof c === 'string' && c.trim().length > 0);
-
-    parts.push(...userMessages);
-
-    // Cap query length at 500 chars
-    return parts.join(' ').slice(0, 500);
-  }
-
-  /**
    * Build system prompt components for caching optimization.
    * Rebuilds the prompt with provider-aware tool vocabulary so the model
    * sees tool names matching its actual tool definitions.
@@ -1675,120 +1358,66 @@ export class Agent {
     return allTools.filter((tool) => allowed.has(tool.name.toLowerCase()));
   }
 
-  /**
-   * Build a filtered global context view to reduce cross-workItem bleed.
-   * Keeps recent messages, target-related files, and relevant artifacts.
-   */
   private buildGlobalContextView(globalContext: ContextWindow, workItem: WorkItem): ContextWindow {
-    const toNumber = (value: string | undefined, fallback: number): number => {
-      const parsed = Number(value);
-      return Number.isFinite(parsed) ? parsed : fallback;
+    const envNum = (key: string, fallback: number, min = 0) => {
+      const v = Number(process.env[key]); return Math.max(min, Number.isFinite(v) ? v : fallback);
     };
+    const threshold = envNum('GLOBAL_CONTEXT_FILTER_THRESHOLD', 0.35);
+    const maxItems = envNum('GLOBAL_CONTEXT_MAX_ITEMS', 200, 50);
+    const maxMessages = envNum('GLOBAL_CONTEXT_MAX_MESSAGES', 16, 6);
+    const maxFiles = envNum('GLOBAL_CONTEXT_MAX_FILE_CONTENT', 6, 2);
+    const maxArtifacts = envNum('GLOBAL_CONTEXT_MAX_ARTIFACTS', 6, 2);
 
-    const threshold = toNumber(process.env.GLOBAL_CONTEXT_FILTER_THRESHOLD, 0.35);
-    const maxItems = Math.max(50, toNumber(process.env.GLOBAL_CONTEXT_MAX_ITEMS, 200));
-    const maxMessages = Math.max(6, toNumber(process.env.GLOBAL_CONTEXT_MAX_MESSAGES, 16));
-    const maxFiles = Math.max(2, toNumber(process.env.GLOBAL_CONTEXT_MAX_FILE_CONTENT, 6));
-    const maxArtifacts = Math.max(2, toNumber(process.env.GLOBAL_CONTEXT_MAX_ARTIFACTS, 6));
-
-    const shouldFilter = globalContext.items.length > maxItems ||
-      globalContext.metrics.percentageUsed >= threshold;
-
-    if (!shouldFilter) {
+    if (globalContext.items.length <= maxItems && globalContext.metrics.percentageUsed < threshold) {
       return globalContext;
     }
 
     const view = ContextWindow.deserialize(globalContext.serialize());
     const items = view.items;
-
-    const normalizePath = (input: string): string => input.replace(/\\/g, '/');
-    const targetPaths = (workItem.targetPaths ?? [])
-      .map((p) => normalizePath(p))
-      .filter((p) => p.length > 0);
-    const hasTargets = targetPaths.length > 0;
-
-    const matchesTarget = (pathValue: string): boolean => {
-      const normalized = normalizePath(pathValue);
-      return targetPaths.some((target) => {
-        if (normalized === target) return true;
-        if (normalized.endsWith(`/${target}`)) return true;
-        if (normalized.startsWith(target)) return true;
-        return false;
-      });
+    const norm = (s: string) => s.replace(/\\/g, '/');
+    const targets = (workItem.targetPaths ?? []).map(norm).filter(p => p.length > 0);
+    const matchesTarget = (p: string) => {
+      const n = norm(p);
+      return targets.some(t => n === t || n.endsWith(`/${t}`) || n.startsWith(t));
     };
 
     const keep = new Set<ContextItem>();
 
-    // Keep system/developer messages and the most recent user/assistant messages.
-    let keptMessages = 0;
+    // Messages: keep system/developer + most recent N user/assistant
+    let keptMsgs = 0;
     for (let i = items.length - 1; i >= 0; i--) {
       const item = items[i];
       if (item.type !== 'message') continue;
-      if (item.role === 'system' || item.role === 'developer') {
+      if (item.role === 'system' || item.role === 'developer' || keptMsgs < maxMessages) {
         keep.add(item);
-        continue;
-      }
-      if (keptMessages < maxMessages) {
-        keep.add(item);
-        keptMessages++;
+        if (item.role !== 'system' && item.role !== 'developer') keptMsgs++;
       }
     }
 
-    // Keep file contents relevant to targets, or most recent if no targets match.
-    const fileItems: FileContentItem[] = [];
-    for (const item of items) {
-      if (item.type === 'file_content') {
-        fileItems.push(item as FileContentItem);
-      }
+    // Files: prefer target-matching, fall back to most recent
+    const fileItems = items.filter((i): i is FileContentItem => i.type === 'file_content');
+    const keptFiles = (targets.length > 0
+      ? fileItems.filter(f => matchesTarget(f.path)).slice(-maxFiles)
+      : []
+    ).length > 0
+      ? fileItems.filter(f => matchesTarget(f.path)).slice(-maxFiles)
+      : fileItems.slice(-maxFiles);
+    for (const f of keptFiles) keep.add(f);
+
+    const keptPaths = new Set(keptFiles.map(f => f.path));
+
+    // Artifacts: prefer target-matching, fall back to path-matching or most recent
+    const artifactItems = items.filter((i): i is ArtifactItem => i.type === 'artifact');
+    let keptArtifacts = targets.length > 0
+      ? artifactItems.filter(a => matchesTarget(a.sourcePath))
+      : artifactItems.slice(-maxArtifacts);
+    if (keptArtifacts.length === 0 && keptPaths.size > 0) {
+      keptArtifacts = artifactItems.filter(a => keptPaths.has(a.sourcePath));
     }
+    for (const a of keptArtifacts) keep.add(a);
 
-    let keptFileItems: FileContentItem[] = [];
-    if (fileItems.length > 0) {
-      if (hasTargets) {
-        const matching = fileItems.filter((item) => matchesTarget(item.path));
-        keptFileItems = matching.slice(-maxFiles);
-        if (keptFileItems.length === 0) {
-          keptFileItems = fileItems.slice(-Math.min(maxFiles, fileItems.length));
-        }
-      } else {
-        keptFileItems = fileItems.slice(-Math.min(maxFiles, fileItems.length));
-      }
-    }
-
-    for (const item of keptFileItems) {
-      keep.add(item);
-    }
-
-    const keptPaths = new Set(keptFileItems.map((item) => item.path));
-
-    // Keep artifacts that align with target paths, otherwise most recent ones.
-    const artifactItems: ArtifactItem[] = [];
-    for (const item of items) {
-      if (item.type === 'artifact') {
-        artifactItems.push(item as ArtifactItem);
-      }
-    }
-
-    let keptArtifacts: ArtifactItem[] = [];
-    if (artifactItems.length > 0) {
-      if (hasTargets) {
-        keptArtifacts = artifactItems.filter((item) => matchesTarget(item.sourcePath));
-      } else {
-        keptArtifacts = artifactItems.slice(-Math.min(maxArtifacts, artifactItems.length));
-      }
-      if (keptArtifacts.length === 0 && keptPaths.size > 0) {
-        keptArtifacts = artifactItems.filter((item) => keptPaths.has(item.sourcePath));
-      }
-    }
-
-    for (const item of keptArtifacts) {
-      keep.add(item);
-    }
-
-    // Drop tool history and reasoning items to minimize cross-task bleed.
-    view.filterItems((item) => keep.has(item));
+    view.filterItems(item => keep.has(item));
     view.rebuildReadFilesFromItems();
-
     return view;
   }
 
@@ -2293,119 +1922,43 @@ export class Agent {
     });
   }
 
-  /**
-   * Create a merged context view for sub-agent consumption.
-   * Combines global context with relevant items from parent's local context.
-   * This enables sub-agents to see parent's discoveries without re-discovery.
-   */
   private createMergedContext(
     globalContext: ContextWindow,
     parentLocalContext: ContextWindow,
-    options: {
-      includeArtifacts: boolean;
-      includeFileContent: boolean;
-    }
+    options: { includeArtifacts: boolean; includeFileContent: boolean }
   ): ContextWindow {
-    // Clone global context to avoid mutation
     const merged = ContextWindow.deserialize(globalContext.serialize());
+    merged.filterItems(item => item.type !== 'function_call' && item.type !== 'function_call_output');
 
-    // Filter out tool call history from globalContext clone - sub-agents should not
-    // see parent's tool calls (they could mimic tool signatures not in their allowed list)
-    merged.filterItems((item) =>
-      item.type !== 'function_call' && item.type !== 'function_call_output'
-    );
-
-    // Transfer artifacts from parent
     if (options.includeArtifacts) {
-      for (const artifact of parentLocalContext.getArtifacts()) {
-        merged.addArtifact({
-          sourcePath: artifact.sourcePath,
-          line: artifact.line,
-          kind: artifact.kind,
-          name: artifact.name,
-          signature: artifact.signature,
-          modifies: artifact.modifies,
-          calls: artifact.calls,
-          insight: artifact.insight,
-          reduces: artifact.reduces,
-          relevance: artifact.relevance,
-          discoveredBy: artifact.discoveredBy,
-          workItemId: artifact.workItemId,
-        }, artifact.workItemId);
-      }
+      for (const a of parentLocalContext.getArtifacts()) merged.addArtifact(a, a.workItemId);
     }
-
-    // Transfer file content (sub-agent shouldn't re-read what parent already read)
     if (options.includeFileContent) {
-      const fileItems = parentLocalContext.getItemsByType<FileContentItem>('file_content');
-      for (const fileItem of fileItems) {
-        if (!merged.hasReadFile(fileItem.path)) {
-          merged.addFileContent(fileItem.path, fileItem.content, fileItem.language, fileItem.workItemId);
-        }
+      for (const f of parentLocalContext.getItemsByType<FileContentItem>('file_content')) {
+        if (!merged.hasReadFile(f.path)) merged.addFileContent(f.path, f.content, f.language, f.workItemId);
       }
     }
-
     return merged;
   }
 
-  /**
-   * Merge sub-agent execution results into parent's local context.
-   * Transfers artifacts, file reads, and invalidations back to parent.
-   * This prevents future sub-agents from re-discovering the same information.
-   */
-  private mergeSubAgentResults(
-    parentLocalContext: ContextWindow,
-    subResult: AgentResult
-  ): void {
-    // 1. Merge files read (so parent doesn't re-read them)
-    // Defensive: filesRead should always be an array, but check anyway
-    const filesRead = subResult.filesRead ?? [];
-    for (const path of filesRead) {
-      if (typeof path === 'string' && path.length > 0) {
-        parentLocalContext.markFileRead(path);
+  private mergeSubAgentResults(parentLocalContext: ContextWindow, subResult: AgentResult): void {
+    for (const p of subResult.filesRead ?? []) {
+      if (typeof p === 'string' && p.length > 0) parentLocalContext.markFileRead(p);
+    }
+
+    const subArtifacts = subResult.artifacts ?? subResult.localContext?.getArtifacts() ?? [];
+    for (const a of subArtifacts) {
+      if (!a?.sourcePath || typeof a.name !== 'string') continue;
+      const existing = parentLocalContext.getArtifactsByPath(a.sourcePath);
+      if (!existing.some(e => e.name === a.name && e.line === a.line)) {
+        parentLocalContext.addArtifact(a, a.workItemId);
       }
     }
 
-    // 2. Merge artifacts - prefer explicit artifacts field, fallback to localContext
-    const subArtifacts = subResult.artifacts ?? subResult.localContext?.getArtifacts() ?? [];
-    for (const artifact of subArtifacts) {
-      // Skip malformed artifacts (defensive: all artifacts should have sourcePath, kind, name)
-      if (!artifact || typeof artifact.sourcePath !== 'string' || typeof artifact.name !== 'string') {
-        continue;
-      }
-      // Avoid duplicates by checking sourcePath + name + line
-      const existing = parentLocalContext.getArtifactsByPath(artifact.sourcePath);
-      const isDuplicate = existing.some(e =>
-        e.name === artifact.name && e.line === artifact.line
-      );
-        if (!isDuplicate) {
-          parentLocalContext.addArtifact({
-            sourcePath: artifact.sourcePath,
-            line: artifact.line,
-            kind: artifact.kind,
-            name: artifact.name,
-            signature: artifact.signature,
-            modifies: artifact.modifies,
-            calls: artifact.calls,
-            insight: artifact.insight,
-            reduces: artifact.reduces,
-            relevance: artifact.relevance,
-            discoveredBy: artifact.discoveredBy,
-            workItemId: artifact.workItemId,
-          }, artifact.workItemId);
-        }
-      }
-
-    // 3. Merge file content (if sub-agent read files parent hasn't)
     if (subResult.localContext) {
-      const subFileItems = subResult.localContext.getItemsByType<FileContentItem>('file_content');
-      for (const fileItem of subFileItems) {
-        // Defensive: ensure fileItem has required properties
-        if (!fileItem?.path || typeof fileItem.content !== 'string') {
-          continue;
-        }
-        if (!parentLocalContext.hasReadFile(fileItem.path)) {
-          parentLocalContext.addFileContent(fileItem.path, fileItem.content, fileItem.language, fileItem.workItemId);
+      for (const f of subResult.localContext.getItemsByType<FileContentItem>('file_content')) {
+        if (f?.path && typeof f.content === 'string' && !parentLocalContext.hasReadFile(f.path)) {
+          parentLocalContext.addFileContent(f.path, f.content, f.language, f.workItemId);
         }
       }
     }
@@ -2616,21 +2169,9 @@ export class Agent {
 
     const filesReadCount = (subResult.filesRead ?? []).length;
     const artifactCount = extractedArtifacts.length;
-    let explorerValidationFailed = false;
-    let explorerValidationError = '';
 
     if (agentConfig.type === 'explorer' && filesReadCount > 0 && artifactCount === 0) {
-      if (isBoundsTerminationReason(subResult.terminationReason)) {
-        console.warn(
-          `[AGENT:explorer] SUB-AGENT BOUNDS EXIT WITH ZERO ARTIFACTS: ${filesReadCount} files, ` +
-          `termination=${subResult.terminationReason}`
-        );
-      } else {
-        explorerValidationFailed = true;
-        explorerValidationError = `Explorer read ${filesReadCount} files but extracted 0 artifacts. ` +
-          `This is unacceptable - every file read MUST produce artifacts.`;
-        console.error(`[AGENT:explorer] SUB-AGENT VALIDATION FAILURE: ${filesReadCount} files, 0 artifacts`);
-      }
+      subResult.isIncomplete = true;
     }
 
     const responseStreamedToUser = !!agentConfig.outputSchema && !!enhancedResponse;
@@ -2638,17 +2179,17 @@ export class Agent {
     const payload = {
       agent: agentConfig.type,
       workId: subWorkItem.workId,
-      success: explorerValidationFailed ? false : subResult.success,
+      success: subResult.success,
       response: enhancedResponse,
       responseStreamedToUser,
       filesRead: subResult.filesRead ?? [],
       artifacts: Array.isArray(artifacts) ? artifacts : [],
-      error: explorerValidationFailed ? explorerValidationError : subResult.error,
+      error: subResult.error,
       postProcessingError,
       metrics: subResult.metrics,
     };
 
-    if ((subResult.success && !explorerValidationFailed) || subResult.needsUserInput) {
+    if (subResult.success || subResult.needsUserInput) {
       if (postProcessingError) {
         (payload as Record<string, unknown>).warning = postProcessingError;
       }
@@ -2785,21 +2326,15 @@ export class Agent {
       return this.config.schemaReminder;
     }
 
-    void schemaId;
     return `[SCHEMA REMINDER] You must set action, goalStateReached, and awaitingUserInput every turn. action is loop control ("done"|"continue"). goalStateReached is objective completion (true only when objective is complete). awaitingUserInput is blocking state (true only when you need user input). Valid combos: continue/false/false; done/true/false; done/false/true.`;
   }
 
-  private parseBoolean(
-    value: unknown,
-    fallback: boolean
-  ): boolean {
+  private parseBoolean(value: unknown, fallback: boolean): boolean {
     if (typeof value === 'boolean') return value;
     if (typeof value === 'string') {
-      const normalized = value.trim().toLowerCase();
-      if (normalized === 'true') return true;
-      if (normalized === 'false') return false;
-      if (normalized === '1') return true;
-      if (normalized === '0') return false;
+      const n = value.trim().toLowerCase();
+      if (n === 'true' || n === '1') return true;
+      if (n === 'false' || n === '0') return false;
     }
     return fallback;
   }
@@ -2863,6 +2398,10 @@ export class Agent {
     parsed: Record<string, unknown>,
     content: string
   ): Record<string, unknown> | null {
+    if (schemaId === 'explorer') {
+      return this.parseExplorerOutputLenient(parsed, content);
+    }
+
     if (schemaId !== 'agent_action' && schemaId !== 'goal_driven' && schemaId !== 'planner_output') {
       return null;
     }
@@ -2873,6 +2412,43 @@ export class Agent {
       const normalized = this.normalizeActionOutputCandidate(candidate as Record<string, unknown>, schemaId);
       if (normalized) return normalized;
     }
+    return null;
+  }
+
+  /**
+   * Lenient explorer output parser. Salvages action, response, and valid
+   * artifacts from output that failed strict Zod validation.
+   */
+  private parseExplorerOutputLenient(
+    parsed: Record<string, unknown>,
+    content: string
+  ): Record<string, unknown> | null {
+    const candidates = [parsed, ...this.extractJsonCandidates(content)];
+
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+
+      // Must have at least action or artifacts to be useful
+      const hasAction = typeof candidate.action === 'string';
+      const hasArtifacts = Array.isArray(candidate.artifacts) && candidate.artifacts.length > 0;
+      if (!hasAction && !hasArtifacts) continue;
+
+      const normalized = this.normalizeActionOutputCandidate(candidate as Record<string, unknown>, 'explorer');
+      if (!normalized) continue;
+
+      // Salvage valid artifacts — keep any that have the 3 required fields
+      const rawArtifacts = Array.isArray(candidate.artifacts) ? candidate.artifacts : [];
+      normalized.artifacts = rawArtifacts.filter(isValidRawArtifact);
+
+      // Carry through metadata with safe defaults
+      normalized.packageManagers = Array.isArray(candidate.packageManagers) ? candidate.packageManagers : [];
+      normalized.frameworks = Array.isArray(candidate.frameworks) ? candidate.frameworks : [];
+      normalized.languages = Array.isArray(candidate.languages) ? candidate.languages : [];
+      normalized.os = typeof candidate.os === 'string' ? candidate.os : '';
+
+      return normalized;
+    }
+
     return null;
   }
 
@@ -3003,57 +2579,21 @@ export class Agent {
     return validated.data as Record<string, unknown>;
   }
 
-  /**
-   * Extract action from structured output.
-   */
-  private extractStructuredAction(
-    structuredOutput: Record<string, unknown> | null
-  ): AgentAction | null {
-    if (!structuredOutput) return null;
-    const raw = structuredOutput.action;
-    if (typeof raw !== 'string') return null;
-    const normalized = raw.trim().toLowerCase();
-    if (normalized === 'done') return 'done';
-    if (normalized === 'continue') return 'continue';
-    return null;
+  private extractStructuredAction(output: Record<string, unknown> | null): AgentAction | null {
+    if (!output || typeof output.action !== 'string') return null;
+    const a = output.action.trim().toLowerCase();
+    return a === 'done' || a === 'continue' ? a : null;
   }
 
-  /**
-   * Extract response text from structured output.
-   * Handles LLMs that output literal \n strings instead of actual newlines.
-   */
-  private extractStructuredResponse(
-    structuredOutput: Record<string, unknown> | null
-  ): string | undefined {
-    if (!structuredOutput) return undefined;
-    const raw = structuredOutput.response;
-    if (typeof raw !== 'string') return undefined;
-    // Unescape literal \n and \t that LLMs sometimes output in JSON response fields
-    return raw.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+  private extractStructuredResponse(output: Record<string, unknown> | null): string | undefined {
+    if (!output || typeof output.response !== 'string') return undefined;
+    return output.response.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
   }
 
-  /**
-   * Combine pre-JSON text with parsed response text.
-   * Some LLMs (e.g., GLM) output prose before the JSON structured output.
-   * This combines both to preserve all user-facing content.
-   */
-  private combineResponseText(
-    preJsonText: string,
-    parsedResponseText: string | undefined
-  ): string | undefined {
+  private combineResponseText(preJsonText: string, parsedResponseText: string | undefined): string | undefined {
     const pre = preJsonText?.trim() ?? '';
     const parsed = parsedResponseText?.trim() ?? '';
-
-    if (pre && parsed) {
-      return `${pre}\n\n${parsed}`;
-    }
-    if (pre) {
-      return pre;
-    }
-    if (parsed) {
-      return parsed;
-    }
-    return undefined;
+    return (pre && parsed) ? `${pre}\n\n${parsed}` : (pre || parsed || undefined);
   }
 
   /**
@@ -3088,87 +2628,44 @@ export class Agent {
     }, workItemId));
   }
 
-  /**
-   * Emit llm_error event.
-   */
   private emitLlmError(error: Error, workItemId?: string): void {
-    const provider = this.llmConfig.provider ?? 'unknown';
-    const model = this.llmConfig.model ?? 'unknown';
     this.emit(createEvent('llm_error', {
       agentType: this.config.type,
-      provider,
-      model,
+      provider: this.llmConfig.provider ?? 'unknown',
+      model: this.llmConfig.model ?? 'unknown',
       error: error.message,
       errorType: this.classifyError(error),
     }, workItemId));
   }
 
-  /**
-   * Get preview from messages.
-   */
   private getPromptPreview(messages: Array<Record<string, unknown>>): string {
-    if (!messages.length) return '';
-    const first = messages[0] as { role?: string; content?: string };
-    if (first.role === 'system' && typeof first.content === 'string') {
-      return first.content.slice(0, 16000);
-    }
-    return '';
+    const first = messages[0] as { role?: string; content?: string } | undefined;
+    return first?.role === 'system' && typeof first.content === 'string' ? first.content.slice(0, 16000) : '';
   }
 
-  /**
-   * Build preview from tool calls.
-   */
-  private buildToolCallPreview(
-    toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>
-  ): string {
-    if (!toolCalls.length) return '';
-    return `[Tools: ${toolCalls.map((tc) => tc.name).join(', ')}]`;
+  private buildToolCallPreview(toolCalls: Array<{ name: string }>): string {
+    return toolCalls.length ? `[Tools: ${toolCalls.map(tc => tc.name).join(', ')}]` : '';
   }
 
-  /**
-   * Synthesize a response from accumulated work in the context.
-   * Returns the best available content: existing response, last assistant message, or tool outputs.
-   */
   private synthesizePartialResponse(localContext: ContextWindow, existingResponse: string): string {
-    // If we already have a response from previous iterations, use it
-    if (existingResponse && existingResponse.trim().length > 0) {
-      return existingResponse;
-    }
+    if (existingResponse?.trim()) return existingResponse;
 
-    // Try to extract the last assistant message
     const messages = localContext.getItemsByType('message') as Array<{ role: string; content: string | unknown[] }>;
-    const assistantMessages = messages.filter(m => m.role === 'assistant');
-    if (assistantMessages.length > 0) {
-      const lastAssistant = assistantMessages[assistantMessages.length - 1];
-      const content = typeof lastAssistant.content === 'string'
-        ? lastAssistant.content
-        : JSON.stringify(lastAssistant.content);
-      if (content && content.trim().length > 0) {
-        return content;
-      }
+    const last = messages.filter(m => m.role === 'assistant').at(-1);
+    if (last) {
+      const content = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
+      if (content?.trim()) return content;
     }
 
-    // Fall back to summarizing tool outputs
-    const toolOutputs = localContext.getItemsByType('function_call_output') as Array<{ name?: string; output: string; isError?: boolean }>;
-    if (toolOutputs.length > 0) {
-      const successfulOutputs = toolOutputs.filter(o => !o.isError);
-      if (successfulOutputs.length > 0) {
-        // Return the last few tool outputs as context
-        const recentOutputs = successfulOutputs.slice(-3);
-        const summary = recentOutputs.map(o => {
-          const preview = o.output.length > 500 ? o.output.slice(0, 500) + '...' : o.output;
-          return `${o.name ?? 'tool'}: ${preview}`;
-        }).join('\n\n');
-        return `Work completed before interruption:\n${summary}`;
-      }
+    const outputs = (localContext.getItemsByType('function_call_output') as Array<{ name?: string; output: string; isError?: boolean }>)
+      .filter(o => !o.isError);
+    if (outputs.length > 0) {
+      const summary = outputs.slice(-3).map(o => `${o.name ?? 'tool'}: ${o.output.slice(0, 500)}`).join('\n\n');
+      return `Work completed before interruption:\n${summary}`;
     }
-
     return '';
   }
 
-  /**
-   * Classify error type.
-   */
   private classifyError(error: Error): string {
     const msg = error.message;
     if (msg.includes('rate limit') || msg.includes('429')) return 'rate_limit';

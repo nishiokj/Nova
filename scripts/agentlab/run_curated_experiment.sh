@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNNER_BIN_DEFAULT="$ROOT_DIR/../Experiments/rust/target/release/lab-cli"
 RUNNER_BIN="${AGENTLAB_RUNNER_BIN:-$RUNNER_BIN_DEFAULT}"
-SWEBENCH_VENV_DEFAULT="$ROOT_DIR/.venv_swebench"
 EXPERIMENT_REL=".lab/experiments/swebench_lite_curated_glm5_vs_codex_spark.yaml"
 EXPERIMENT_PATH="$ROOT_DIR/$EXPERIMENT_REL"
 IMAGE_TAG="${AGENTLAB_IMAGE_TAG:-rex-harness:swebench-lite}"
@@ -47,13 +46,6 @@ USAGE
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
-fi
-
-if [[ -z "${AGENTLAB_SWEBENCH_VENV:-}" ]]; then
-  export AGENTLAB_SWEBENCH_VENV="$SWEBENCH_VENV_DEFAULT"
-fi
-if [[ -z "${AGENTLAB_SWEBENCH_PYTHON:-}" && -x "$AGENTLAB_SWEBENCH_VENV/bin/python" ]]; then
-  export AGENTLAB_SWEBENCH_PYTHON="$AGENTLAB_SWEBENCH_VENV/bin/python"
 fi
 
 if [[ ! -x "$RUNNER_BIN" ]]; then

@@ -181,9 +181,8 @@ Source files:
 
 - Experiment builder: `scripts/agentlab/build_swebench_curated_ab_experiment.mjs`
 - Agent image build script: `scripts/agentlab/build_agent_image.sh`
-- Official SWE-bench benchmark adapter: `scripts/agentlab/swebench_official_benchmark_adapter.py`
-- Evaluator setup helper: `scripts/agentlab/setup_swebench_evaluator.sh`
-- Run wrapper (prints run id): `scripts/agentlab/run_curated_experiment.sh`
+- In-container benchmark grader: `scripts/agentlab/swebench_task_container_grader.py`
+- Run wrapper (prints run id): `scripts/agentlab/run_curated_experiment_one_shot.sh`
 - Agent runtime command in experiment: `rex run --input-file ${AGENTLAB_TASK_PATH} --bindings-file ${AGENTLAB_BINDINGS_PATH} --output ${AGENTLAB_RESULT_PATH}`
 - Agent runtime entrypoint: `packages/infra/harness-daemon/src/cli/run.ts` (`rex run`)
 - Runner/agent file contract: `AGENTLAB_TASK_PATH` + `AGENTLAB_BINDINGS_PATH` in, `AGENTLAB_RESULT_PATH` (`result.json`) out
@@ -192,25 +191,24 @@ Source files:
 Benchmark extensibility:
 - The builder now accepts `--benchmark` and resolves benchmark metadata from a profile map.
 - To add a new benchmark, add one profile entry in `scripts/agentlab/benchmark_profiles.mjs`.
-- SWE-bench grading runs on the host through `python -m swebench.harness.run_evaluation` via the benchmark adapter command.
+- SWE-bench grading runs per-trial inside the task container and emits benchmark prediction/score records directly.
 
 Run a smoke pass (2 trials total: 1 task x 2 variants):
 
 ```bash
 cd /Users/jevinnishioka/Desktop/jesus
 bash scripts/agentlab/build_agent_image.sh --tag rex-harness:swebench-lite
-bash scripts/agentlab/setup_swebench_evaluator.sh
-export AGENTLAB_SWEBENCH_PYTHON="$PWD/.venv_swebench/bin/python"
-AGENTLAB_LIMIT=1 bash scripts/agentlab/run_curated_experiment.sh
+AGENTLAB_LIMIT=1 bash scripts/agentlab/run_curated_experiment_one_shot.sh
 ```
 
 Run against all curated tasks:
 
 ```bash
 cd /Users/jevinnishioka/Desktop/jesus
-export AGENTLAB_SWEBENCH_PYTHON="$PWD/.venv_swebench/bin/python"
-AGENTLAB_LIMIT=50 bash scripts/agentlab/run_curated_experiment.sh
+AGENTLAB_LIMIT=50 bash scripts/agentlab/run_curated_experiment_one_shot.sh
 ```
+
+If you need raw control, use `scripts/agentlab/run_curated_experiment.sh` (lower-level runner).
 
 ## Key Design Principles
 

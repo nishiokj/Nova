@@ -2,7 +2,8 @@
  * Agent Module - Barrel Export
  */
 
-export { Agent, type ModelSelection, type MemoryInjector } from './agent.js';
+export { Agent, type ModelSelection } from './agent.js';
+export type { MemoryInjector } from './memory-bridge.js';
 export { AgentRegistry } from './agent-registry.js';
 export { TOOL_LIMITS, getMaxOutputLength, isRefusal, REFUSAL_PATTERNS } from './constants.js';
 export type {
