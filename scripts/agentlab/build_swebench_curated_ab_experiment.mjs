@@ -23,12 +23,60 @@ function resolvePath(input) {
   return isAbsolute(input) ? input : resolve(WORKSPACE_ROOT, input);
 }
 
-function countJsonlRows(path) {
-  const content = readFileSync(path, 'utf8');
-  return content
+function parseJsonlRows(path) {
+  return readFileSync(path, 'utf8')
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line.length > 0).length;
+    .filter((line) => line.length > 0)
+    .map((line, idx) => {
+      try {
+        return JSON.parse(line);
+      } catch (error) {
+        throw new Error(`invalid JSON at line ${idx + 1} in ${path}: ${error.message}`);
+      }
+    });
+}
+
+function countJsonlRows(path) {
+  return parseJsonlRows(path).length;
+}
+
+function validateDataset(datasetPath, experimentSpec) {
+  const rows = parseJsonlRows(datasetPath);
+  if (rows.length === 0) {
+    throw new Error(`dataset is empty: ${datasetPath}`);
+  }
+
+  const imageSource = experimentSpec?.runtime?.agent?.image_source;
+  const seenIds = new Map();
+  let firstSchemaVersion = null;
+
+  for (let i = 0; i < rows.length; i++) {
+    const lineNum = i + 1;
+    const row = rows[i];
+    const taskId = row?.task?.id ?? row?.id;
+
+    if (!taskId) {
+      throw new Error(`task missing 'id' at line ${lineNum}`);
+    }
+    if (seenIds.has(taskId)) {
+      throw new Error(`duplicate task ID '${taskId}' at lines ${seenIds.get(taskId)} and ${lineNum}`);
+    }
+    seenIds.set(taskId, lineNum);
+
+    if (imageSource === 'per_task' && !row?.task?.image) {
+      throw new Error(`task '${taskId}' at line ${lineNum} missing 'task.image' (required for image_source=per_task)`);
+    }
+
+    const sv = row?.schema_version ?? null;
+    if (firstSchemaVersion === null) {
+      firstSchemaVersion = sv;
+    } else if (sv !== firstSchemaVersion) {
+      throw new Error(
+        `inconsistent schema_version at line ${lineNum}: expected '${firstSchemaVersion}', got '${sv}'`,
+      );
+    }
+  }
 }
 
 function resolveBenchmarkProfile(raw) {
@@ -94,13 +142,13 @@ function resolveBenchmarkAdapterCommand(profile) {
     return override.map((value) => value.trim());
   }
 
-  const pythonBin = asNonEmptyString(process.env.AGENTLAB_BENCHMARK_GRADER_PYTHON) ?? 'python3';
+  const pythonBin = asNonEmptyString(process.env.AGENTLAB_BENCHMARK_GRADER_PYTHON) ?? 'python';
   const split = asNonEmptyString(profile?.dataset?.splitId) ?? 'test';
   const benchmarkName = asNonEmptyString(profile?.dataset?.suiteId) ?? 'swebench_lite_curated';
 
   return [
     pythonBin,
-    '/opt/rex/scripts/agentlab/swebench_task_container_grader.py',
+    '/opt/agent/scripts/agentlab/swebench_task_container_grader.py',
     '--benchmark-name',
     benchmarkName,
     '--split',
@@ -116,21 +164,6 @@ function buildCredentialStaging(homeDir) {
       source_from_host: resolve(homeDir, '.config/rex/master.key'),
       destination_path: '/agentlab/deps/home/.config/rex/master.key',
       required: true,
-    },
-    {
-      source_from_host: resolve(homeDir, '.graphd/graphd.db'),
-      destination_path: '/agentlab/deps/home/.graphd/graphd.db',
-      required: true,
-    },
-    {
-      source_from_host: resolve(homeDir, '.graphd/graphd.db-wal'),
-      destination_path: '/agentlab/deps/home/.graphd/graphd.db-wal',
-      required: false,
-    },
-    {
-      source_from_host: resolve(homeDir, '.graphd/graphd.db-shm'),
-      destination_path: '/agentlab/deps/home/.graphd/graphd.db-shm',
-      required: false,
     },
     {
       source_from_host: resolve(homeDir, '.codex/auth.json'),
@@ -158,49 +191,6 @@ async function loadSdk() {
   }
 }
 
-function pruneSpec(spec) {
-  const out = JSON.parse(JSON.stringify(spec));
-
-  if (Array.isArray(out.runtime?.dependencies?.file_staging) && out.runtime.dependencies.file_staging.length === 0) {
-    delete out.runtime.dependencies.file_staging;
-  }
-  if (Array.isArray(out.runtime?.dependencies?.services) && out.runtime.dependencies.services.length === 0) {
-    delete out.runtime.dependencies.services;
-  }
-  if (
-    out.runtime?.dependencies &&
-    Object.keys(out.runtime.dependencies).length === 0
-  ) {
-    delete out.runtime.dependencies;
-  }
-
-  const overrides = out.runtime?.agent?.overrides;
-  if (overrides) {
-    if (Array.isArray(overrides.args) && overrides.args.length === 0) {
-      delete overrides.args;
-    }
-    if (Array.isArray(overrides.env_from_host) && overrides.env_from_host.length === 0) {
-      delete overrides.env_from_host;
-    }
-    if (overrides.env && Object.keys(overrides.env).length === 0) {
-      delete overrides.env;
-    }
-    if (Object.keys(overrides).length === 0) {
-      delete out.runtime.agent.overrides;
-    }
-  }
-
-  return out;
-}
-
-function sanitizeStringArray(input) {
-  if (!Array.isArray(input)) return [];
-  return input
-    .filter((value) => typeof value === 'string')
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
-}
-
 function maybeEnableBuiltinAdapter(builder) {
   const candidate =
     (typeof builder.useBuiltinAdapter === 'function' && builder.useBuiltinAdapter.bind(builder)) ||
@@ -211,80 +201,15 @@ function maybeEnableBuiltinAdapter(builder) {
   return builder;
 }
 
-function stripLegacyInputOutputTokens(command) {
-  const stripped = [];
-  for (let index = 0; index < command.length; index += 1) {
-    const token = command[index];
-    const next = command[index + 1];
-    const isLegacyInputPair = token === '--input-file' && next === '${AGENTLAB_TASK_PATH}';
-    const isLegacyOutputPair = token === '--output' && next === '${AGENTLAB_RESULT_PATH}';
-    if (isLegacyInputPair || isLegacyOutputPair) {
-      index += 1;
-      continue;
-    }
-    stripped.push(token);
+function chooseSpecPath(outputAbs, targetAbs) {
+  if (!targetAbs) {
+    return null;
   }
-  return stripped;
-}
-
-function migrateRuntimeAgentToHardCut(spec) {
-  const out = spec;
-  const runtime = out?.runtime;
-  const legacyAgent = runtime?.agent;
-  if (!runtime || !legacyAgent || typeof legacyAgent !== 'object' || Array.isArray(legacyAgent)) {
-    return out;
+  const rel = relative(dirname(outputAbs), targetAbs);
+  if (!rel || rel === '.') {
+    return 'agent_artifact.tar.gz';
   }
-
-  const runtimeCommand = sanitizeStringArray(legacyAgent.command);
-  if (runtimeCommand.length > 0) {
-    legacyAgent.command = stripLegacyInputOutputTokens(runtimeCommand);
-  }
-
-  const legacyCustomImage =
-    legacyAgent.custom_image && typeof legacyAgent.custom_image === 'object' && !Array.isArray(legacyAgent.custom_image)
-      ? legacyAgent.custom_image
-      : null;
-  const legacyEntry = sanitizeStringArray(legacyCustomImage?.entrypoint);
-  const migratedCommand = stripLegacyInputOutputTokens(legacyEntry);
-  const command = migratedCommand.length > 0 ? migratedCommand : legacyEntry;
-  if (command.length === 0) {
-    return out;
-  }
-
-  const image =
-    asNonEmptyString(legacyCustomImage?.image) ??
-    asNonEmptyString(runtime?.policy?.sandbox?.image);
-  const overrides =
-    legacyAgent.overrides && typeof legacyAgent.overrides === 'object' && !Array.isArray(legacyAgent.overrides)
-      ? legacyAgent.overrides
-      : null;
-  const env =
-    overrides?.env && typeof overrides.env === 'object' && !Array.isArray(overrides.env)
-      ? Object.fromEntries(
-        Object.entries(overrides.env).filter(([, value]) => typeof value === 'string' && value.trim().length > 0),
-      )
-      : {};
-  const envFromHost = sanitizeStringArray(overrides?.env_from_host);
-
-  const migratedAgent = {
-    command,
-    io: {
-      input_arg: '--input-file',
-      output_arg: '--output',
-    },
-  };
-  if (image) {
-    migratedAgent.image = image;
-  }
-  if (Object.keys(env).length > 0) {
-    migratedAgent.env = env;
-  }
-  if (envFromHost.length > 0) {
-    migratedAgent.env_from_host = envFromHost;
-  }
-
-  runtime.agent = migratedAgent;
-  return out;
+  return rel;
 }
 
 async function main() {
@@ -294,7 +219,9 @@ async function main() {
       dataset: { type: 'string' },
       output: { type: 'string' },
       image: { type: 'string' },
-      'agent-cmd': { type: 'string', default: 'rex' },
+      'agent-artifact': { type: 'string' },
+      workspace: { type: 'string' },
+      'agent-cmd': { type: 'string', default: '/opt/agent/bin/rex' },
       limit: { type: 'string' },
       'timeout-ms': { type: 'string' },
       replications: { type: 'string', default: '1' },
@@ -310,8 +237,10 @@ async function main() {
   const { key: benchmarkKey, profile } = resolveBenchmarkProfile(values.benchmark);
   const datasetInput = values.dataset ?? profile.defaultDataset;
   const outputInput = values.output ?? profile.defaultOutput;
-  const image = values.image ?? profile.defaultImage;
-  const agentCmd = asNonEmptyString(values['agent-cmd']) ?? 'rex';
+  const fallbackImage = values.image ?? 'agentlab/per-task-placeholder:latest';
+  const workspace = asNonEmptyString(values.workspace) ?? profile.defaultWorkspace ?? '/testbed';
+  const agentCmd = asNonEmptyString(values['agent-cmd']) ?? '/opt/agent/bin/rex';
+  const agentArtifactInput = values['agent-artifact'] ?? profile.defaultAgentArtifact ?? '.lab/agents/rex-current.tar.gz';
 
   const datasetAbs = resolvePath(datasetInput);
   if (!existsSync(datasetAbs)) {
@@ -320,6 +249,9 @@ async function main() {
 
   const outputAbs = resolvePath(outputInput);
   mkdirSync(dirname(outputAbs), { recursive: true });
+
+  const agentArtifactAbs = resolvePath(agentArtifactInput);
+  const agentArtifactSpecPath = chooseSpecPath(outputAbs, agentArtifactAbs);
 
   const datasetRows = countJsonlRows(datasetAbs);
   const requestedLimit = values.limit ? toPositiveInt(values.limit, '--limit') : datasetRows;
@@ -353,6 +285,7 @@ async function main() {
 
   const datasetRel = relative(dirname(outputAbs), datasetAbs);
   const datasetPath = datasetRel.startsWith('..') ? datasetAbs : datasetRel;
+
   const builder = ExperimentBuilder.create(profile.experiment.id, profile.experiment.name)
     .description(profile.experiment.description)
     .owner(values.owner)
@@ -363,7 +296,7 @@ async function main() {
       splitId: profile.dataset.splitId,
       limit: effectiveLimit,
     })
-    .customAgentImage(image, [
+    .customAgentImage(fallbackImage, [
       agentCmd,
       'run',
       '--bindings-file',
@@ -373,9 +306,10 @@ async function main() {
       '--session-key',
       '${AGENTLAB_TRIAL_ID}',
       '--working-dir',
-      '/agentlab/workspace/repo',
+      '${WORKSPACE}',
       '--dangerous',
     ])
+    .agentIo('--input-file', '--output')
     .agentEnv({
       HOME: '/agentlab/deps/home',
       AGENTLAB_SESSION_CONTEXT_ROOT: '/agentlab/state/.haiku/sessions',
@@ -394,7 +328,7 @@ async function main() {
     }))
     .timeoutMs(timeoutMs)
     .networkMode('full')
-    .sandboxImage(image);
+    .sandboxImage(fallbackImage);
   maybeEnableBuiltinAdapter(builder);
 
   let benchmarkAdapterCommand = null;
@@ -402,6 +336,7 @@ async function main() {
     benchmarkAdapterCommand = resolveBenchmarkAdapterCommand(profile);
     const benchmarkName = asNonEmptyString(profile?.dataset?.suiteId) ?? 'swebench_lite_curated';
     const split = asNonEmptyString(profile?.dataset?.splitId) ?? 'test';
+
     builder.benchmark({
       policy: {
         task_model: 'independent',
@@ -414,7 +349,7 @@ async function main() {
         manifest: {
           schema_version: 'benchmark_adapter_manifest_v1',
           adapter_id: 'jesus.swebench_in_container',
-          adapter_version: 'v1',
+          adapter_version: 'v2-per-task',
           benchmark: {
             name: benchmarkName,
             split,
@@ -449,13 +384,27 @@ async function main() {
 
   const built = builder.build();
   built.experiment.workload_type = 'agent_loop';
-  const spec = pruneSpec(migrateRuntimeAgentToHardCut(built));
-  writeFileSync(outputAbs, `${yamlStringify(spec)}\n`, 'utf8');
+
+  built.runtime.agent.image_source = 'per_task';
+  built.runtime.agent.artifact = agentArtifactSpecPath;
+  delete built.runtime.agent.image;
+  if (!built.runtime.policy.sandbox || typeof built.runtime.policy.sandbox !== 'object') {
+    built.runtime.policy.sandbox = { mode: 'container' };
+  }
+  built.runtime.policy.sandbox.root_read_only = false;
+
+  validateDataset(datasetAbs, built);
+
+  writeFileSync(outputAbs, `${yamlStringify(built)}\n`, 'utf8');
 
   console.log(`wrote experiment: ${outputAbs}`);
   console.log(`benchmark: ${benchmarkKey}`);
   console.log(`dataset rows=${datasetRows}, limit=${effectiveLimit}`);
-  console.log(`image: ${image}`);
+  console.log(`dataset_path: ${datasetPath}`);
+  console.log(`image_source: per_task`);
+  console.log('runtime.agent.image: removed (per_task mode)');
+  console.log(`agent_artifact: ${agentArtifactSpecPath}`);
+  console.log(`workspace: ${workspace}`);
   console.log(`agent_cmd: ${agentCmd}`);
   console.log(`timeout_ms: ${timeoutMs}`);
   if (benchmarkAdapterCommand) {

@@ -236,6 +236,10 @@ export interface CompactOptions {
   maxFileContentAgeMs?: number;
   /** Keep at most this many file_content items (LRU eviction) */
   maxFileContentCount?: number;
+  /** Keep at most this many function_call items (oldest evicted first) */
+  maxFunctionCallCount?: number;
+  /** Keep at most this many function_call_output items (oldest evicted first) */
+  maxFunctionCallOutputCount?: number;
   /** Remove file_content items for the same path, keeping only the newest */
   deduplicateByPath?: boolean;
   /** Truncate function_call_output items longer than this */
@@ -246,6 +250,8 @@ export interface CompactOptions {
 export interface CompactResult {
   itemsRemoved: number;
   fileContentRemoved: number;
+  functionCallsRemoved?: number;
+  functionCallOutputsRemoved?: number;
   outputsTruncated: number;
   bytesRecovered: number;
 }
@@ -275,4 +281,3 @@ export interface ContextWindowTelemetry {
   /** For dashboard inspection */
   recentItems?: Array<{ type: string; preview: string; timestamp: number }>;
 }
-

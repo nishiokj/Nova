@@ -202,6 +202,7 @@ export class SessionStore {
     const hadLocalContextFile = existsSync(this.contextFilePath);
     if (hadLocalContextFile) {
       this.context = new ContextWindow(this.sessionKey, this.maxTokens, this.contextFilePath);
+      this.compactHydratedContextIfNeeded('disk');
       this.logger.debug('Hydrated context from disk', {
         sessionKey: this.sessionKey,
         itemCount: this.context.items.length,
@@ -220,6 +221,7 @@ export class SessionStore {
         };
         if (result.snapshot?.context) {
           this.context = ContextWindow.deserialize(result.snapshot.context, this.contextFilePath);
+          this.compactHydratedContextIfNeeded('graphd');
           this.logger.debug('Seeded disk context from GraphD snapshot', {
             sessionKey: this.sessionKey,
             itemCount: this.context.items.length,
@@ -239,6 +241,35 @@ export class SessionStore {
     this.context = new ContextWindow(this.sessionKey, this.maxTokens, this.contextFilePath);
     this.logger.debug('Created new context', { sessionKey: this.sessionKey, maxTokens: this.maxTokens, path: this.contextFilePath });
     return this.context;
+  }
+
+  private compactHydratedContextIfNeeded(source: 'disk' | 'graphd'): void {
+    if (!this.context || !this.context.isNearFull(0.5)) {
+      return;
+    }
+
+    const beforeItems = this.context.items.length;
+    const result = this.context.compact({
+      deduplicateByPath: true,
+      maxFileContentCount: 15,
+      maxFunctionCallCount: 180,
+      maxFunctionCallOutputCount: 180,
+      truncateOutputsTo: 3000,
+    });
+
+    if (result.itemsRemoved > 0 || result.outputsTruncated > 0) {
+      this.logger.info('Compacted hydrated context', {
+        sessionKey: this.sessionKey,
+        source,
+        itemsBefore: beforeItems,
+        itemsAfter: this.context.items.length,
+        itemsRemoved: result.itemsRemoved,
+        functionCallsRemoved: result.functionCallsRemoved ?? 0,
+        functionCallOutputsRemoved: result.functionCallOutputsRemoved ?? 0,
+        outputsTruncated: result.outputsTruncated,
+        bytesRecovered: result.bytesRecovered,
+      });
+    }
   }
 
   /**
