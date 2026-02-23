@@ -578,9 +578,9 @@ export class PermissionChecker {
 
       // Write back
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-      console.log(`[permissions] Added ${type} rule: ${ruleString}`);
+      process.stderr.write(`[permissions] Added ${type} rule: ${ruleString}\n`);
     } catch (err) {
-      console.warn(`[permissions] Failed to persist rule to ${configPath}:`, err);
+      process.stderr.write(`[permissions] Failed to persist rule to ${configPath}: ${err}\n`);
     }
   }
 

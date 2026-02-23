@@ -41,10 +41,14 @@ import {
   type ModelRole,
 } from 'types';
 import { getOutputSchemaJson, OUTPUT_SCHEMAS, type OutputSchemaName } from 'shared';
+import { stderrLogger, type HarnessLogger } from './harness_infra.js';
 
 const DEFAULT_CONFIG_PATH = 'config/defaults.json';
 const USER_CONFIG_PATH = '~/.rex/config.json';
 const BEHAVIORAL_RULES_PATH = 'config/behavioral_rules.md';
+
+/** Module-level logger, overridden when callers pass a logger */
+let _log: HarnessLogger = stderrLogger;
 
 
 /**
@@ -79,16 +83,16 @@ export function resolveRepoRoot(startDir: string): string {
 /**
  * Load behavioral rules from config/behavioral_rules.md.
  */
-export function loadBehavioralRules(): string {
+export function loadBehavioralRules(logger: HarnessLogger = stderrLogger): string {
   // Check cwd first
   const cwdPath = resolve(process.cwd(), BEHAVIORAL_RULES_PATH);
   if (existsSync(cwdPath)) {
     try {
       const content = readFileSync(cwdPath, 'utf-8');
-      console.log(`[config] Loaded behavioral rules from ${cwdPath}`);
+      logger.info(`[config] Loaded behavioral rules from ${cwdPath}`);
       return content;
     } catch (e) {
-      console.warn(`[config] Failed to read behavioral rules from ${cwdPath}:`, e);
+      logger.warning(`[config] Failed to read behavioral rules from ${cwdPath}: ${e}`);
     }
   }
 
@@ -97,10 +101,10 @@ export function loadBehavioralRules(): string {
   if (existsSync(packagePath)) {
     try {
       const content = readFileSync(packagePath, 'utf-8');
-      console.log(`[config] Loaded behavioral rules from package: ${packagePath}`);
+      logger.info(`[config] Loaded behavioral rules from package: ${packagePath}`);
       return content;
     } catch (e) {
-      console.warn(`[config] Failed to read behavioral rules from package ${packagePath}:`, e);
+      logger.warning(`[config] Failed to read behavioral rules from package ${packagePath}: ${e}`);
     }
   }
 
@@ -128,7 +132,7 @@ interface LoadedConfigFile {
  * Returns both the config and the directory where it was found.
  * Relative paths in the config should be resolved relative to configDir.
  */
-export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
+export function loadConfigFile(configPath?: string, logger: HarnessLogger = stderrLogger): LoadedConfigFile | null {
   const resolveConfigDirForPath = (path: string): string => {
     const parent = dirname(path);
     return basename(parent) === 'config' ? dirname(parent) : parent;
@@ -141,16 +145,16 @@ export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
       const result = HarnessConfigFileSchema.safeParse(json);
       if (!result.success) {
         const issues = result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ');
-        console.warn(`[config] Invalid config at ${path}: ${issues}`);
+        logger.warning(`[config] Invalid config at ${path}: ${issues}`);
         return null;
       }
       if (!result.data.agents || Object.keys(result.data.agents).length === 0) {
-        console.warn(`[config] Config at ${path} has no agents; ignoring and falling back`);
+        logger.warning(`[config] Config at ${path} has no agents; ignoring and falling back`);
         return null;
       }
       return result.data;
     } catch (e) {
-      console.warn(`[config] Failed to parse JSON at ${path}:`, e);
+      logger.warning(`[config] Failed to parse JSON at ${path}: ${e}`);
       return null;
     }
   };
@@ -162,7 +166,7 @@ export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
       const content = readFileSync(explicitPath, 'utf-8');
       const parsed = validateConfig(content, explicitPath);
       if (parsed) {
-        console.log(`[config] Loaded from ${explicitPath}`);
+        logger.info(`[config] Loaded from ${explicitPath}`);
         const configDir = resolveConfigDirForPath(explicitPath);
         return { config: parsed, configDir, configPath: explicitPath };
       }
@@ -175,7 +179,7 @@ export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
     const content = readFileSync(cwdPath, 'utf-8');
     const parsed = validateConfig(content, cwdPath);
     if (parsed) {
-      console.log(`[config] Loaded from ${cwdPath}`);
+      logger.info(`[config] Loaded from ${cwdPath}`);
       return { config: parsed, configDir: process.cwd(), configPath: cwdPath };
     }
   }
@@ -186,7 +190,7 @@ export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
     const content = readFileSync(userPath, 'utf-8');
     const parsed = validateConfig(content, userPath);
     if (parsed) {
-      console.log(`[config] Loaded user config from ${userPath}`);
+      logger.info(`[config] Loaded user config from ${userPath}`);
       return { config: parsed, configDir: dirname(userPath), configPath: userPath };
     }
   }
@@ -198,7 +202,7 @@ export function loadConfigFile(configPath?: string): LoadedConfigFile | null {
     const content = readFileSync(packageConfigPath, 'utf-8');
     const parsed = validateConfig(content, packageConfigPath);
     if (parsed) {
-      console.log(`[config] Loaded from package: ${packageConfigPath}`);
+      logger.info(`[config] Loaded from package: ${packageConfigPath}`);
       return { config: parsed, configDir: packageRoot, configPath: packageConfigPath };
     }
   }
@@ -255,7 +259,7 @@ function resolveOutputSchema(
       }
     }
 
-    console.warn('[config] Output schema object missing valid schema; ignoring structured output');
+    _log.warning('[config] Output schema object missing valid schema; ignoring structured output');
     return undefined;
   }
 
@@ -263,7 +267,7 @@ function resolveOutputSchema(
   const resolvedName = normalizeSchemaName(schemaRef);
   const definition = resolvedName ? getOutputSchemaJson(resolvedName) : undefined;
   if (!definition) {
-    console.warn(`[config] Schema '${schemaRef}' not found in output schema registry`);
+    _log.warning(`[config] Schema '${schemaRef}' not found in output schema registry`);
     return undefined;
   }
 
@@ -294,18 +298,18 @@ function resolveFallbackConfig(
   const modelProvider = getProviderForModel(fallback.model);
   let configProvider = fallback.provider ?? modelProvider;
   if (modelProvider && fallback.provider && fallback.provider !== modelProvider) {
-    console.warn(
+    _log.warning(
       `[config] Fallback model '${fallback.model}' is registered under provider ` +
       `'${modelProvider}', ignoring provider '${fallback.provider}'.`
     );
     configProvider = modelProvider;
   }
   if (!configProvider) {
-    console.warn(`[config] Fallback missing provider and model '${fallback.model}' is not registered`);
+    _log.warning(`[config] Fallback missing provider and model '${fallback.model}' is not registered`);
     return undefined;
   }
   if (!isSupportedProvider(configProvider)) {
-    console.warn(`[config] Unsupported fallback provider: ${configProvider}, skipping fallback`);
+    _log.warning(`[config] Unsupported fallback provider: ${configProvider}, skipping fallback`);
     return undefined;
   }
 
@@ -395,7 +399,7 @@ function resolveAgentConfig(
   const modelProvider = getProviderForModel(resolvedModel);
   let configProvider = resolvedProvider ?? modelProvider;
   if (modelProvider && resolvedProvider && resolvedProvider !== modelProvider) {
-    console.warn(
+    _log.warning(
       `[config] Agent '${agentType}' model '${resolvedModel}' is registered under provider ` +
       `'${modelProvider}', ignoring provider '${resolvedProvider}'.`
     );
@@ -508,10 +512,12 @@ export function createConfigFromFile(
   fileConfig: HarnessConfigFile,
   configDir: string,
   workingDir?: string,
-  configPath?: string
+  configPath?: string,
+  logger: HarnessLogger = stderrLogger
 ): FullHarnessConfig {
+  _log = logger;
   if ((fileConfig.models?.available ?? []).length > 0) {
-    console.warn('[config] models.available is now derived from provider registry; config list is ignored');
+    logger.warning('[config] models.available is now derived from provider registry; config list is ignored');
   }
 
   // Resolve all agent configs
@@ -521,7 +527,7 @@ export function createConfigFromFile(
       const resolved = resolveAgentConfig(agentType, entry, fileConfig.models?.default ?? undefined);
       agents[agentType] = resolved;
     } catch (e) {
-      console.warn(`[config] Failed to resolve agent '${agentType}':`, e);
+      _log.warning(`[config] Failed to resolve agent '${agentType}': ${e}`);
     }
   }
 
@@ -548,13 +554,13 @@ export function createConfigFromFile(
     ? resolvePathRelativeTo(configDir, rawHooksDir)
     : undefined;
 
-  console.log(`[config] Resolved paths relative to ${configDir}:`);
-  console.log(`[config]   graphd.dbPath: ${rawDbPath} -> ${resolvedDbPath}`);
+  logger.info(`[config] Resolved paths relative to ${configDir}:`);
+  logger.info(`[config]   graphd.dbPath: ${rawDbPath} -> ${resolvedDbPath}`);
   if (resolvedSkillsDir) {
-    console.log(`[config]   skills.directory: ${rawSkillsDir} -> ${resolvedSkillsDir}`);
+    logger.info(`[config]   skills.directory: ${rawSkillsDir} -> ${resolvedSkillsDir}`);
   }
   if (resolvedHooksDir) {
-    console.log(`[config]   hooks.directory: ${rawHooksDir} -> ${resolvedHooksDir}`);
+    logger.info(`[config]   hooks.directory: ${rawHooksDir} -> ${resolvedHooksDir}`);
   }
 
   return {
@@ -604,7 +610,7 @@ export function createConfigFromFile(
         ? fileConfig.auth.session_expiry_days
         : (DEFAULT_AUTH_CONFIG.session_expiry_days ?? null),
     },
-    behavioralRules: loadBehavioralRules(),
+    behavioralRules: loadBehavioralRules(logger),
     models: {
       available: getAllModels(),
       default: fileConfig.models?.default ?? DEFAULT_MODELS_CONFIG.default,
@@ -637,9 +643,10 @@ export function createConfigFromFile(
  */
 export function loadConfig(
   configPath?: string,
-  workingDir?: string
+  workingDir?: string,
+  logger: HarnessLogger = stderrLogger
 ): FullHarnessConfig {
-  const loaded = loadConfigFile(configPath);
+  const loaded = loadConfigFile(configPath, logger);
 
   if (!loaded) {
     throw new Error(
@@ -653,5 +660,5 @@ export function loadConfig(
   // configDir is where the config file was found (repo root)
   // All relative paths in config will be resolved relative to this
   const { config: fileConfig, configDir, configPath: loadedConfigPath } = loaded;
-  return createConfigFromFile(fileConfig, configDir, workingDir, loadedConfigPath);
+  return createConfigFromFile(fileConfig, configDir, workingDir, loadedConfigPath, logger);
 }

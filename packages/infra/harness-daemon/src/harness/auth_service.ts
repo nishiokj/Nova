@@ -12,6 +12,7 @@ import { homedir } from 'os';
 import { dirname, join } from 'path';
 import { GraphStore } from 'graphd';
 import type { UserRecord, ProviderCredentialRecord } from 'graphd';
+import { stderrLogger, type HarnessLogger } from './harness_infra.js';
 
 // ============================================
 // TYPES
@@ -87,9 +88,11 @@ export class AuthService {
   private pendingAuthStates = new Map<string, PendingAuthState>();
   private cleanupInterval: NodeJS.Timeout | null = null;
   private callbackServer: Server | null = null;
+  private logger: HarnessLogger;
 
-  constructor(config: AuthServiceConfig) {
+  constructor(config: AuthServiceConfig, logger: HarnessLogger = stderrLogger) {
     this.config = config;
+    this.logger = logger;
     this.store = new GraphStore(config.graphdDbPath);
     this.store.initialize();
 
@@ -115,10 +118,10 @@ export class AuthService {
   private startCallbackServer(): void {
     this.callbackServer = createServer((req, res) => this.handleHttpRequest(req, res));
     this.callbackServer.listen(this.config.callbackPort, this.config.callbackHost, () => {
-      console.log(`[auth-service] OAuth callback server listening on http://${this.config.callbackHost}:${this.config.callbackPort}`);
+      this.logger.info(`[auth-service] OAuth callback server listening on http://${this.config.callbackHost}:${this.config.callbackPort}`);
     });
     this.callbackServer.on('error', (err) => {
-      console.error('[auth-service] Callback server error:', err);
+      this.logger.error(`[auth-service] Callback server error: ${err}`);
     });
   }
 
@@ -542,7 +545,7 @@ export class AuthService {
     }
 
     // Generate new key
-    console.log(`[auth-service] Generating master key at ${keyPath}`);
+    this.logger.info(`[auth-service] Generating master key at ${keyPath}`);
     const newKey = randomBytes(KEY_LENGTH);
     const keyDir = dirname(keyPath);
     if (!existsSync(keyDir)) {
@@ -693,11 +696,11 @@ const DEFAULT_GOOGLE_CLIENT_ID = process.env.REX_GOOGLE_CLIENT_ID ?? '3806909774
  * Create auth service from environment.
  * Uses PKCE flow - no client secret required.
  */
-export function createAuthServiceFromEnv(): AuthService | null {
+export function createAuthServiceFromEnv(logger: HarnessLogger = stderrLogger): AuthService | null {
   const clientId = process.env.GOOGLE_CLIENT_ID ?? DEFAULT_GOOGLE_CLIENT_ID;
 
   if (!clientId) {
-    console.log('[auth-service] Google OAuth not configured (no GOOGLE_CLIENT_ID)');
+    logger.info('[auth-service] Google OAuth not configured (no GOOGLE_CLIENT_ID)');
     return null;
   }
 
@@ -713,7 +716,7 @@ export function createAuthServiceFromEnv(): AuthService | null {
     callbackHost: host,
     callbackPort: parseInt(port, 10),
     google: { clientId, redirectUri },
-  });
+  }, logger);
 }
 
 /**
@@ -721,16 +724,17 @@ export function createAuthServiceFromEnv(): AuthService | null {
  * Reads configuration from the auth section of harness_config.json.
  */
 export function createAuthServiceFromConfig(
-  authConfig: { enabled: boolean; host: string; port: number; google_client_id?: string; google_redirect_uri?: string; master_key_path?: string; graphd_db_path?: string } | undefined
+  authConfig: { enabled: boolean; host: string; port: number; google_client_id?: string; google_redirect_uri?: string; master_key_path?: string; graphd_db_path?: string } | undefined,
+  logger: HarnessLogger = stderrLogger
 ): AuthService | null {
   if (!authConfig?.enabled) {
-    console.log('[auth-service] Auth service not enabled in config');
+    logger.info('[auth-service] Auth service not enabled in config');
     return null;
   }
 
   const clientId = authConfig.google_client_id ?? DEFAULT_GOOGLE_CLIENT_ID;
   if (!clientId) {
-    console.log('[auth-service] Google OAuth not configured (no google_client_id in config)');
+    logger.info('[auth-service] Google OAuth not configured (no google_client_id in config)');
     return null;
   }
 
@@ -746,5 +750,5 @@ export function createAuthServiceFromConfig(
     callbackHost: host,
     callbackPort: port,
     google: { clientId, redirectUri },
-  });
+  }, logger);
 }

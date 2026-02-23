@@ -25,6 +25,7 @@ Environment overrides:
   AGENTLAB_AUTO_SETUP_SWEBENCH   1 to auto-bootstrap evaluator venv if missing (default), 0 to fail.
   AGENTLAB_AUTO_SCOREBOARD       1 to show scoreboard after run (default), 0 to skip.
   AGENTLAB_SCOREBOARD_WATCH      1 to start live scoreboard as soon as run_id appears (default: 1).
+  AGENTLAB_MAX_CONCURRENCY       If experiment rebuild is enabled, sets builder --max-concurrency.
 
 All AGENTLAB_* env vars consumed by run_curated_experiment.sh still apply.
 USAGE

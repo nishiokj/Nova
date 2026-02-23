@@ -228,7 +228,7 @@ export interface ToolRegistryConfig {
  * Default tool registry configuration.
  */
 export const DEFAULT_TOOL_CONFIG: ToolRegistryConfig = {
-  enabledTools: ['Read', 'Write', 'Edit', 'BatchEdit', 'Bash', 'Glob', 'Grep', 'Skill', 'PromptUser', 'ExpandConversation', 'WebSearch', 'WebFetch', 'apply_patch'],
+  enabledTools: ['Read', 'Write', 'Edit', 'BatchEdit', 'Bash', 'Glob', 'Grep', 'Skill', 'WebSearch', 'WebFetch', 'apply_patch'],
   bashTimeoutMs: 30000,
   maxOutputLength: 100000,
 };

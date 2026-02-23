@@ -394,22 +394,13 @@ function parseItemBlocks(body: string): ContextItem[] {
 // =========================================================================
 
 /**
- * Static system prompt content - MUST NOT contain dynamic values.
- * This content is cached by the LLM provider; any changes invalidate the cache.
- */
-const STATIC_SYSTEM_SUFFIX = `RESPONSE ACTIONS:
-- action: "done" + goalStateReached: true → objective complete
-- action: "done" + awaitingUserInput: true → waiting on user input
-- action: "continue" → progress made, more work needed
-- Use PromptUser tool when you need user input
-
-Do not repeat identical tool calls.`;
-
-/**
  * Build system prompt components, separating static (cacheable) from dynamic content.
  *
  * For optimal caching, API calls should be structured as:
  *   system (static) → tools (static) → messages (dynamic)
+ *
+ * Action/schema instructions live in agent prompts (completionRules in prompts.ts).
+ * Do NOT duplicate them here — that causes prompt/schema drift.
  *
  * @returns Object with:
  *   - system: Static behavioral rules only (for system parameter)
@@ -421,10 +412,7 @@ export function buildSystemMessage(
   behavioralRules: string = '',
   workspaceRoot: string = ''
 ): { system: string; taskContext: string } {
-  // Static system prompt - only behavioral rules, no per-task content
-  const system = behavioralRules
-    ? `${behavioralRules}\n\n${STATIC_SYSTEM_SUFFIX}`
-    : STATIC_SYSTEM_SUFFIX;
+  const system = behavioralRules || '';
 
   // Dynamic task context - changes per work item, goes in messages
   const workspaceInfo = workspaceRoot

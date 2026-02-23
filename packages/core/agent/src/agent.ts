@@ -453,9 +453,18 @@ export class Agent {
       const allowedTools = this.filterAllowedTools(allTools);
 
       const isLastIteration = iteration === maxIterations - 1;
-      const lastIterationInstruction = isLastIteration
-        ? '\n\nIMPORTANT: This is your final iteration. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.'
-        : '';
+      const isPenultimateIteration = iteration === maxIterations - 2 && maxIterations > 2;
+      const isExplorer = this.config.type === 'explorer';
+
+      let lastIterationInstruction = '';
+      if (isLastIteration) {
+        lastIterationInstruction = '\n\nIMPORTANT: This is your final iteration. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.';
+        if (isExplorer) {
+          lastIterationInstruction += ' You MUST include artifacts in your structured output for every file you have read. Each file MUST produce at least one artifact with sourcePath, kind, and name. Failure to include artifacts is a hard validation failure.';
+        }
+      } else if (isPenultimateIteration && isExplorer) {
+        lastIterationInstruction = '\n\nWARNING: You have ONE iteration remaining after this one. On your final iteration you will NOT be able to make tool calls. You MUST produce artifacts for all files you have read in your next response. If you have not yet extracted artifacts, include them NOW. Every file read without a corresponding artifact is a validation failure.';
+      }
 
       // Memory injection (recent + evidence retrieval)
       let recentConversationContent: string | null = null;
@@ -2777,7 +2786,7 @@ export class Agent {
     }
 
     void schemaId;
-    return `[SCHEMA REMINDER] You must set action, goalStateReached, and awaitingUserInput every turn. action is loop control ("done"|"continue"). goalStateReached is objective completion (true only when objective is complete). awaitingUserInput is blocking state (true only when you called PromptUser). Valid combos: continue/false/false; done/true/false; done/false/true.`;
+    return `[SCHEMA REMINDER] You must set action, goalStateReached, and awaitingUserInput every turn. action is loop control ("done"|"continue"). goalStateReached is objective completion (true only when objective is complete). awaitingUserInput is blocking state (true only when you need user input). Valid combos: continue/false/false; done/true/false; done/false/true.`;
   }
 
   private parseBoolean(

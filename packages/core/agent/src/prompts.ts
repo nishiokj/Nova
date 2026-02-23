@@ -14,16 +14,14 @@ import { REX_VOCAB, vocabForProvider } from 'llm';
 /**
  * Shared completion rules - appended to all agent prompts.
  */
-function completionRules(t: ToolVocabulary): string {
+function completionRules(_t: ToolVocabulary): string {
   return `
 ## Output Schema Rules (CRITICAL)
 
 **Always set \`action\`, \`goalStateReached\`, and \`awaitingUserInput\` every turn.**
 - \`action\` is loop control: "done" | "continue"
 - \`goalStateReached\` is outcome: \`true\` only when the objective is complete
-- \`awaitingUserInput\` is blocking state: \`true\` only when you called \`${t.promptUser}\` this turn
-
-**Use \`${t.promptUser}\` for questions.** Do not ask in plain text.
+- \`awaitingUserInput\` is blocking state: \`true\` only when you need user input
 
 Valid combinations (and only these):
 - \`action: "continue"\` + \`goalStateReached: false\` + \`awaitingUserInput: false\`
@@ -217,7 +215,7 @@ Never read files one-by-one to "explore". That's what Explorer is for.
 
 ${completionRules(t)}
 
-**Standard-specific**: Don't gold-plate. Don't explore tangent files. Don't add unrequested features. If you need user input, call \`${t.promptUser}\` tool then \`action: "done"\`.`;
+**Standard-specific**: Don't gold-plate. Don't explore tangent files. Don't add unrequested features.`;
 }
 
 
@@ -307,7 +305,7 @@ This wastes 4 iterations. Batch reads together, batch edits together.
 
 ${completionRules(t)}
 
-**Coding-specific**: Cite file:line for each change. Don't add unrequested tests/docs. If you need clarification, use \`${t.promptUser}\` tool then \`action: "done"\`.`;
+**Coding-specific**: Cite file:line for each change. Don't add unrequested tests/docs.`;
 }
 
 /**
@@ -348,7 +346,6 @@ Use Explorer when you need to understand:
 
 ### Direct Tools
 - **${t.glob}/${t.grep}/${t.read}** — Use for targeted lookups when you already know what you're looking for
-- **${t.promptUser}** — Ask questions. The observer answers autonomously. This is your primary uncertainty-reduction tool.
 
 ## Planning Process
 
@@ -413,7 +410,7 @@ The difference: execution agents shouldn't have to explore. Your objectives shou
 - \`action: "continue"\`
 - \`goalStateReached: false\`
 
-**Asked a question via ${t.promptUser}**:
+**Waiting on user input**:
 - \`action: "done"\`
 - \`goalStateReached: false\`
 - \`awaitingUserInput: true\`
@@ -478,7 +475,6 @@ This prevents redundant exploration. The planning phase already did the discover
 - **${t.read}/${t.glob}/${t.grep}**: Codebase exploration
 - **${editWriteTools}**: File modifications
 - **Explorer**: Sub-agent for discovery tasks
-- **${t.promptUser}**: Ask questions (observer answers autonomously)
 
 ### System CLIs
 
@@ -531,8 +527,8 @@ schema-cli tables describe <table>     # Show table schema
 - Non-obvious decisions need explanation.
 
 ### Questions
-- If the objective is ambiguous, use ${t.promptUser} immediately. Do not guess.
-- The observer answers autonomously. One focused question beats a wrong assumption.
+- If the objective is ambiguous, set \`awaitingUserInput: true\` and ask in the response field.
+- One focused question beats a wrong assumption.
 
 ## Feedback Loops
 
@@ -623,7 +619,7 @@ Examples of high-signal categories:
 - Performance/security: "Any latency or auth constraints that override defaults?"
 - Scope: "Include tests/migrations/telemetry, or defer?"
 
-Use the **${t.promptUser}** tool to ask questions with clear options. The Q&A thread becomes part of your spec.
+Ask questions in the response field with \`awaitingUserInput: true\`. Present clear options. The Q&A thread becomes part of your spec.
 
 ### Phase 3: Present Plan
 When the goal is clear and invariants are captured:
