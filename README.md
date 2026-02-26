@@ -9,8 +9,8 @@ A config-driven, multi-tier agent system with composable agent primitives, DAG-b
 bun install
 
 # Store API keys in GraphD
-nova providers set openai sk-...
-nova providers set anthropic sk-ant-...
+rex providers set openai sk-...
+rex providers set anthropic sk-ant-...
 
 # Run (launches daemon + control-plane + TUI)
 bun run start
@@ -122,9 +122,9 @@ Model roles are mapped per agent: `fast` (compactor), `standard` (explorer, stan
 
 ### config/defaults.json
 
-Central configuration for all agent types, tools, services, and runtime behavior. User overrides go in `~/.nova/config.json`.
+Central configuration for all agent types, tools, services, and runtime behavior. User overrides go in `~/.rex/config.json`.
 
-API keys are stored in GraphD (not env vars): `nova providers set <provider> <key>`
+API keys are stored in GraphD (not env vars): `rex providers set <provider> <key>`
 
 ### Environment Variables
 
