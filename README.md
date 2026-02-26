@@ -78,6 +78,7 @@ packages/
     types/               #   Type definitions (zod schemas)
     shared/              #   Common utilities
     protocol/            #   Orchestrator state, hooks, decisions (discriminated unions)
+    runtime/             #   Effect-first runtime kernel primitives
     work/                #   WorkItem DAG and knowledge management
     llm/                 #   Multi-provider LLM adapters + circuit breaker
     context/             #   ContextWindow (RAM or write-through disk)
@@ -108,9 +109,8 @@ packages/
 
 config/
   defaults.json          # Default harness config (agents, budgets, tools, ports)
-  behavioral_rules.md    # Agent behavioral constraints
+  app_config.json        # Runtime settings (audio, logging, linter)
   skills/                # Custom skill definitions
-  hooks/                 # Hook definitions
 scripts/                 # Shell and utility scripts
 docs/                    # Architecture, specs, runbooks, setup guides
 tests/                   # Integration tests
@@ -121,13 +121,13 @@ tests/                   # Integration tests
 | Agent | Role | Tools | Budget |
 |-------|------|-------|--------|
 | **routing** | Tier classification | None | 1 iter |
-| **explorer** | Codebase discovery | Read, Glob, Grep, Bash | 8 iter, 60 calls |
-| **standard** | Default execution | Read, Write, Edit, Glob, Grep, Bash, Skill, PromptUser, coding, explorer, WebSearch | 50 iter, 225 calls |
-| **coding** | Deep coding (reasoning) | Read, Write, Edit, Glob, Grep, Bash, Skill, PromptUser, explorer | 50 iter, 250 calls |
+| **explorer** | Codebase discovery | Read, Glob, Grep, Bash | 12 iter, 60 calls |
+| **standard** | Default execution | Read, Write, Edit, Glob, Grep, Bash, Skill, coding, explorer, WebSearch | 50 iter, 225 calls |
+| **coding** | Deep coding (reasoning) | Read, Write, Edit, Glob, Grep, Bash, Skill, explorer | 50 iter, 250 calls |
 | **context_compactor** | Context summarization | None | 3 iter |
-| **debugger** | Debug analysis | Read, Write, Edit, Glob, Grep, Bash, Skill, PromptUser | 15 iter, 45 calls |
+| **debugger** | Debug analysis | Read, Write, Edit, Glob, Grep, Bash, Skill | 15 iter, 45 calls |
 | **watcher** | Async oversight | Read, Glob, Grep, Bash | 20 iter, 40 calls |
-| **planner** | Async work planning | Read, Glob, Grep, PromptUser | 15 iter, 60 calls |
+| **planner** | Async work planning | Read, Glob, Grep | 15 iter, 60 calls |
 
 Model roles are mapped per agent: `fast` (routing, compactor), `standard` (explorer, standard, watcher, planner, debugger), `reasoning` (coding).
 
@@ -168,11 +168,16 @@ bun run start:graphd           # GraphD standalone
 bun run build                  # Build all packages + apps
 bun run clean                  # Clean all build artifacts
 bun run lint                   # Typecheck all packages
+
+bun test                       # Run tests (vitest)
+bun run test:watch             # Run tests in watch mode
+bun run test:coverage          # Run tests with coverage
+bun run smoke:interprocess     # Inter-process smoke test
 ```
 
 ## AgentLab Experiment (Curated A/B)
 
-`/jesus` includes a SWE-bench Lite curated A/B experiment that now runs with per-task task images and an injected frozen `rex` artifact:
+The project includes a SWE-bench Lite curated A/B experiment that runs with per-task task images and an injected frozen `rex` artifact:
 
 - `glm-5` (`z.ai-coder`)
 - `gpt-5.3-codex-spark` (`codex`)
@@ -197,14 +202,12 @@ Benchmark extensibility:
 Run a smoke pass (2 trials total: 1 task x 2 variants):
 
 ```bash
-cd /Users/jevinnishioka/Desktop/jesus
 AGENTLAB_LIMIT=1 bash scripts/agentlab/run_curated_experiment.sh
 ```
 
 Run against all curated tasks:
 
 ```bash
-cd /Users/jevinnishioka/Desktop/jesus
 AGENTLAB_LIMIT=50 bash scripts/agentlab/run_curated_experiment.sh
 ```
 
