@@ -26,53 +26,53 @@ Each node goes through: `pending → collecting → reducing → synthesizing �
 
 ## Helper Scripts
 
-All scripts are in `config/skills/deep-research/scripts/` and run with `bun run`.
+All scripts are in `.agent/skills/deep-research/scripts/` and run with `bun run`.
 
 ### db.ts — Database CRUD
 ```bash
 # Projects
-bun run config/skills/deep-research/scripts/db.ts create-project --title "Topic" --seed "query"
-bun run config/skills/deep-research/scripts/db.ts get-project --id <id>
-bun run config/skills/deep-research/scripts/db.ts list-projects --status active
-bun run config/skills/deep-research/scripts/db.ts update-project-status --id <id> --status complete
-bun run config/skills/deep-research/scripts/db.ts delete-project --id <id>
+bun run .agent/skills/deep-research/scripts/db.ts create-project --title "Topic" --seed "query"
+bun run .agent/skills/deep-research/scripts/db.ts get-project --id <id>
+bun run .agent/skills/deep-research/scripts/db.ts list-projects --status active
+bun run .agent/skills/deep-research/scripts/db.ts update-project-status --id <id> --status complete
+bun run .agent/skills/deep-research/scripts/db.ts delete-project --id <id>
 
 # Nodes
-bun run config/skills/deep-research/scripts/db.ts create-node --project <id> --query "question" --depth 0 --type mechanistic
-bun run config/skills/deep-research/scripts/db.ts list-nodes --project <id> --status pending
-bun run config/skills/deep-research/scripts/db.ts top-nodes --project <id> --limit 5
-bun run config/skills/deep-research/scripts/db.ts update-node-status --id <id> --status collecting
-bun run config/skills/deep-research/scripts/db.ts update-node-synthesis --id <id> --synthesis "..." --significance "..." --principles '[...]' --gaps '[...]'
-bun run config/skills/deep-research/scripts/db.ts update-node-scores --id <id> --priority 0.8 --novelty 0.7 --gap-density 0.6
+bun run .agent/skills/deep-research/scripts/db.ts create-node --project <id> --query "question" --depth 0 --type mechanistic
+bun run .agent/skills/deep-research/scripts/db.ts list-nodes --project <id> --status pending
+bun run .agent/skills/deep-research/scripts/db.ts top-nodes --project <id> --limit 5
+bun run .agent/skills/deep-research/scripts/db.ts update-node-status --id <id> --status collecting
+bun run .agent/skills/deep-research/scripts/db.ts update-node-synthesis --id <id> --synthesis "..." --significance "..." --principles '[...]' --gaps '[...]'
+bun run .agent/skills/deep-research/scripts/db.ts update-node-scores --id <id> --priority 0.8 --novelty 0.7 --gap-density 0.6
 
 # Sources
-bun run config/skills/deep-research/scripts/db.ts create-source --node <id> --url <url> --title "..." --domain "..." --content "..."
-bun run config/skills/deep-research/scripts/db.ts list-sources --node <id>
-bun run config/skills/deep-research/scripts/db.ts domains --node <id>
+bun run .agent/skills/deep-research/scripts/db.ts create-source --node <id> --url <url> --title "..." --domain "..." --content "..."
+bun run .agent/skills/deep-research/scripts/db.ts list-sources --node <id>
+bun run .agent/skills/deep-research/scripts/db.ts domains --node <id>
 
 # Claims
-bun run config/skills/deep-research/scripts/db.ts create-claim --node <id> --claim "text" --source <id> --evidence "text" --confidence high --volatility stable
-bun run config/skills/deep-research/scripts/db.ts list-claims --node <id>
-bun run config/skills/deep-research/scripts/db.ts stale-claims --limit 20
-bun run config/skills/deep-research/scripts/db.ts verify-claim --id <id>
-bun run config/skills/deep-research/scripts/db.ts update-claim-status --id <id> --status superseded --superseded-by <id>
+bun run .agent/skills/deep-research/scripts/db.ts create-claim --node <id> --claim "text" --source <id> --evidence "text" --confidence high --volatility stable
+bun run .agent/skills/deep-research/scripts/db.ts list-claims --node <id>
+bun run .agent/skills/deep-research/scripts/db.ts stale-claims --limit 20
+bun run .agent/skills/deep-research/scripts/db.ts verify-claim --id <id>
+bun run .agent/skills/deep-research/scripts/db.ts update-claim-status --id <id> --status superseded --superseded-by <id>
 
 # Full tree
-bun run config/skills/deep-research/scripts/db.ts full-tree --project <id>
+bun run .agent/skills/deep-research/scripts/db.ts full-tree --project <id>
 ```
 
 ### search.ts — Search Execution
 ```bash
 # Get search plan with domain diversity info
-bun run config/skills/deep-research/scripts/search.ts --node <id> --queries '["query1","query2"]'
+bun run .agent/skills/deep-research/scripts/search.ts --node <id> --queries '["query1","query2"]'
 
 # Store a fetched source
-bun run config/skills/deep-research/scripts/search.ts --fetch --url <url> --node <id> --title "..."
+bun run .agent/skills/deep-research/scripts/search.ts --fetch --url <url> --node <id> --title "..."
 ```
 
 ### render.ts — Tree → Markdown
 ```bash
-bun run config/skills/deep-research/scripts/render.ts --project <id> --output data/research/<project-id>/report.md
+bun run .agent/skills/deep-research/scripts/render.ts --project <id> --output data/research/<project-id>/report.md
 ```
 
 ## Pipeline Stages
@@ -93,7 +93,7 @@ For each sub-question, generate 2-3 search query variations targeting different 
 
 Create each sub-question as a node:
 ```bash
-bun run config/skills/deep-research/scripts/db.ts create-node \
+bun run .agent/skills/deep-research/scripts/db.ts create-node \
   --project <project-id> \
   --parent <parent-node-id> \
   --depth <parent-depth + 1> \
@@ -130,7 +130,7 @@ After collecting sources for a node, mark it as `reducing` and process each sour
 
 Store each claim:
 ```bash
-bun run config/skills/deep-research/scripts/db.ts create-claim \
+bun run .agent/skills/deep-research/scripts/db.ts create-claim \
   --node <id> --source <source-id> \
   --claim "The factual assertion" \
   --evidence "Supporting evidence from the source" \
@@ -177,7 +177,7 @@ What remains unknown. Each gap becomes a candidate for a child node:
 
 Store the synthesis:
 ```bash
-bun run config/skills/deep-research/scripts/db.ts update-node-synthesis \
+bun run .agent/skills/deep-research/scripts/db.ts update-node-synthesis \
   --id <id> \
   --synthesis "The findings markdown..." \
   --significance "The so-what markdown..." \
@@ -194,7 +194,7 @@ After synthesis, compute priority scores for deciding what to deepen next:
 - **priority_score**: `novelty * gap_density * depth_decay` where `depth_decay = 1 / (1 + depth * 0.3)`. Deeper nodes get lower priority unless they're highly novel with many gaps.
 
 ```bash
-bun run config/skills/deep-research/scripts/db.ts update-node-scores \
+bun run .agent/skills/deep-research/scripts/db.ts update-node-scores \
   --id <id> --priority 0.72 --novelty 0.8 --gap-density 0.6
 ```
 
@@ -204,7 +204,7 @@ Pick the top-scored nodes and create child nodes from their gaps:
 
 ```bash
 # Find top candidates
-bun run config/skills/deep-research/scripts/db.ts top-nodes --project <id> --limit 3
+bun run .agent/skills/deep-research/scripts/db.ts top-nodes --project <id> --limit 3
 ```
 
 For each top node, take its highest-importance gaps and create child nodes (back to Stage 1).
@@ -220,7 +220,7 @@ Mark terminal nodes as `terminal`.
 
 Generate the markdown artifact:
 ```bash
-bun run config/skills/deep-research/scripts/render.ts --project <id> --output data/research/<project-id>/report.md
+bun run .agent/skills/deep-research/scripts/render.ts --project <id> --output data/research/<project-id>/report.md
 ```
 
 ## Interactive Flow
@@ -243,7 +243,7 @@ You can run multiple rounds in a single session. Present intermediate results af
 When running the cron deepening task (or when the user asks to refresh), check for stale claims:
 
 ```bash
-bun run config/skills/deep-research/scripts/db.ts stale-claims --limit 20
+bun run .agent/skills/deep-research/scripts/db.ts stale-claims --limit 20
 ```
 
 For each stale claim:

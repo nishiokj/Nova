@@ -3,7 +3,7 @@
   "ignore": [
     ".lab/**",
     "**/dist/**",
-    "config/skills/**"
+    ".agent/skills/**"
   ],
   "ignoreDependencies": [
     "typescript",

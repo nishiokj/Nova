@@ -94,7 +94,7 @@ For each invariant, execute this sequence:
 8. Enforce conformance before output
 - Validate output against `references/schema.md` and `references/output-contract.md`.
 - If tools are available, run:
-  - `node config/skills/semantic-compiler/scripts/validate_vp.js <path-to-vp.json>`
+  - `node .agent/skills/semantic-compiler/scripts/validate_vp.js <path-to-vp.json>`
 - If validation fails, do not present as compiled VP. Return failed status with concrete conformance findings.
 
 ## User Approval Gate

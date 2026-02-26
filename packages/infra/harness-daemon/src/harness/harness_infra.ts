@@ -104,7 +104,7 @@ export function createToolRegistry(config: FullHarnessConfig, workingDir: string
 
   const skillsDir = config.skills.directory
     ? path.resolve(workingDir, config.skills.directory)
-    : path.resolve(workingDir, 'config/skills');
+    : path.resolve(workingDir, '.agent/skills');
 
   toolRegistry.register({
     name: 'Skill',
@@ -133,7 +133,7 @@ export function createToolRegistry(config: FullHarnessConfig, workingDir: string
       if (skillName === 'list') {
         const skills = loadSkillDefinitions(skillsDir);
         if (skills.length === 0) {
-          return successResult('Skill', 'No skills available. Add skills to config/skills/<name>/SKILL.md', 0);
+          return successResult('Skill', 'No skills available. Add skills to .agent/skills/<name>/SKILL.md', 0);
         }
         const list = skills
           .filter(s => s.enabled)
