@@ -28,8 +28,8 @@ import { execSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { createAdapter, hasCodexCredentials, type ProviderKeyService } from 'llm';
 import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
-import { ToolRegistry, builtinToolOptions } from 'tools';
-import { createEvent, successResult, errorResult, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
+import { ToolRegistry } from 'tools';
+import { createEvent, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
 import { ContextWindow } from 'context';
 import { profiler } from 'shared';
 import { GraphDManager, createGraphDConfig, type GraphDSession } from 'graphd';
@@ -59,16 +59,14 @@ import type { FullHarnessConfig, ResolvedAgentConfig } from './config.js';
 import { LocalProviderManager } from './local_providers.js';
 import { ConfiguredEffectHooksRunner } from './configured_effect_hooks.js';
 import {
-  loadSkillDefinitions,
   loadHookDefinitions,
-  getSkillDefinition,
   getHookDefinition,
   type HookContext as SkillHookContext,
   type HookDefinition,
   type HookResult as LegacyHookResult,
 } from './skills_loader.js';
 import { SessionStore } from './session_store.js';
-import { createFileLogger, type HarnessLogger } from './harness_infra.js';
+import { createFileLogger, createToolRegistry, type HarnessLogger } from './harness_infra.js';
 import { PermissionChecker } from './permissions.js';
 import { DefaultOrchestratorRunner, type OrchestratorRunner } from './orchestrator_runner.js';
 import type { PermissionedTool, PermissionRequest, PermissionResponse } from 'types';
@@ -112,52 +110,30 @@ function gatherEnvironmentContext(workingDir: string): EnvironmentContext {
     date: new Date().toISOString().split('T')[0],
   };
 
+  const gitExec = (cmd: string) =>
+    execSync(cmd, { cwd: workingDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+
   try {
-    const isRepo = execSync('git rev-parse --is-inside-work-tree', {
-      cwd: workingDir,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim() === 'true';
+    const isRepo = gitExec('git rev-parse --is-inside-work-tree') === 'true';
 
     if (isRepo) {
-      const currentBranch = execSync('git branch --show-current', {
-        cwd: workingDir,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim();
+      const currentBranch = gitExec('git branch --show-current');
 
       // Detect main branch (main or master)
       let mainBranch = 'main';
       try {
-        execSync('git rev-parse --verify main', {
-          cwd: workingDir,
-          encoding: 'utf-8',
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
+        gitExec('git rev-parse --verify main');
       } catch {
         try {
-          execSync('git rev-parse --verify master', {
-            cwd: workingDir,
-            encoding: 'utf-8',
-            stdio: ['pipe', 'pipe', 'pipe'],
-          });
+          gitExec('git rev-parse --verify master');
           mainBranch = 'master';
         } catch {
           // Neither main nor master exists
         }
       }
 
-      const status = execSync('git status --short', {
-        cwd: workingDir,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim();
-
-      const recentCommits = execSync('git log --oneline -5', {
-        cwd: workingDir,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim().split('\n').filter(Boolean);
+      const status = gitExec('git status --short');
+      const recentCommits = gitExec('git log --oneline -5').split('\n').filter(Boolean);
 
       env.git = {
         isRepo: true,
@@ -185,9 +161,7 @@ function resolveGitCommitRange(
 
   try {
     const parentInfo = execSync(`git rev-list --parents -n 1 ${normalizedSha}`, {
-      cwd: workingDir,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: workingDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
     const parts = parentInfo.split(/\s+/).filter(Boolean);
     if (parts.length >= 2) {
@@ -307,7 +281,7 @@ class AsyncEventQueue {
   }
 }
 
-const consoleLogger: HarnessLogger = createFileLogger();
+const defaultLogger: HarnessLogger = createFileLogger();
 
 /**
  * Provider key service implementation for the harness.
@@ -399,14 +373,13 @@ export class AgentHarness {
   private memoryInjector: MemoryInjector | null = null;
   private traceSubscriber: TraceSubscriber | null = null;
   private memoryClient: SyncClient | null = null;
-  private asyncModeIssues: string[] = [];
   private initializedModelSelections = new Set<string>();
   private readonly pendingSessionHookTasks = new Set<Promise<void>>();
   private readonly closingSessionHooks = new Set<string>();
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger, orchestratorRunner?: OrchestratorRunner) {
     this.config = config;
-    this.logger = logger ?? consoleLogger;
+    this.logger = logger ?? defaultLogger;
     this.sessionTtlMs = config.context.sessionTtlMs;
     this.maxSessions = config.context.maxSessions;
     this.sessionHookRegistry = createSessionScopedUnifiedHookRegistry();
@@ -414,7 +387,6 @@ export class AgentHarness {
     // Gather environment context once at startup
     const envContext = gatherEnvironmentContext(config.tools.workingDir);
     this.agentRegistry = buildAgentRegistry(config, envContext);
-    this.validateAsyncAgentSchemas();
 
     // Create provider key service for runtime API key resolution
     // This allows keys to be added/changed at runtime without restart
@@ -451,89 +423,7 @@ export class AgentHarness {
 
     const workingDir = config.tools.workingDir;
 
-    // Create tool registry - tools are registered globally, agents filter by their config
-    this.toolRegistry = new ToolRegistry(
-      {
-        bashTimeoutMs: config.tools.bashTimeoutMs,
-        maxOutputLength: config.tools.maxOutputLength,
-        dangerousMode: config.dangerousMode,
-      },
-      workingDir
-    );
-
-    // Register builtin tools
-    for (const toolOptions of builtinToolOptions) {
-      this.toolRegistry.register(toolOptions);
-    }
-
-    // Register Skill tool - loads and executes skills from config/skills/
-    const skillsDir = config.skills.directory
-      ? path.resolve(workingDir, config.skills.directory)
-      : path.resolve(workingDir, 'config/skills');
-
-    this.toolRegistry.register({
-      name: 'Skill',
-      description: 'Load and execute a skill by name. Use skill="list" to see available skills. Skills provide specialized instructions for complex tasks like code review, design, etc.',
-      parameters: {
-        type: 'object',
-        properties: {
-          skill: {
-            type: 'string',
-            description: 'Skill name to execute (e.g., "design-fork"), or "list" to see available skills',
-          },
-          args: {
-            type: 'string',
-            description: 'Optional arguments to pass to the skill',
-          },
-        },
-        required: ['skill'],
-      },
-      required: ['skill'],
-      executor: (args) => Effect.sync(() => {
-        const skillName = String(args.skill ?? '').trim();
-        if (!skillName) {
-          return errorResult('Skill', 'Skill name is required', 0);
-        }
-
-        // List available skills
-        if (skillName === 'list') {
-          const skills = loadSkillDefinitions(skillsDir);
-          if (skills.length === 0) {
-            return successResult('Skill', 'No skills available. Add skills to config/skills/<name>/SKILL.md', 0);
-          }
-          const list = skills
-            .filter(s => s.enabled)
-            .map(s => `- **${s.name}**: ${s.description}`)
-            .join('\n');
-          return successResult('Skill', `Available skills:\n\n${list}`, 0);
-        }
-
-        // Load and return skill instructions
-        const skill = getSkillDefinition(skillsDir, skillName);
-        if (!skill) {
-          const available = loadSkillDefinitions(skillsDir)
-            .filter(s => s.enabled)
-            .map(s => s.name);
-          return errorResult('Skill', `Skill '${skillName}' not found. Available: ${available.join(', ') || 'none'}`, 0);
-        }
-
-        if (!skill.enabled) {
-          return errorResult('Skill', `Skill '${skillName}' is disabled`, 0);
-        }
-
-        // Return instructions with optional args
-        const skillArgs = typeof args.args === 'string' ? args.args.trim() : '';
-        const instructions = skillArgs
-          ? `${skill.instructions}\n\n## Arguments\n${skillArgs}`
-          : skill.instructions;
-
-        return successResult('Skill', instructions, 0);
-      }),
-      enabled: true,
-      readOnly: true,
-      parallelizable: false,
-      costHint: 'low',
-    });
+    this.toolRegistry = createToolRegistry(config, workingDir, config.dangerousMode);
 
     // Initialize GraphD if enabled
     // Note: config.graphd.dbPath is already an absolute path (resolved in config_loader.ts)
@@ -572,7 +462,7 @@ export class AgentHarness {
       this.logger.info('Memory client initialized for traces', { url: memoryDaemonUrl });
     } catch (error) {
       this.logger.warning('Failed to initialize memory client (traces will not be persisted)', {
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
     }
 
@@ -600,7 +490,7 @@ export class AgentHarness {
       } catch (error) {
         // Log warning but don't crash the agent if DB is down
         this.logger.warning('Failed to persist trace to database (is agent-memory daemon running?)', {
-          error: error instanceof Error ? error.message : String(error),
+          error: getErrorMessage(error),
           revision: trace.vcs.revision,
         });
       }
@@ -758,73 +648,48 @@ export class AgentHarness {
     }
   }
 
+  private static readonly HOOK_EVENT_MAP: Record<string, string> = {
+    pre_tool_use: 'PreToolUse',
+    post_tool_use: 'PostToolUse',
+    post_git_commit: 'PostGitCommit',
+    user_prompt_submit: 'UserPromptSubmit',
+    session_start: 'SessionStart',
+    session_stop: 'Stop',
+  };
+
   private buildSkillHookContext(
     eventType: string,
     payload: Record<string, unknown>,
     context: { sessionKey: string; requestId: string; workingDir: string }
   ): SkillHookContext {
-    switch (eventType) {
-      case 'pre_tool_use':
-        return {
-          event: 'PreToolUse',
-          sessionKey: context.sessionKey,
-          requestId: context.requestId,
-          workingDir: context.workingDir,
-          toolName: typeof payload.toolName === 'string' ? payload.toolName : undefined,
-          toolParams: typeof payload.args === 'object' && payload.args ? payload.args as Record<string, unknown> : undefined,
-        };
-      case 'post_tool_use':
-        return {
-          event: 'PostToolUse',
-          sessionKey: context.sessionKey,
-          requestId: context.requestId,
-          workingDir: context.workingDir,
-          toolName: typeof payload.toolName === 'string' ? payload.toolName : undefined,
-          toolParams: typeof payload.args === 'object' && payload.args ? payload.args as Record<string, unknown> : undefined,
-          toolResult: payload.result,
-        };
-      case 'post_git_commit':
-        return {
-          event: 'PostGitCommit',
-          sessionKey: context.sessionKey,
-          requestId: context.requestId,
-          workingDir: context.workingDir,
-          toolName: 'Bash',
-          toolParams: typeof payload.command === 'string' ? { command: payload.command } : undefined,
-          commitSha: typeof payload.sha === 'string' ? payload.sha : undefined,
-          commitMessage: typeof payload.message === 'string' ? payload.message : undefined,
-          commitBranch: typeof payload.branch === 'string' ? payload.branch : undefined,
-        };
-      case 'user_prompt_submit':
-        return {
-          event: 'UserPromptSubmit',
-          sessionKey: context.sessionKey,
-          requestId: context.requestId,
-          workingDir: context.workingDir,
-        };
-      case 'session_start':
-        return {
-          event: 'SessionStart',
-          sessionKey: context.sessionKey,
-          requestId: context.requestId,
-          workingDir: context.workingDir,
-        };
-      case 'session_stop':
-        return {
-          event: 'Stop',
-          sessionKey: context.sessionKey,
-          requestId: context.requestId,
-          workingDir: context.workingDir,
-        };
-      case 'notification':
-      default:
-        return {
-          event: 'Notification',
-          sessionKey: context.sessionKey,
-          requestId: context.requestId,
-          workingDir: context.workingDir,
-        };
+    const base: SkillHookContext = {
+      event: AgentHarness.HOOK_EVENT_MAP[eventType] ?? 'Notification',
+      sessionKey: context.sessionKey,
+      requestId: context.requestId,
+      workingDir: context.workingDir,
+    };
+
+    if (eventType === 'post_git_commit') {
+      return {
+        ...base,
+        toolName: 'Bash',
+        toolParams: typeof payload.command === 'string' ? { command: payload.command } : undefined,
+        commitSha: typeof payload.sha === 'string' ? payload.sha : undefined,
+        commitMessage: typeof payload.message === 'string' ? payload.message : undefined,
+        commitBranch: typeof payload.branch === 'string' ? payload.branch : undefined,
+      };
     }
+
+    if (eventType === 'pre_tool_use' || eventType === 'post_tool_use') {
+      return {
+        ...base,
+        toolName: typeof payload.toolName === 'string' ? payload.toolName : undefined,
+        toolParams: typeof payload.args === 'object' && payload.args ? payload.args as Record<string, unknown> : undefined,
+        ...(eventType === 'post_tool_use' ? { toolResult: payload.result } : {}),
+      };
+    }
+
+    return base;
   }
 
   private convertConfiguredResultToEffectOutcome(
@@ -932,7 +797,7 @@ export class AgentHarness {
           sessionKey,
           hookId: definition.id,
           event: effectEvent,
-          error: error instanceof Error ? error.message : String(error),
+          error: getErrorMessage(error),
         });
       }
     }
@@ -974,7 +839,7 @@ export class AgentHarness {
       this.logger.warning('Session effect hook execution failed', {
         sessionKey,
         eventType: event.type,
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
       return { status: 'completed', outcomes: [] };
     }
@@ -1008,7 +873,7 @@ export class AgentHarness {
         this.logger.warning(errorLogMessage, {
           sessionKey,
           eventType: event.type,
-          error: error instanceof Error ? error.message : String(error),
+          error: getErrorMessage(error),
         });
       }
     );
@@ -1035,8 +900,29 @@ export class AgentHarness {
   }
 
   /**
+   * Shared teardown: persist, close, evict in-memory state, mark inactive in GraphD.
+   */
+  private teardownSession(sessionKey: string, state: SessionState, persist = true): void {
+    this.cleanupSessionInternalHooks(sessionKey, state);
+    if (persist) state.store.persistContext();
+    state.store.close();
+    clearSessionState(state);
+    this.sessions.delete(sessionKey);
+    this.initializedModelSelections.delete(sessionKey);
+    this.markSessionInactive(sessionKey);
+  }
+
+  private markSessionInactive(sessionKey: string): void {
+    if (!this.isGraphDReady()) return;
+    try {
+      this.graphd!.sessionUpdateStatus(sessionKey, 'inactive');
+    } catch (error) {
+      this.logger.warning('Failed to mark session inactive', { sessionKey, error: String(error) });
+    }
+  }
+
+  /**
    * Close and evict in-memory state for a session.
-   * Persists context and marks session inactive before closing.
    */
   closeSession(sessionKey: string): CloseSessionResult {
     const state = this.sessions.get(sessionKey);
@@ -1053,23 +939,10 @@ export class AgentHarness {
           ...(executingRequestId ? { executingRequestId } : {}),
         };
       }
-
-      this.cleanupSessionInternalHooks(sessionKey, state);
-      // Persist context before closing
-      state.store.persistContext();
-      state.store.close();
-      clearSessionState(state);
-      this.sessions.delete(sessionKey);
-      this.initializedModelSelections.delete(sessionKey);
-    }
-
-    // Always mark session as inactive in GraphD, even if in-memory state was already evicted
-    if (this.isGraphDReady()) {
-      try {
-        this.graphd!.sessionUpdateStatus(sessionKey, 'inactive');
-      } catch (error) {
-        this.logger.warning('Failed to mark session inactive', { sessionKey, error: String(error) });
-      }
+      this.teardownSession(sessionKey, state);
+    } else {
+      // Mark inactive even if in-memory state was already evicted
+      this.markSessionInactive(sessionKey);
     }
     return { success: true };
   }
@@ -1101,7 +974,7 @@ export class AgentHarness {
           this.graphd = null;
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = getErrorMessage(error);
         this.logger.warning('GraphD connect failed; starting harness without GraphD features', { error: message });
         this.graphd = null;
         this.graphdStarted = false;
@@ -1139,7 +1012,7 @@ export class AgentHarness {
           }
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = getErrorMessage(error);
         this.logger.error('EntityGraph failed to start', { error: message });
         // Non-fatal — daemon continues without entity graph
       }
@@ -1198,10 +1071,7 @@ export class AgentHarness {
     let oldestAccessMs = Infinity;
 
     for (const [key, state] of this.sessions.entries()) {
-      // Skip sessions with active work
-      if (state.store.isExecuting() || state.store.getAsyncRun()) {
-        continue;
-      }
+      if (state.store.isExecuting() || state.store.getAsyncRun()) continue;
       if (state.lastAccessMs < oldestAccessMs) {
         oldestAccessMs = state.lastAccessMs;
         oldestKey = key;
@@ -1210,26 +1080,12 @@ export class AgentHarness {
 
     if (!oldestKey) return;
 
-    const state = this.sessions.get(oldestKey)!;
-    this.cleanupSessionInternalHooks(oldestKey, state);
-    state.store.persistContext();
-    state.store.close();
-    clearSessionState(state);
-    this.sessions.delete(oldestKey);
-    this.initializedModelSelections.delete(oldestKey);
+    this.teardownSession(oldestKey, this.sessions.get(oldestKey)!);
     this.logger.debug('LRU evicted session (maxSessions reached)', {
       sessionKey: oldestKey,
       maxSessions: this.maxSessions,
       idleMs: Date.now() - oldestAccessMs,
     });
-
-    if (this.isGraphDReady()) {
-      try {
-        this.graphd!.sessionUpdateStatus(oldestKey, 'inactive');
-      } catch (error) {
-        this.logger.warning('Failed to mark evicted session inactive', { sessionKey: oldestKey, error: String(error) });
-      }
-    }
   }
 
   private getOrCreateSessionStore(sessionKey: string, dangerousMode = false, workingDir?: string): SessionStore {
@@ -1506,7 +1362,7 @@ export class AgentHarness {
   }
 
   getAsyncModeStatus(): { ok: boolean; issues: string[] } {
-    return { ok: this.asyncModeIssues.length === 0, issues: [...this.asyncModeIssues] };
+    return { ok: true, issues: [] };
   }
 
   // --- Session-level exclusive operation management (async runs) ---
@@ -1583,7 +1439,7 @@ export class AgentHarness {
       return {
         success: false,
         requestId: active.requestId,
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       };
     }
 
@@ -1616,41 +1472,16 @@ export class AgentHarness {
     if (this.sessionTtlMs <= 0) return;
     const now = Date.now();
     const cutoff = now - this.sessionTtlMs;
-    const markInactive = (sessionKey: string) => {
-      if (!this.isGraphDReady()) return;
-      try {
-        this.graphd!.sessionUpdateStatus(sessionKey, 'inactive');
-      } catch (error) {
-        this.logger.warning('GraphD session status update failed', { error: String(error), sessionKey });
-      }
-    };
     for (const [sessionKey, state] of this.sessions.entries()) {
-      if (state.store.isExecuting() || state.store.getAsyncRun()) {
-        continue;
-      }
+      if (state.store.isExecuting() || state.store.getAsyncRun()) continue;
       if (state.lastAccessMs > cutoff) continue;
-      this.cleanupSessionInternalHooks(sessionKey, state);
-      state.store.close();
-      clearSessionState(state);
-      markInactive(sessionKey);
-      this.sessions.delete(sessionKey);
-      this.initializedModelSelections.delete(sessionKey);
+      this.teardownSession(sessionKey, state, false);
       this.logger.debug('Evicted session store', {
         sessionKey,
         reason,
         idleMs: now - state.lastAccessMs,
       });
     }
-  }
-
-  private normalizeSchemaId(schema: { schemaId?: string; name?: string } | undefined): string | null {
-    const raw = schema?.schemaId ?? schema?.name;
-    if (!raw || typeof raw !== 'string') return null;
-    return raw.trim().toLowerCase();
-  }
-
-  private validateAsyncAgentSchemas(): void {
-    this.asyncModeIssues = [];
   }
 
   private persistUserMessage(sessionKey: string, requestId: string, userInput: string): boolean {
@@ -1773,10 +1604,6 @@ export class AgentHarness {
       try {
         store.touch(effectiveWorkingDir);
         this.graphd!.setActive(true);
-        if (!this.graphdSubscriber) {
-          this.graphdSubscriber = createGraphDSubscriber(this.eventBus, this.graphd!, { batchMode: false });
-          this.logger.debug('GraphDSubscriber created');
-        }
       } catch (error) {
         this.logger.warning('GraphD session touch failed', { error: String(error) });
       }
@@ -2008,14 +1835,6 @@ export class AgentHarness {
     return {
       result: resultPromise,
       events: eventQueue,
-      abort: () => {
-        void this.controlSessionExecution({
-          sessionKey,
-          action: 'cancel',
-          reason: 'Execution aborted by handle',
-          requestedBy: 'system',
-        });
-      },
       cancel: (reason?: string) =>
         this.controlSessionExecution({
           sessionKey,
@@ -2023,6 +1842,7 @@ export class AgentHarness {
           reason: reason ?? 'Execution cancelled by handle',
           requestedBy: 'system',
         }),
+      abort() { void this.cancel!(); },
     };
   }
 
@@ -2057,24 +1877,13 @@ export class AgentHarness {
     }
   }
   private isToolResult(value: unknown): value is ToolResult {
-    if (!value || typeof value !== 'object') {
-      return false;
-    }
-    const record = value as Record<string, unknown>;
-    if (typeof record.toolName !== 'string') return false;
-    if (typeof record.status !== 'string') return false;
-    if (typeof record.output !== 'string') return false;
-    if (typeof record.durationMs !== 'number') return false;
-    if (typeof record.isSuccess !== 'boolean') return false;
-    if (record.error !== undefined && typeof record.error !== 'string') return false;
-    if (record.metadata !== undefined && (typeof record.metadata !== 'object' || record.metadata === null)) return false;
-
-    const validStatuses = new Set(['success', 'error', 'timeout', 'cancelled']);
-    if (!validStatuses.has(record.status)) return false;
-    if (record.status === 'success' && record.isSuccess !== true) return false;
-    if (record.status !== 'success' && record.isSuccess !== false) return false;
-
-    return true;
+    if (!value || typeof value !== 'object') return false;
+    const r = value as Record<string, unknown>;
+    return typeof r.toolName === 'string'
+      && typeof r.status === 'string'
+      && typeof r.output === 'string'
+      && typeof r.durationMs === 'number'
+      && typeof r.isSuccess === 'boolean';
   }
 
   /**
@@ -2553,7 +2362,7 @@ export class AgentHarness {
         bytesRecovered: result.bytesRecovered,
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = getErrorMessage(error);
       this.logger.error('Context compaction failed', { sessionKey, error: message });
       return { success: false, itemsRemoved: 0, bytesRecovered: 0, error: message };
     }

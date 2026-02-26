@@ -88,11 +88,12 @@ export function createFileLogger(logDir: string = 'logs'): HarnessLogger & { clo
 /**
  * Create and register tools for the harness.
  */
-export function createToolRegistry(config: FullHarnessConfig, workingDir: string): ToolRegistry {
+export function createToolRegistry(config: FullHarnessConfig, workingDir: string, dangerousMode = false): ToolRegistry {
   const toolRegistry = new ToolRegistry(
     {
       bashTimeoutMs: config.tools.bashTimeoutMs,
       maxOutputLength: config.tools.maxOutputLength,
+      dangerousMode,
     },
     workingDir
   );
