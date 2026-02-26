@@ -12,6 +12,7 @@ const packages: Record<string, string> = {
   'context':      'packages/core/context/src',
   'shared':       'packages/core/shared/src',
   'work':         'packages/core/work/src',
+  'runtime':      'packages/core/runtime/src',
   'types':        'packages/core/types/src',
   'protocol':     'packages/core/protocol/src',
   'comms-bus':    'packages/infra/comms-bus/src',
