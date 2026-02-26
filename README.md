@@ -1,6 +1,6 @@
-# rex
+# nova
 
-A config-driven, multi-tier agent system with composable agent primitives, DAG-based orchestration, async oversight, and multi-provider LLM support.
+A config-driven, multi-tier agent system with composable agent primitives, DAG-based orchestration, and multi-provider LLM support.
 
 ## Quick Start
 
@@ -9,8 +9,8 @@ A config-driven, multi-tier agent system with composable agent primitives, DAG-b
 bun install
 
 # Store API keys in GraphD
-rex providers set openai sk-...
-rex providers set anthropic sk-ant-...
+nova providers set openai sk-...
+nova providers set anthropic sk-ant-...
 
 # Run (launches daemon + control-plane + TUI)
 bun run start
@@ -35,40 +35,31 @@ bun run start:tui            # TUI in another terminal
 │ Launcher │────▶│ Daemon (9555)  │────▶│ GraphD(9444)│
 └──────────┘     └───────┬────────┘     └─────────────┘
                          │
-          ┌──────────────┼──────────────┐
-          ▼              ▼              ▼
-    ┌──────────┐  ┌──────────────┐  ┌──────────────┐
-    │ TUI(Ink) │  │Control-Plane │  │  Watcher /   │
-    │          │  │   (9445)     │  │  Planner     │
-    └──────────┘  └──────┬───────┘  └──────────────┘
-                         ▼
-                  ┌──────────────┐
-                  │  Cockpit UI  │
-                  └──────────────┘
+                ┌────────┴────────┐
+                ▼                 ▼
+          ┌──────────┐     ┌──────────────┐
+          │ TUI(Ink) │     │Control-Plane │
+          │          │     │   (9445)     │
+          └──────────┘     └──────┬───────┘
+                                  ▼
+                           ┌──────────────┐
+                           │  Cockpit UI  │
+                           └──────────────┘
 ```
 
-**Daemon** is the central process — it owns agent execution, session state, the orchestrator, hook system, permissions, and the WebSocket bus. **GraphD** is a standalone SQLite datastore for sessions, API keys, config, and escalations. **Control-Plane** exposes an HTTP API for the Cockpit dashboard and session management.
+**Daemon** is the central process — it owns agent execution, session state, the orchestrator, hook system, permissions, and the WebSocket bus. **GraphD** is a standalone SQLite datastore for sessions, API keys, and config. **Control-Plane** exposes an HTTP API for the Cockpit dashboard and session management.
 
 ### Agent Execution Flow
 
 ```
 Harness.run(goal)
   │
-  ├─ RoutingAgent → tier classification
-  │
   ├─ [simple] → Agent.run() → single LLM call
   │
   └─ [standard|complex] → Orchestrator.execute()
        ├─ ExplorerAgent → system context
-       ├─ PlannerAgent → WorkItem DAG
        └─ Execute DAG → parallel agent dispatch
 ```
-
-### Async Mode
-
-In async mode, the **Watcher** agent provides oversight: it auto-answers PromptUser questions from a curated decision database, performs quality gates on agent output, and raises **Escalations** to the Cockpit when it cannot resolve a decision autonomously. The **Planner** agent produces structured work breakdowns.
-
-Escalation lifecycle: `pending → acknowledged → resolved | dismissed`
 
 ## Project Structure
 
@@ -120,24 +111,20 @@ tests/                   # Integration tests
 
 | Agent | Role | Tools | Budget |
 |-------|------|-------|--------|
-| **routing** | Tier classification | None | 1 iter |
 | **explorer** | Codebase discovery | Read, Glob, Grep, Bash | 12 iter, 60 calls |
 | **standard** | Default execution | Read, Write, Edit, Glob, Grep, Bash, Skill, coding, explorer, WebSearch | 50 iter, 225 calls |
 | **coding** | Deep coding (reasoning) | Read, Write, Edit, Glob, Grep, Bash, Skill, explorer | 50 iter, 250 calls |
 | **context_compactor** | Context summarization | None | 3 iter |
-| **debugger** | Debug analysis | Read, Write, Edit, Glob, Grep, Bash, Skill | 15 iter, 45 calls |
-| **watcher** | Async oversight | Read, Glob, Grep, Bash | 20 iter, 40 calls |
-| **planner** | Async work planning | Read, Glob, Grep | 15 iter, 60 calls |
 
-Model roles are mapped per agent: `fast` (routing, compactor), `standard` (explorer, standard, watcher, planner, debugger), `reasoning` (coding).
+Model roles are mapped per agent: `fast` (compactor), `standard` (explorer, standard), `reasoning` (coding).
 
 ## Configuration
 
 ### config/defaults.json
 
-Central configuration for all agent types, tools, services, and runtime behavior. User overrides go in `~/.rex/config.json`.
+Central configuration for all agent types, tools, services, and runtime behavior. User overrides go in `~/.nova/config.json`.
 
-API keys are stored in GraphD (not env vars): `rex providers set <provider> <key>`
+API keys are stored in GraphD (not env vars): `nova providers set <provider> <key>`
 
 ### Environment Variables
 
@@ -175,42 +162,6 @@ bun run test:coverage          # Run tests with coverage
 bun run smoke:interprocess     # Inter-process smoke test
 ```
 
-## AgentLab Experiment (Curated A/B)
-
-The project includes a SWE-bench Lite curated A/B experiment that runs with per-task task images and an injected frozen `rex` artifact:
-
-- `glm-5` (`z.ai-coder`)
-- `gpt-5.3-codex-spark` (`codex`)
-
-Source files:
-
-- Experiment builder: `scripts/agentlab/build_swebench_curated_ab_experiment.mjs`
-- Agent freezer (artifact tarball): `scripts/agentlab/freeze_agent.sh`
-- Dataset upgrader (v1 -> v2): `scripts/agentlab/enrich_dataset_v2.mjs`
-- In-container benchmark grader: `scripts/agentlab/swebench_task_container_grader.py`
-- Run entrypoint (prints run id): `scripts/agentlab/run_curated_experiment.sh`
-- Agent runtime command in experiment: `/opt/agent/bin/rex run --bindings-file ${AGENTLAB_BINDINGS_PATH} --events ${AGENTLAB_TRAJECTORY_PATH} --session-key ${AGENTLAB_TRIAL_ID} --working-dir ${WORKSPACE} --dangerous`
-- Agent runtime entrypoint: `packages/infra/harness-daemon/src/cli/run.ts` (`rex run`)
-- Runner/agent file contract: `AGENTLAB_TASK_PATH` + `AGENTLAB_BINDINGS_PATH` in, `AGENTLAB_RESULT_PATH` (`result.json`) out; runner appends these CLI args via `runtime.agent.io`
-- Curated datasets: `v1` source `.lab/experiments/data/swebench_lite_curated.task_boundary_v1.jsonl`, `v2` per-task image `.lab/experiments/data/swebench_lite_curated.task_boundary_v2.jsonl`
-
-Benchmark extensibility:
-- The builder now accepts `--benchmark` and resolves benchmark metadata from a profile map.
-- To add a new benchmark, add one profile entry in `scripts/agentlab/benchmark_profiles.mjs`.
-- SWE-bench grading runs per-trial inside the task container and emits benchmark prediction/score records directly.
-
-Run a smoke pass (2 trials total: 1 task x 2 variants):
-
-```bash
-AGENTLAB_LIMIT=1 bash scripts/agentlab/run_curated_experiment.sh
-```
-
-Run against all curated tasks:
-
-```bash
-AGENTLAB_LIMIT=50 bash scripts/agentlab/run_curated_experiment.sh
-```
-
 ## Key Design Principles
 
 - **Agents are pure functions**: receive `ContextWindow` by value, mutate locally
@@ -219,7 +170,6 @@ AGENTLAB_LIMIT=50 bash scripts/agentlab/run_curated_experiment.sh
 - **Discriminated unions**: exhaustive handling enforced by TypeScript
 - **Write-through disk**: RAM is authoritative, mutations trigger atomic disk writes (tmp + rename)
 - **Session IS the Workflow**: no separate Workflow entity
-- **Escalation is the only new stateful entity**: the single coordination primitive between async agents and human oversight
 
 ## License
 
