@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "rex-daemon": "./bin/rex.js"
+    "nova-daemon": "./bin/nova.js"
   },
   "scripts": {
     "start": "bun run src/index.ts",

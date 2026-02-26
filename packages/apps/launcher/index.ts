@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Rex Launcher - Unified entry point for rex CLI
+ * Nova Launcher - Unified entry point for nova CLI
  *
  * This launcher:
  * 1. Checks if daemon is running on the well-known port
@@ -18,11 +18,11 @@ import { homedir } from 'os';
 /**
  * Minimal user config template.
  * This is created on first run for user preferences.
- * API keys are stored in GraphD (use `rex providers set <provider> <key>`).
+ * API keys are stored in GraphD (use `nova providers set <provider> <key>`).
  * All other settings come from config/defaults.json
  */
 const MINIMAL_USER_CONFIG = {
-  $comment: "User preferences. API keys are stored securely in GraphD - use 'rex providers set <provider> <key>' to configure them.",
+  $comment: "User preferences. API keys are stored securely in GraphD - use 'nova providers set <provider> <key>' to configure them.",
   models: {
     default: ""
   },
@@ -57,7 +57,7 @@ const getDaemonPath = () => {
 
 const getHarnessCliPath = () => {
   const root = getProjectRoot();
-  return path.join(root, 'packages', 'infra', 'harness-daemon', 'bin', 'rex.js');
+  return path.join(root, 'packages', 'infra', 'harness-daemon', 'bin', 'nova.js');
 };
 
 const getTuiPath = () => {
@@ -69,7 +69,7 @@ const getTuiPath = () => {
 
 const PROJECT_CONFIG_NAME = path.join('config', 'harness_config.json');
 
-const getConfigDir = () => path.join(homedir(), '.rex');
+const getConfigDir = () => path.join(homedir(), '.nova');
 const getUserConfigPath = () => path.join(getConfigDir(), 'config.json');
 
 const ensureUserConfig = (): string => {
@@ -81,16 +81,16 @@ const ensureUserConfig = (): string => {
     // Create directory if needed
     if (!existsSync(userConfigDir)) {
       mkdirSync(userConfigDir, { recursive: true });
-      console.log(`[rex] Created config directory: ${userConfigDir}`);
+      console.log(`[nova] Created config directory: ${userConfigDir}`);
     }
 
     // Write minimal user config for preferences (API keys stored in GraphD)
     writeFileSync(userConfig, JSON.stringify(MINIMAL_USER_CONFIG, null, 2) + '\n');
-    console.log(`[rex] Created user config: ${userConfig}`);
-    console.log('[rex] To add API keys, use: rex providers set <provider> <key>');
+    console.log(`[nova] Created user config: ${userConfig}`);
+    console.log('[nova] To add API keys, use: nova providers set <provider> <key>');
     return userConfig;
   } catch (err) {
-    console.warn(`[rex] Could not create user config: ${err}`);
+    console.warn(`[nova] Could not create user config: ${err}`);
   }
 
   return userConfig;
@@ -250,7 +250,7 @@ async function startDaemon(): Promise<Subprocess> {
   const configPath = resolveConfigPath();
   const daemonArgs = buildDaemonArgs();
 
-  console.log('[rex] Starting daemon...');
+  console.log('[nova] Starting daemon...');
 
   const logsDir = path.join(getProjectRoot(), 'logs');
   mkdirSync(logsDir, { recursive: true });
@@ -272,7 +272,7 @@ async function startDaemon(): Promise<Subprocess> {
   const startTime = Date.now();
   while (Date.now() - startTime < DAEMON_STARTUP_TIMEOUT) {
     if (await isDaemonRunning()) {
-      console.log('[rex] Daemon ready');
+      console.log('[nova] Daemon ready');
       return daemon;
     }
     await new Promise(r => setTimeout(r, 100));
@@ -327,7 +327,7 @@ async function killExistingDaemon(): Promise<void> {
       }
       await new Promise(r => setTimeout(r, 100));
     }
-    console.warn('[rex] Services did not shut down in time');
+    console.warn('[nova] Services did not shut down in time');
   } catch {
     // No daemon running or pkill failed - that's fine
   }
@@ -343,7 +343,7 @@ async function main(): Promise<void> {
 
   // Handle --restart flag: kill existing daemon before proceeding
   if (process.argv.includes('--restart')) {
-    console.log('[rex] Restarting daemon...');
+    console.log('[nova] Restarting daemon...');
     await killExistingDaemon();
   }
 
@@ -378,18 +378,18 @@ async function main(): Promise<void> {
   // Starting a TUI with --dangerous enables dangerous mode for that session only.
   // It does NOT require restarting the daemon or affect other sessions.
   if (process.argv.includes('--dangerous')) {
-    console.log('[rex] --dangerous mode: Will enable for this session only');
+    console.log('[nova] --dangerous mode: Will enable for this session only');
   }
 
   if (!daemonRunning) {
     try {
       await startDaemon();
     } catch (error) {
-      console.error('[rex] Failed to start daemon:', error instanceof Error ? error.message : error);
+      console.error('[nova] Failed to start daemon:', error instanceof Error ? error.message : error);
       process.exit(1);
     }
   } else {
-    console.log('[rex] Daemon already running');
+    console.log('[nova] Daemon already running');
   }
 
   // Start TUI
@@ -397,6 +397,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error('[rex] Fatal error:', error instanceof Error ? error.message : error);
+  console.error('[nova] Fatal error:', error instanceof Error ? error.message : error);
   process.exit(1);
 });

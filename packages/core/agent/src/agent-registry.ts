@@ -11,7 +11,6 @@ const DEFAULT_AGENT_TOOL_DESCRIPTIONS: Record<string, string> = {
   standard: 'Execute a focused task using available tools.',
   coding: 'Delegate a self-contained programming task that can execute independently. Use for substantial coding work (new features, refactors) that doesn\'t require your intermediate results.',
   context_compactor: 'Compact conversation context to fit limits.',
-  debugger: 'Diagnose and fix bugs or failures in the task.',
 };
 
 const AGENT_TOOL_PARAMETER_SCHEMA: ToolDefinition['parameters'] = {

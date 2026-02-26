@@ -15,6 +15,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error('[rex] Fatal error:', error);
+  console.error('[nova] Fatal error:', error);
   process.exit(1);
 });

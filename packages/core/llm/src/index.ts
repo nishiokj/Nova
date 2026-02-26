@@ -62,7 +62,7 @@ export {
 
 // Tool vocabulary — provider-specific tool names for prompt parameterization
 export type { ToolVocabulary } from './providers/tool_skins.js';
-export { REX_VOCAB, CODEX_VOCAB, vocabForProvider } from './providers/tool_skins.js';
+export { NOVA_VOCAB, CODEX_VOCAB, vocabForProvider } from './providers/tool_skins.js';
 
 // Provider registry for direct provider access (advanced)
 export { getProvider } from './providers/registry.js';

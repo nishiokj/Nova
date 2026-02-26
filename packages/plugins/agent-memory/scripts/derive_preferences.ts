@@ -3,7 +3,7 @@
  * Derived Task: Preference Extraction from Canonical Conversations
  *
  * Reads canonical_conversation + canonical_message and uses Gemini to extract
- * user preferences from Claude and Rex session conversations.
+ * user preferences from Claude and Nova session conversations.
  *
  * Mode selection (based on task.mode):
  *   - recurring: Gemini Batch API (50% cost reduction, checkpoint/resume)

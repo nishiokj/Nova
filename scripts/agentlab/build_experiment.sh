@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 DATASET_V1="${AGENTLAB_DATASET_V1:-$ROOT_DIR/.lab/experiments/data/swebench_lite_curated.task_boundary_v1.jsonl}"
 DATASET_V2="${AGENTLAB_DATASET_V2:-$ROOT_DIR/.lab/experiments/data/swebench_lite_curated.task_boundary_v2.jsonl}"
-AGENT_ARTIFACT="${AGENTLAB_AGENT_ARTIFACT:-$ROOT_DIR/.lab/agents/rex-current.tar.gz}"
+AGENT_ARTIFACT="${AGENTLAB_AGENT_ARTIFACT:-$ROOT_DIR/.lab/agents/nova-current.tar.gz}"
 TASK_WORKSPACE="${AGENTLAB_TASK_WORKSPACE:-/testbed}"
 EXPERIMENT_YAML="$ROOT_DIR/.lab/experiments/swebench_lite_curated_glm5_vs_codex_spark.yaml"
 

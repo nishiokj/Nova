@@ -31,10 +31,10 @@ jobs:
           bun build --compile \
             --target=bun-linux-x64 \
             --minify \
-            --define "process.env.REX_VERSION='\"ci-test\"'" \
+            --define "process.env.NOVA_VERSION='\"ci-test\"'" \
             ./packages/launcher/standalone.ts \
-            --outfile ./rex-test
-          ./rex-test --version
+            --outfile ./nova-test
+          ./nova-test --version
 
   test:
     name: Test

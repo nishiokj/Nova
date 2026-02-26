@@ -684,13 +684,13 @@ export class AuthService {
 }
 
 /**
- * Default Google OAuth client ID for Rex CLI.
+ * Default Google OAuth client ID for Nova CLI.
  * This is a "Desktop" type OAuth client - no secret required with PKCE.
  *
  * To use your own client ID, set GOOGLE_CLIENT_ID environment variable.
  * Create a "Desktop" type OAuth client in Google Cloud Console.
  */
-const DEFAULT_GOOGLE_CLIENT_ID = process.env.REX_GOOGLE_CLIENT_ID ?? '380690977483-43jcgqd6g58ev7514pr1onk5diaiikqb.apps.googleusercontent.com';
+const DEFAULT_GOOGLE_CLIENT_ID = process.env.NOVA_GOOGLE_CLIENT_ID ?? '380690977483-43jcgqd6g58ev7514pr1onk5diaiikqb.apps.googleusercontent.com';
 
 /**
  * Create auth service from environment.

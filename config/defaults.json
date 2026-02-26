@@ -1,6 +1,6 @@
 {
   "$schema": "./config-schema.json",
-  "$comment": "Default configuration for the harness. User config at ~/.rex/config.json overrides these values. API keys are stored in GraphD - use 'rex providers set <provider> <key>' to configure.",
+  "$comment": "Default configuration for the harness. User config at ~/.nova/config.json overrides these values. API keys are stored in GraphD - use 'nova providers set <provider> <key>' to configure.",
 
   "models": {
     "$comment": "Available models are defined in packages/core/types/src/providers.ts.",
@@ -9,21 +9,6 @@
   },
 
   "agents": {
-    "routing": {
-      "$comment": "Fast, cheap model for routing decisions. No tools needed.",
-      "llm": {
-        "role": "fast",
-        "max_tokens": 200,
-        "temperature": 0.1
-      },
-      "budget": {
-        "max_iterations": 1,
-        "max_tool_calls": 0,
-        "max_duration_ms": 5000
-      },
-      "output_schema": "routing"
-    },
-
     "explorer": {
       "$comment": "Code exploration and search. Read-only tools.",
       "llm": {
@@ -88,53 +73,6 @@
       "output_schema": "agent_action"
     },
 
-    "debugger": {
-      "$comment": "Debugging and error analysis.",
-      "llm": {
-        "role": "standard",
-        "max_tokens": 16000,
-        "temperature": 0.5
-      },
-      "budget": {
-        "max_iterations": 15,
-        "max_tool_calls": 45,
-        "max_duration_ms": 180000
-      },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill"],
-      "output_schema": "agent_action"
-    },
-
-    "watcher": {
-      "$comment": "Oversight agent for async mode. Answers questions, audits, quality gates. Needs enough budget to read files AND reason.",
-      "llm": {
-        "role": "standard",
-        "max_tokens": 64000,
-        "temperature": 0.3
-      },
-      "budget": {
-        "max_iterations": 20,
-        "max_tool_calls": 40,
-        "max_duration_ms": 90000
-      },
-      "tools": ["Read", "Glob", "Grep", "Bash"],
-      "output_schema": "watcher_action"
-    },
-
-    "planner": {
-      "$comment": "Planning agent for async mode. Produces structured work breakdowns.",
-      "llm": {
-        "role": "standard",
-        "max_tokens": 64000,
-        "temperature": 0.3
-      },
-      "budget": {
-        "max_iterations": 15,
-        "max_tool_calls": 60,
-        "max_duration_ms": 180000
-      },
-      "tools": ["Read", "Glob", "Grep"],
-      "output_schema": "planner_output"
-    }
   },
 
   "tools": {

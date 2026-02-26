@@ -3,27 +3,27 @@
  *
  * Focus areas:
  * - formatToolForOpenAI: correct Codex definitions, filtering, freeform vs JSON
- * - translateCodexArgsToRex: argument translation (Codex → Rex)
- * - translateRexArgsToCodex: argument translation (Rex → Codex)
+ * - translateCodexArgsToNova: argument translation (Codex → Nova)
+ * - translateNovaArgsToCodex: argument translation (Nova → Codex)
  * - Argument round-trip consistency
- * - vocabForProvider / REX_VOCAB / CODEX_VOCAB
- * - OpenAI provider parseToolCalls: Codex → Rex name + arg translation
- * - OpenAI provider normalizeInput: Rex → Codex name translation
+ * - vocabForProvider / NOVA_VOCAB / CODEX_VOCAB
+ * - OpenAI provider parseToolCalls: Codex → Nova name + arg translation
+ * - OpenAI provider normalizeInput: Nova → Codex name translation
  * - Full round-trip consistency through provider
  */
 
 import type { ToolDefinition } from 'types';
 import {
-  CODEX_TO_REX,
-  REX_TO_CODEX,
-  FILTERED_REX_TOOLS,
+  CODEX_TO_NOVA,
+  NOVA_TO_CODEX,
+  FILTERED_NOVA_TOOLS,
   CODEX_TOOL_DEFS,
   formatToolForOpenAI,
-  translateCodexArgsToRex,
-  translateRexArgsToCodex,
+  translateCodexArgsToNova,
+  translateNovaArgsToCodex,
   supportsCustomTools,
   vocabForProvider,
-  REX_VOCAB,
+  NOVA_VOCAB,
   CODEX_VOCAB,
 } from 'llm/providers/tool_skins.js';
 import { OpenAIProvider } from 'llm/providers/openai.js';
@@ -33,25 +33,25 @@ import { OpenAIProvider } from 'llm/providers/openai.js';
 // ============================================
 
 describe('name maps', () => {
-  it('CODEX_TO_REX and REX_TO_CODEX are inverse', () => {
-    for (const [codex, rex] of Object.entries(CODEX_TO_REX)) {
-      expect(REX_TO_CODEX[rex]).toBe(codex);
+  it('CODEX_TO_NOVA and NOVA_TO_CODEX are inverse', () => {
+    for (const [codex, rex] of Object.entries(CODEX_TO_NOVA)) {
+      expect(NOVA_TO_CODEX[rex]).toBe(codex);
     }
-    for (const [rex, codex] of Object.entries(REX_TO_CODEX)) {
-      expect(CODEX_TO_REX[codex]).toBe(rex);
+    for (const [rex, codex] of Object.entries(NOVA_TO_CODEX)) {
+      expect(CODEX_TO_NOVA[codex]).toBe(rex);
     }
   });
 
-  it('FILTERED_REX_TOOLS contains Edit, Write, BatchEdit', () => {
-    expect(FILTERED_REX_TOOLS.has('Edit')).toBe(true);
-    expect(FILTERED_REX_TOOLS.has('Write')).toBe(true);
-    expect(FILTERED_REX_TOOLS.has('BatchEdit')).toBe(true);
-    expect(FILTERED_REX_TOOLS.has('Read')).toBe(false);
-    expect(FILTERED_REX_TOOLS.has('Bash')).toBe(false);
+  it('FILTERED_NOVA_TOOLS contains Edit, Write, BatchEdit', () => {
+    expect(FILTERED_NOVA_TOOLS.has('Edit')).toBe(true);
+    expect(FILTERED_NOVA_TOOLS.has('Write')).toBe(true);
+    expect(FILTERED_NOVA_TOOLS.has('BatchEdit')).toBe(true);
+    expect(FILTERED_NOVA_TOOLS.has('Read')).toBe(false);
+    expect(FILTERED_NOVA_TOOLS.has('Bash')).toBe(false);
   });
 
   it('every skinned tool has a matching CODEX_TOOL_DEFS entry', () => {
-    for (const codexName of Object.values(REX_TO_CODEX)) {
+    for (const codexName of Object.values(NOVA_TO_CODEX)) {
       expect(CODEX_TOOL_DEFS).toHaveProperty(codexName);
       expect(CODEX_TOOL_DEFS[codexName].name).toBe(codexName);
     }
@@ -294,15 +294,15 @@ describe('supportsCustomTools', () => {
 // ARGUMENT TRANSLATION TESTS
 // ============================================
 
-describe('translateCodexArgsToRex', () => {
+describe('translateCodexArgsToNova', () => {
   describe('shell_command → Bash', () => {
     it('should translate command', () => {
-      const result = translateCodexArgsToRex('shell_command', { command: 'ls -la' });
+      const result = translateCodexArgsToNova('shell_command', { command: 'ls -la' });
       expect(result.command).toBe('ls -la');
     });
 
     it('should translate timeout_ms to seconds', () => {
-      const result = translateCodexArgsToRex('shell_command', {
+      const result = translateCodexArgsToNova('shell_command', {
         command: 'sleep 1',
         timeout_ms: 5000,
       });
@@ -310,12 +310,12 @@ describe('translateCodexArgsToRex', () => {
     });
 
     it('should omit timeout when timeout_ms is not provided', () => {
-      const result = translateCodexArgsToRex('shell_command', { command: 'echo hi' });
+      const result = translateCodexArgsToNova('shell_command', { command: 'echo hi' });
       expect(result.timeout).toBeUndefined();
     });
 
     it('should drop workdir (handled by execution context)', () => {
-      const result = translateCodexArgsToRex('shell_command', {
+      const result = translateCodexArgsToNova('shell_command', {
         command: 'ls',
         workdir: '/home/user',
       });
@@ -326,12 +326,12 @@ describe('translateCodexArgsToRex', () => {
 
   describe('read_file → Read', () => {
     it('should translate file_path to path', () => {
-      const result = translateCodexArgsToRex('read_file', { file_path: '/src/main.ts' });
+      const result = translateCodexArgsToNova('read_file', { file_path: '/src/main.ts' });
       expect(result.path).toBe('/src/main.ts');
     });
 
     it('should translate offset and limit to startLine and endLine', () => {
-      const result = translateCodexArgsToRex('read_file', {
+      const result = translateCodexArgsToNova('read_file', {
         file_path: '/src/main.ts',
         offset: 10,
         limit: 20,
@@ -341,7 +341,7 @@ describe('translateCodexArgsToRex', () => {
     });
 
     it('should handle offset without limit', () => {
-      const result = translateCodexArgsToRex('read_file', {
+      const result = translateCodexArgsToNova('read_file', {
         file_path: '/src/main.ts',
         offset: 10,
       });
@@ -350,17 +350,17 @@ describe('translateCodexArgsToRex', () => {
     });
 
     it('should accept path as alias for file_path', () => {
-      const result = translateCodexArgsToRex('read_file', { path: '/x.ts' });
+      const result = translateCodexArgsToNova('read_file', { path: '/x.ts' });
       expect(result.path).toBe('/x.ts');
     });
 
     it('should prefer file_path over path', () => {
-      const result = translateCodexArgsToRex('read_file', { file_path: '/a.ts', path: '/b.ts' });
+      const result = translateCodexArgsToNova('read_file', { file_path: '/a.ts', path: '/b.ts' });
       expect(result.path).toBe('/a.ts');
     });
 
     it('should pass through endLine directly when model sends it', () => {
-      const result = translateCodexArgsToRex('read_file', {
+      const result = translateCodexArgsToNova('read_file', {
         file_path: '/x.ts',
         offset: 5,
         endLine: 42,
@@ -370,7 +370,7 @@ describe('translateCodexArgsToRex', () => {
     });
 
     it('should accept startLine as alias for offset', () => {
-      const result = translateCodexArgsToRex('read_file', {
+      const result = translateCodexArgsToNova('read_file', {
         file_path: '/x.ts',
         startLine: 7,
         limit: 10,
@@ -380,7 +380,7 @@ describe('translateCodexArgsToRex', () => {
     });
 
     it('should return only path when no range args given', () => {
-      const result = translateCodexArgsToRex('read_file', { file_path: '/x.ts' });
+      const result = translateCodexArgsToNova('read_file', { file_path: '/x.ts' });
       expect(result.path).toBe('/x.ts');
       expect(result.startLine).toBeUndefined();
       expect(result.endLine).toBeUndefined();
@@ -389,7 +389,7 @@ describe('translateCodexArgsToRex', () => {
 
   describe('grep_files → Grep', () => {
     it('should translate include to glob', () => {
-      const result = translateCodexArgsToRex('grep_files', {
+      const result = translateCodexArgsToNova('grep_files', {
         pattern: 'TODO',
         include: '*.ts',
         path: '/src',
@@ -402,17 +402,17 @@ describe('translateCodexArgsToRex', () => {
     });
 
     it('should accept glob as alias for include', () => {
-      const result = translateCodexArgsToRex('grep_files', { pattern: 'foo', glob: '*.js' });
+      const result = translateCodexArgsToNova('grep_files', { pattern: 'foo', glob: '*.js' });
       expect(result.glob).toBe('*.js');
     });
 
     it('should accept maxResults as alias for limit', () => {
-      const result = translateCodexArgsToRex('grep_files', { pattern: 'bar', maxResults: 25 });
+      const result = translateCodexArgsToNova('grep_files', { pattern: 'bar', maxResults: 25 });
       expect(result.maxResults).toBe(25);
     });
 
     it('should handle pattern-only (minimal call)', () => {
-      const result = translateCodexArgsToRex('grep_files', { pattern: 'hello' });
+      const result = translateCodexArgsToNova('grep_files', { pattern: 'hello' });
       expect(result.pattern).toBe('hello');
       expect(result.glob).toBeUndefined();
       expect(result.path).toBeUndefined();
@@ -422,17 +422,17 @@ describe('translateCodexArgsToRex', () => {
 
   describe('list_dir → Glob', () => {
     it('should convert dir_path to glob pattern', () => {
-      const result = translateCodexArgsToRex('list_dir', { dir_path: 'src' });
+      const result = translateCodexArgsToNova('list_dir', { dir_path: 'src' });
       expect(result.pattern).toBe('src/**/*');
     });
 
     it('should handle trailing slash', () => {
-      const result = translateCodexArgsToRex('list_dir', { dir_path: 'src/' });
+      const result = translateCodexArgsToNova('list_dir', { dir_path: 'src/' });
       expect(result.pattern).toBe('src/**/*');
     });
 
     it('should translate limit and depth', () => {
-      const result = translateCodexArgsToRex('list_dir', {
+      const result = translateCodexArgsToNova('list_dir', {
         dir_path: '.',
         limit: 100,
         depth: 3,
@@ -442,22 +442,22 @@ describe('translateCodexArgsToRex', () => {
     });
 
     it('should accept pattern as alias for dir_path', () => {
-      const result = translateCodexArgsToRex('list_dir', { pattern: 'lib' });
+      const result = translateCodexArgsToNova('list_dir', { pattern: 'lib' });
       expect(result.pattern).toBe('lib/**/*');
     });
 
     it('should default to current dir when neither dir_path nor pattern given', () => {
-      const result = translateCodexArgsToRex('list_dir', {});
+      const result = translateCodexArgsToNova('list_dir', {});
       expect(result.pattern).toBe('./**/*');
     });
 
     it('should accept maxResults as alias for limit', () => {
-      const result = translateCodexArgsToRex('list_dir', { dir_path: '.', maxResults: 50 });
+      const result = translateCodexArgsToNova('list_dir', { dir_path: '.', maxResults: 50 });
       expect(result.maxResults).toBe(50);
     });
 
     it('should accept maxDepth as alias for depth', () => {
-      const result = translateCodexArgsToRex('list_dir', { dir_path: '.', maxDepth: 2 });
+      const result = translateCodexArgsToNova('list_dir', { dir_path: '.', maxDepth: 2 });
       expect(result.maxDepth).toBe(2);
     });
   });
@@ -465,42 +465,42 @@ describe('translateCodexArgsToRex', () => {
   describe('unknown tool', () => {
     it('should pass through args unchanged', () => {
       const args = { foo: 'bar', baz: 123 };
-      const result = translateCodexArgsToRex('unknown_tool', args);
+      const result = translateCodexArgsToNova('unknown_tool', args);
       expect(result).toEqual(args);
     });
   });
 });
 
 // ============================================
-// REVERSE ARGUMENT TRANSLATION (Rex → Codex)
+// REVERSE ARGUMENT TRANSLATION (Nova → Codex)
 // ============================================
 
-describe('translateRexArgsToCodex', () => {
+describe('translateNovaArgsToCodex', () => {
   describe('Bash → shell_command', () => {
     it('should translate command', () => {
-      const result = translateRexArgsToCodex('Bash', { command: 'ls -la' });
+      const result = translateNovaArgsToCodex('Bash', { command: 'ls -la' });
       expect(result.command).toBe('ls -la');
     });
 
     it('should translate timeout (seconds) to timeout_ms', () => {
-      const result = translateRexArgsToCodex('Bash', { command: 'sleep 1', timeout: 5 });
+      const result = translateNovaArgsToCodex('Bash', { command: 'sleep 1', timeout: 5 });
       expect(result.timeout_ms).toBe(5000);
     });
 
     it('should omit timeout_ms when timeout is not provided', () => {
-      const result = translateRexArgsToCodex('Bash', { command: 'echo hi' });
+      const result = translateNovaArgsToCodex('Bash', { command: 'echo hi' });
       expect(result.timeout_ms).toBeUndefined();
     });
   });
 
   describe('Read → read_file', () => {
     it('should translate path to file_path', () => {
-      const result = translateRexArgsToCodex('Read', { path: '/src/main.ts' });
+      const result = translateNovaArgsToCodex('Read', { path: '/src/main.ts' });
       expect(result.file_path).toBe('/src/main.ts');
     });
 
     it('should translate startLine/endLine to offset/limit', () => {
-      const result = translateRexArgsToCodex('Read', {
+      const result = translateNovaArgsToCodex('Read', {
         path: '/src/main.ts',
         startLine: 10,
         endLine: 29,
@@ -510,13 +510,13 @@ describe('translateRexArgsToCodex', () => {
     });
 
     it('should handle startLine without endLine', () => {
-      const result = translateRexArgsToCodex('Read', { path: '/x.ts', startLine: 5 });
+      const result = translateNovaArgsToCodex('Read', { path: '/x.ts', startLine: 5 });
       expect(result.offset).toBe(5);
       expect(result.limit).toBeUndefined();
     });
 
     it('should return only file_path when no range given', () => {
-      const result = translateRexArgsToCodex('Read', { path: '/x.ts' });
+      const result = translateNovaArgsToCodex('Read', { path: '/x.ts' });
       expect(result.file_path).toBe('/x.ts');
       expect(result.offset).toBeUndefined();
       expect(result.limit).toBeUndefined();
@@ -525,7 +525,7 @@ describe('translateRexArgsToCodex', () => {
 
   describe('Grep → grep_files', () => {
     it('should translate glob to include', () => {
-      const result = translateRexArgsToCodex('Grep', {
+      const result = translateNovaArgsToCodex('Grep', {
         pattern: 'TODO',
         glob: '*.ts',
         path: '/src',
@@ -538,7 +538,7 @@ describe('translateRexArgsToCodex', () => {
     });
 
     it('should handle pattern-only (minimal call)', () => {
-      const result = translateRexArgsToCodex('Grep', { pattern: 'hello' });
+      const result = translateNovaArgsToCodex('Grep', { pattern: 'hello' });
       expect(result.pattern).toBe('hello');
       expect(result.include).toBeUndefined();
       expect(result.path).toBeUndefined();
@@ -548,12 +548,12 @@ describe('translateRexArgsToCodex', () => {
 
   describe('Glob → list_dir', () => {
     it('should translate pattern to dir_path', () => {
-      const result = translateRexArgsToCodex('Glob', { pattern: 'src/**/*' });
+      const result = translateNovaArgsToCodex('Glob', { pattern: 'src/**/*' });
       expect(result.dir_path).toBe('src/**/*');
     });
 
     it('should translate maxResults and maxDepth', () => {
-      const result = translateRexArgsToCodex('Glob', {
+      const result = translateNovaArgsToCodex('Glob', {
         pattern: '.',
         maxResults: 100,
         maxDepth: 3,
@@ -563,7 +563,7 @@ describe('translateRexArgsToCodex', () => {
     });
 
     it('should omit optional fields when absent', () => {
-      const result = translateRexArgsToCodex('Glob', { pattern: '.' });
+      const result = translateNovaArgsToCodex('Glob', { pattern: '.' });
       expect(result.limit).toBeUndefined();
       expect(result.depth).toBeUndefined();
     });
@@ -572,7 +572,7 @@ describe('translateRexArgsToCodex', () => {
   describe('unknown tool', () => {
     it('should pass through args unchanged', () => {
       const args = { foo: 'bar', baz: 123 };
-      const result = translateRexArgsToCodex('UnknownTool', args);
+      const result = translateNovaArgsToCodex('UnknownTool', args);
       expect(result).toEqual(args);
     });
   });
@@ -582,19 +582,19 @@ describe('translateRexArgsToCodex', () => {
 // ARGUMENT ROUND-TRIP INVARIANT
 // ============================================
 
-describe('argument round-trip: Codex → Rex → Codex', () => {
+describe('argument round-trip: Codex → Nova → Codex', () => {
   it('shell_command args survive the round-trip', () => {
     const codexArgs = { command: 'echo hello', timeout_ms: 3000 };
-    const rexArgs = translateCodexArgsToRex('shell_command', codexArgs);
-    const backToCodex = translateRexArgsToCodex('Bash', rexArgs);
+    const rexArgs = translateCodexArgsToNova('shell_command', codexArgs);
+    const backToCodex = translateNovaArgsToCodex('Bash', rexArgs);
     expect(backToCodex.command).toBe(codexArgs.command);
     expect(backToCodex.timeout_ms).toBe(codexArgs.timeout_ms);
   });
 
   it('read_file args survive the round-trip', () => {
     const codexArgs = { file_path: '/a.ts', offset: 10, limit: 20 };
-    const rexArgs = translateCodexArgsToRex('read_file', codexArgs);
-    const backToCodex = translateRexArgsToCodex('Read', rexArgs);
+    const rexArgs = translateCodexArgsToNova('read_file', codexArgs);
+    const backToCodex = translateNovaArgsToCodex('Read', rexArgs);
     expect(backToCodex.file_path).toBe(codexArgs.file_path);
     expect(backToCodex.offset).toBe(codexArgs.offset);
     expect(backToCodex.limit).toBe(codexArgs.limit);
@@ -602,8 +602,8 @@ describe('argument round-trip: Codex → Rex → Codex', () => {
 
   it('grep_files args survive the round-trip', () => {
     const codexArgs = { pattern: 'TODO', include: '*.ts', path: '/src', limit: 50 };
-    const rexArgs = translateCodexArgsToRex('grep_files', codexArgs);
-    const backToCodex = translateRexArgsToCodex('Grep', rexArgs);
+    const rexArgs = translateCodexArgsToNova('grep_files', codexArgs);
+    const backToCodex = translateNovaArgsToCodex('Grep', rexArgs);
     expect(backToCodex.pattern).toBe(codexArgs.pattern);
     expect(backToCodex.include).toBe(codexArgs.include);
     expect(backToCodex.path).toBe(codexArgs.path);
@@ -612,8 +612,8 @@ describe('argument round-trip: Codex → Rex → Codex', () => {
 
   it('read_file with no range survives the round-trip', () => {
     const codexArgs = { file_path: '/b.ts' };
-    const rexArgs = translateCodexArgsToRex('read_file', codexArgs);
-    const backToCodex = translateRexArgsToCodex('Read', rexArgs);
+    const rexArgs = translateCodexArgsToNova('read_file', codexArgs);
+    const backToCodex = translateNovaArgsToCodex('Read', rexArgs);
     expect(backToCodex.file_path).toBe('/b.ts');
     expect(backToCodex.offset).toBeUndefined();
     expect(backToCodex.limit).toBeUndefined();
@@ -633,24 +633,24 @@ describe('vocabForProvider', () => {
     expect(vocabForProvider('codex')).toBe(CODEX_VOCAB);
   });
 
-  it('should return REX_VOCAB for anthropic provider', () => {
-    expect(vocabForProvider('anthropic')).toBe(REX_VOCAB);
+  it('should return NOVA_VOCAB for anthropic provider', () => {
+    expect(vocabForProvider('anthropic')).toBe(NOVA_VOCAB);
   });
 
-  it('should return REX_VOCAB for any unknown provider', () => {
-    expect(vocabForProvider('google')).toBe(REX_VOCAB);
-    expect(vocabForProvider('')).toBe(REX_VOCAB);
+  it('should return NOVA_VOCAB for any unknown provider', () => {
+    expect(vocabForProvider('google')).toBe(NOVA_VOCAB);
+    expect(vocabForProvider('')).toBe(NOVA_VOCAB);
   });
 });
 
 describe('vocabulary constants', () => {
-  it('REX_VOCAB uses Rex tool names', () => {
-    expect(REX_VOCAB.read).toBe('Read');
-    expect(REX_VOCAB.glob).toBe('Glob');
-    expect(REX_VOCAB.grep).toBe('Grep');
-    expect(REX_VOCAB.bash).toBe('Bash');
-    expect(REX_VOCAB.edit).toBe('Edit');
-    expect(REX_VOCAB.write).toBe('Write');
+  it('NOVA_VOCAB uses Nova tool names', () => {
+    expect(NOVA_VOCAB.read).toBe('Read');
+    expect(NOVA_VOCAB.glob).toBe('Glob');
+    expect(NOVA_VOCAB.grep).toBe('Grep');
+    expect(NOVA_VOCAB.bash).toBe('Bash');
+    expect(NOVA_VOCAB.edit).toBe('Edit');
+    expect(NOVA_VOCAB.write).toBe('Write');
   });
 
   it('CODEX_VOCAB uses Codex tool names for skinned tools', () => {
@@ -665,16 +665,16 @@ describe('vocabulary constants', () => {
     expect(CODEX_VOCAB.write).toBe('apply_patch');
   });
 
-  it('CODEX_VOCAB inherits unskinned tool names from Rex', () => {
+  it('CODEX_VOCAB inherits unskinned tool names from Nova', () => {
     expect(CODEX_VOCAB.explorer).toBe('Explorer');
     expect(CODEX_VOCAB.promptUser).toBe('PromptUser');
   });
 
-  it('CODEX_VOCAB.bash/read/grep/glob match REX_TO_CODEX', () => {
-    expect(CODEX_VOCAB.bash).toBe(REX_TO_CODEX['Bash']);
-    expect(CODEX_VOCAB.read).toBe(REX_TO_CODEX['Read']);
-    expect(CODEX_VOCAB.grep).toBe(REX_TO_CODEX['Grep']);
-    expect(CODEX_VOCAB.glob).toBe(REX_TO_CODEX['Glob']);
+  it('CODEX_VOCAB.bash/read/grep/glob match NOVA_TO_CODEX', () => {
+    expect(CODEX_VOCAB.bash).toBe(NOVA_TO_CODEX['Bash']);
+    expect(CODEX_VOCAB.read).toBe(NOVA_TO_CODEX['Read']);
+    expect(CODEX_VOCAB.grep).toBe(NOVA_TO_CODEX['Grep']);
+    expect(CODEX_VOCAB.glob).toBe(NOVA_TO_CODEX['Glob']);
   });
 });
 
@@ -822,7 +822,7 @@ describe('OpenAIProvider tool skin integration', () => {
   });
 
   describe('normalizeInput', () => {
-    it('should translate Rex names → Codex names in function_call items', () => {
+    it('should translate Nova names → Codex names in function_call items', () => {
       const messages = [
         {
           type: 'function_call',
@@ -898,7 +898,7 @@ describe('OpenAIProvider tool skin integration', () => {
   });
 
   describe('round-trip consistency (INV1)', () => {
-    it('model emits Codex name → parseToolCalls → Rex name → normalizeInput → Codex name', () => {
+    it('model emits Codex name → parseToolCalls → Nova name → normalizeInput → Codex name', () => {
       // Step 1: Model emits shell_command
       const response = {
         output: [
@@ -915,7 +915,7 @@ describe('OpenAIProvider tool skin integration', () => {
       const calls = (provider as any).parseToolCalls(response);
       expect(calls[0].name).toBe('Bash');
 
-      // Step 3: Context stores as function_call with Rex name
+      // Step 3: Context stores as function_call with Nova name
       const contextItem = {
         type: 'function_call',
         call_id: calls[0].id,

@@ -26,7 +26,7 @@ const { values } = parseArgs({
 
 if (values.help) {
   console.log(`
-Rex Release Build Script
+Nova Release Build Script
 
 Usage:
   bun run scripts/build-release.ts [options]
@@ -68,7 +68,7 @@ const ENTRY = './packages/apps/launcher/standalone.ts';
 const OUT_DIR = './dist/binaries';
 
 async function main() {
-  console.log(`Building Rex v${VERSION}`);
+  console.log(`Building Nova v${VERSION}`);
   console.log('='.repeat(40));
 
   // Create output directory
@@ -91,7 +91,7 @@ async function main() {
   const failed: string[] = [];
 
   for (const target of targets) {
-    const outName = `rex-${target.name}${target.ext}`;
+    const outName = `nova-${target.name}${target.ext}`;
     const outPath = path.join(OUT_DIR, outName);
 
     console.log(`\nBuilding ${outName}...`);
@@ -102,7 +102,7 @@ async function main() {
         --target=${target.bunTarget} \
         --minify \
         --sourcemap=external \
-        --define "process.env.REX_VERSION='\"${VERSION}\"'" \
+        --define "process.env.NOVA_VERSION='\"${VERSION}\"'" \
         ${ENTRY} \
         --outfile ${outPath}`.quiet();
 

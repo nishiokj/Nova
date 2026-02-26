@@ -2,7 +2,7 @@
  * Coding Agent Session Schemas
  *
  * Zod schemas for validating coding agent session JSONL files.
- * Supports Claude Code and Rex session formats.
+ * Supports Claude Code and Nova session formats.
  *
  * @module connectors/coding-sessions/schemas
  */
@@ -176,7 +176,7 @@ export type ClaudeSessionMessage = z.infer<typeof ClaudeSessionMessageSchema>
 // REX SCHEMAS
 // ============================================================================
 
-const RexBaseMessageSchema = z.object({
+const NovaBaseMessageSchema = z.object({
   id: z.string(),
   session_id: z.string(),
   timestamp: z.string().refine(
@@ -186,12 +186,12 @@ const RexBaseMessageSchema = z.object({
   parent_id: z.string().nullable().optional(),
 })
 
-export const RexUserMessageSchema = RexBaseMessageSchema.extend({
+export const NovaUserMessageSchema = NovaBaseMessageSchema.extend({
   type: z.literal('user'),
   content: MessageContentSchema,
 })
 
-export const RexAssistantMessageSchema = RexBaseMessageSchema.extend({
+export const NovaAssistantMessageSchema = NovaBaseMessageSchema.extend({
   type: z.literal('assistant'),
   content: MessageContentSchema,
   model: z.string().optional(),
@@ -201,7 +201,7 @@ export const RexAssistantMessageSchema = RexBaseMessageSchema.extend({
   }).optional(),
 })
 
-export const RexSummaryMessageSchema = z.object({
+export const NovaSummaryMessageSchema = z.object({
   type: z.literal('summary'),
   session_id: z.string(),
   summary: z.string(),
@@ -211,13 +211,13 @@ export const RexSummaryMessageSchema = z.object({
   ),
 })
 
-export const RexSessionMessageSchema = z.discriminatedUnion('type', [
-  RexUserMessageSchema,
-  RexAssistantMessageSchema,
-  RexSummaryMessageSchema,
+export const NovaSessionMessageSchema = z.discriminatedUnion('type', [
+  NovaUserMessageSchema,
+  NovaAssistantMessageSchema,
+  NovaSummaryMessageSchema,
 ])
 
-export type RexUserMessage = z.infer<typeof RexUserMessageSchema>
-export type RexAssistantMessage = z.infer<typeof RexAssistantMessageSchema>
-export type RexSummaryMessage = z.infer<typeof RexSummaryMessageSchema>
-export type RexSessionMessage = z.infer<typeof RexSessionMessageSchema>
+export type NovaUserMessage = z.infer<typeof NovaUserMessageSchema>
+export type NovaAssistantMessage = z.infer<typeof NovaAssistantMessageSchema>
+export type NovaSummaryMessage = z.infer<typeof NovaSummaryMessageSchema>
+export type NovaSessionMessage = z.infer<typeof NovaSessionMessageSchema>

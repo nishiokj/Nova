@@ -18,7 +18,7 @@ import type { ConnectorType } from '../ids.js'
 import { createGmailConnector } from './gmail/index.js'
 import { createGitHubConnector } from './github/index.js'
 import { createClaudeSessionConnector } from './coding-sessions/claude.js'
-import { createRexSessionConnector } from './coding-sessions/rex.js'
+import { createNovaSessionConnector } from './coding-sessions/nova.js'
 import { createIMessageConnector } from './imessage/index.js'
 import { createGoogleCalendarConnector } from './google-calendar/index.js'
 import { createObsidianConnector } from './obsidian/index.js'
@@ -71,9 +71,9 @@ export const CONNECTOR_FACTORIES: Record<ConnectorType, ConnectorFactoryEntry> =
     factory: createClaudeSessionConnector,
     displayName: 'Claude Code Sessions',
   },
-  rex_sessions: {
-    factory: createRexSessionConnector,
-    displayName: 'Rex Sessions (GraphD)',
+  nova_sessions: {
+    factory: createNovaSessionConnector,
+    displayName: 'Nova Sessions (GraphD)',
   },
   imessage: {
     factory: createIMessageConnector,

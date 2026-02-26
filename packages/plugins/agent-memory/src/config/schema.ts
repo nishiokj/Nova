@@ -261,8 +261,8 @@ export const ConnectorConfigSchema = z.object({
     includeFileHistory: false,
   }),
 
-  /** Rex Sessions connector settings */
-  rex_sessions: z.object({
+  /** Nova Sessions connector settings */
+  nova_sessions: z.object({
     /** Enable this connector */
     enabled: z.boolean().default(false),
     /** Path to GraphD SQLite database (default: ~/.graphd/graphd.db) */

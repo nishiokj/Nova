@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OUT_PATH="${1:-${AGENTLAB_AGENT_ARTIFACT:-$ROOT_DIR/.lab/agents/rex-current.tar.gz}}"
+OUT_PATH="${1:-${AGENTLAB_AGENT_ARTIFACT:-$ROOT_DIR/.lab/agents/nova-current.tar.gz}}"
 BUILD_BEFORE_FREEZE="${AGENTLAB_FREEZE_BUILD:-1}"
 
 usage() {
@@ -69,20 +69,20 @@ cp -R "$ROOT_DIR/packages" "$STAGE_DIR/packages"
 cp -R "$ROOT_DIR/config" "$STAGE_DIR/config"
 cp -R "$ROOT_DIR/scripts" "$STAGE_DIR/scripts"
 
-cat >"$STAGE_DIR/bin/rex" <<'ENTRY'
+cat >"$STAGE_DIR/bin/nova" <<'ENTRY'
 #!/usr/bin/env sh
 exec /opt/agent/bin/bun /opt/agent/packages/apps/launcher/dist/index.js "$@"
 ENTRY
-chmod +x "$STAGE_DIR/bin/rex"
+chmod +x "$STAGE_DIR/bin/nova"
 
 SOURCE_COMMIT="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 FROZEN_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat >"$STAGE_DIR/manifest.json" <<JSON
 {
   "schema_version": "agent_artifact_v1",
-  "id": "rex",
+  "id": "nova",
   "platform": "linux-x64",
-  "entrypoint": "bin/rex",
+  "entrypoint": "bin/nova",
   "frozen_at": "$FROZEN_AT",
   "source_commit": "$SOURCE_COMMIT"
 }

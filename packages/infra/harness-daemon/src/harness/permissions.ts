@@ -2,7 +2,7 @@
  * Permission Checker - Default-deny permission system for agent tool execution.
  *
  * Only Bash, Write, and Edit tools require permission checks.
- * Loads rules from ~/.config/rex/settings.json, .config/settings.json, .config/settings.local.json
+ * Loads rules from ~/.config/nova/settings.json, .config/settings.json, .config/settings.local.json
  */
 
 import * as fs from 'fs';
@@ -477,7 +477,7 @@ export class PermissionChecker {
 
     // Config files in priority order (lowest to highest)
     const configPaths = [
-      path.join(os.homedir(), '.config', 'rex', 'settings.json'),  // Global
+      path.join(os.homedir(), '.config', 'nova', 'settings.json'),  // Global
       path.join(workingDir, '.config', 'settings.json'),        // Project
       path.join(workingDir, '.config', 'settings.local.json'),  // Local override
     ];

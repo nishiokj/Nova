@@ -84,7 +84,7 @@ export class LocalProviderManager {
   constructor(graphdDbPath: string, logger: HarnessLogger = stderrLogger) {
     this.store = new GraphStore(graphdDbPath);
     this.store.initialize();
-    this.masterKeyPath = join(homedir(), '.config', 'rex', 'master.key');
+    this.masterKeyPath = join(homedir(), '.config', 'nova', 'master.key');
     this.logger = logger;
 
     // Ensure local user exists

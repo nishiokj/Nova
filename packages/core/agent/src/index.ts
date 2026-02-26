@@ -35,13 +35,12 @@ export {
   buildRuntimeScriptPrompt,
   buildStandardPrompt,
   buildCodingAgentPrompt,
-  buildPlannerPrompt,
   buildAsyncAgentPrompt,
   buildPlanningPromptAddendum,
   getAgentPrompt,
   buildAgentConfig,
   buildEnvironmentPrompt,
-  REX_VOCAB,
+  NOVA_VOCAB,
   vocabForProvider,
 } from './prompts.js';
 export type { EnvironmentContext, ToolVocabulary } from './prompts.js';

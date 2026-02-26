@@ -161,8 +161,8 @@ function resolveBenchmarkAdapterCommand(profile) {
 function buildCredentialStaging(homeDir) {
   const candidates = [
     {
-      source_from_host: resolve(homeDir, '.config/rex/master.key'),
-      destination_path: '/agentlab/deps/home/.config/rex/master.key',
+      source_from_host: resolve(homeDir, '.config/nova/master.key'),
+      destination_path: '/agentlab/deps/home/.config/nova/master.key',
       required: true,
     },
     {
@@ -171,8 +171,8 @@ function buildCredentialStaging(homeDir) {
       required: false,
     },
     {
-      source_from_host: resolve(homeDir, '.config/rex/codex-auth.json'),
-      destination_path: '/agentlab/deps/home/.config/rex/codex-auth.json',
+      source_from_host: resolve(homeDir, '.config/nova/codex-auth.json'),
+      destination_path: '/agentlab/deps/home/.config/nova/codex-auth.json',
       required: false,
     },
   ];
@@ -221,7 +221,7 @@ async function main() {
       image: { type: 'string' },
       'agent-artifact': { type: 'string' },
       workspace: { type: 'string' },
-      'agent-cmd': { type: 'string', default: '/opt/agent/bin/rex' },
+      'agent-cmd': { type: 'string', default: '/opt/agent/bin/nova' },
       limit: { type: 'string' },
       'timeout-ms': { type: 'string' },
       replications: { type: 'string', default: '1' },
@@ -239,8 +239,8 @@ async function main() {
   const outputInput = values.output ?? profile.defaultOutput;
   const fallbackImage = values.image ?? 'agentlab/per-task-placeholder:latest';
   const workspace = asNonEmptyString(values.workspace) ?? profile.defaultWorkspace ?? '/testbed';
-  const agentCmd = asNonEmptyString(values['agent-cmd']) ?? '/opt/agent/bin/rex';
-  const agentArtifactInput = values['agent-artifact'] ?? profile.defaultAgentArtifact ?? '.lab/agents/rex-current.tar.gz';
+  const agentCmd = asNonEmptyString(values['agent-cmd']) ?? '/opt/agent/bin/nova';
+  const agentArtifactInput = values['agent-artifact'] ?? profile.defaultAgentArtifact ?? '.lab/agents/nova-current.tar.gz';
 
   const datasetAbs = resolvePath(datasetInput);
   if (!existsSync(datasetAbs)) {

@@ -1,5 +1,5 @@
 {
-  "name": "rex",
+  "name": "nova",
   "version": "0.1.0",
   "description": "Config-driven, multi-tier agent system with composable agent primitives",
   "type": "module",
@@ -53,8 +53,8 @@
     }
   },
   "bin": {
-    "rex": "./packages/apps/launcher/dist/index.js",
-    "rex-daemon": "./packages/infra/harness-daemon/dist/index.js"
+    "nova": "./packages/apps/launcher/dist/index.js",
+    "nova-daemon": "./packages/infra/harness-daemon/dist/index.js"
   },
   "scripts": {
     "prepublishOnly": "bun run build",
@@ -108,7 +108,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/rex.git"
+    "url": "https://github.com/your-org/nova.git"
   },
   "license": "MIT"
 }

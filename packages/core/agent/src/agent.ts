@@ -1014,14 +1014,6 @@ export class Agent {
         return;
       }
 
-      // Routing agents return non-action structured output; treat as complete
-      if (this.resolveOutputSchemaId() === 'routing' && structuredOutput) {
-        result.success = true;
-        result.terminationReason = 'goal_state_reached';
-        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-        return;
-      }
-
       // 4. Process tools (if any)
       if (toolCalls.length > 0) {
         const preToolDirective = this.resolveControlDirective(signal, runControl);
@@ -2402,7 +2394,7 @@ export class Agent {
       return this.parseExplorerOutputLenient(parsed, content);
     }
 
-    if (schemaId !== 'agent_action' && schemaId !== 'goal_driven' && schemaId !== 'planner_output') {
+    if (schemaId !== 'agent_action' && schemaId !== 'goal_driven') {
       return null;
     }
 

@@ -22,11 +22,11 @@ import {
 } from '../rate-limits.js';
 import { parseApiErrorResponse, formatApiError } from '../response_schemas.js';
 import {
-  CODEX_TO_REX,
-  REX_TO_CODEX,
+  CODEX_TO_NOVA,
+  NOVA_TO_CODEX,
   formatToolForOpenAI,
-  translateCodexArgsToRex,
-  translateRexArgsToCodex,
+  translateCodexArgsToNova,
+  translateNovaArgsToCodex,
 } from './tool_skins.js';
 
 function parseApiError(provider: string, status: number, responseText: string): Error {
@@ -660,9 +660,9 @@ export class OpenAIProvider implements LLMProviderAdapter {
         if (!isValidToolName(item.name)) {
           continue;
         }
-        // Translate Rex names → Codex names so the model sees its native tool names
-        const rexName = item.name as string;
-        const codexName = REX_TO_CODEX[rexName] ?? rexName;
+        // Translate Nova names → Codex names so the model sees its native tool names
+        const novaName = item.name as string;
+        const codexName = NOVA_TO_CODEX[novaName] ?? novaName;
 
         // apply_patch: unwrap { input: text } to raw text for freeform round-trip
         let args = item.arguments;
@@ -682,10 +682,10 @@ export class OpenAIProvider implements LLMProviderAdapter {
           }
         }
 
-        // Translate Rex args → Codex args so the model sees its native param names
+        // Translate Nova args → Codex args so the model sees its native param names
         // in conversation history (e.g. path → file_path for read_file)
-        if (REX_TO_CODEX[rexName] && typeof args === 'object' && args !== null) {
-          args = translateRexArgsToCodex(rexName, args as Record<string, unknown>);
+        if (NOVA_TO_CODEX[novaName] && typeof args === 'object' && args !== null) {
+          args = translateNovaArgsToCodex(novaName, args as Record<string, unknown>);
         }
 
         input.push({
@@ -835,8 +835,8 @@ export class OpenAIProvider implements LLMProviderAdapter {
         };
       }
 
-      // Translate Codex name → Rex name
-      const rexName = CODEX_TO_REX[codexName] ?? codexName;
+      // Translate Codex name → Nova name
+      const novaName = CODEX_TO_NOVA[codexName] ?? codexName;
 
       // Parse JSON args
       let args: Record<string, unknown> = {};
@@ -853,12 +853,12 @@ export class OpenAIProvider implements LLMProviderAdapter {
         args = argsRaw as Record<string, unknown>;
       }
 
-      // Translate Codex args → Rex args for 1:1 skinned tools
-      if (CODEX_TO_REX[codexName]) {
-        args = translateCodexArgsToRex(codexName, args);
+      // Translate Codex args → Nova args for 1:1 skinned tools
+      if (CODEX_TO_NOVA[codexName]) {
+        args = translateCodexArgsToNova(codexName, args);
       }
 
-      return { id: callId, name: rexName, arguments: args };
+      return { id: callId, name: novaName, arguments: args };
     };
 
     for (const item of output) {
