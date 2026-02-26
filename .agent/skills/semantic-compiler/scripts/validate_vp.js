@@ -258,7 +258,7 @@ function validate(filePath) {
 function main() {
   const filePath = process.argv[2];
   if (!filePath) {
-    fail('Usage: node config/skills/semantic-compiler/scripts/validate_vp.js <vp.json>');
+    fail('Usage: node .agent/skills/semantic-compiler/scripts/validate_vp.js <vp.json>');
   }
 
   let errors;

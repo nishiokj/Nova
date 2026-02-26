@@ -176,7 +176,7 @@ export class BridgeGateway {
     const config = harness.getConfig();
     this.skillsDir = config.skills.directory
       ? path.resolve(this.workingDir, config.skills.directory)
-      : path.resolve(this.workingDir, 'config/skills');
+      : path.resolve(this.workingDir, '.agent/skills');
     this.hooksDir = config.hooks.directory
       ? path.resolve(this.workingDir, config.hooks.directory)
       : path.resolve(this.workingDir, 'config/hooks');

@@ -30,7 +30,7 @@ Get your API key at: https://replicate.com/account/api-tokens
 **Pre-flight check**: When the user invokes `/design-fork`, run the image-gen script with `--count 0` to verify the key is configured:
 
 ```bash
-cd config/skills/design-fork && bun run scripts/image-gen.ts --prompt "test" --count 0
+cd .agent/skills/design-fork && bun run scripts/image-gen.ts --prompt "test" --count 0
 ```
 
 If it outputs `"error": "Replicate API key not configured..."`, tell the user:
@@ -55,7 +55,7 @@ When the user invokes `/design-fork` with a description, ask:
 Run the image generation script:
 
 ```bash
-cd config/skills/design-fork && bun run scripts/image-gen.ts \
+cd .agent/skills/design-fork && bun run scripts/image-gen.ts \
   --prompt "YOUR_DESCRIPTION_HERE" \
   --count 5 \
   --output /tmp/design-fork
@@ -79,7 +79,7 @@ The script outputs JSON with the generated image paths:
 Open the browser gallery for selection:
 
 ```bash
-cd config/skills/design-fork && bun run scripts/gallery.ts \
+cd .agent/skills/design-fork && bun run scripts/gallery.ts \
   --dir /tmp/design-fork \
   --max 3
 ```
@@ -112,7 +112,7 @@ For the selected design(s), use your vision capabilities to analyze the image an
 Generate the project using the scaffold script:
 
 ```bash
-cd config/skills/design-fork && bun run scripts/scaffold.ts \
+cd .agent/skills/design-fork && bun run scripts/scaffold.ts \
   --name "My Dashboard" \
   --aesthetic dark-glass \
   --palette zinc \
@@ -123,7 +123,7 @@ cd config/skills/design-fork && bun run scripts/scaffold.ts \
 Or if you've created a design-spec.json from your vision analysis:
 
 ```bash
-cd config/skills/design-fork && bun run scripts/scaffold.ts \
+cd .agent/skills/design-fork && bun run scripts/scaffold.ts \
   --spec /tmp/design-fork/design-spec.json \
   --output packages/my-dashboard
 ```

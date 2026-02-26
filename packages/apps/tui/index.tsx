@@ -335,7 +335,7 @@ interface AppOptions {
 }
 
 // Skills and hooks are read-only in the TUI.
-// To create/edit skills, use the agent with Write/Edit to create SKILL.md files in config/skills/
+// To create/edit skills, use the agent with Write/Edit to create SKILL.md files in .agent/skills/
 
 function useTerminalSize() {
   const { stdout } = useStdout();

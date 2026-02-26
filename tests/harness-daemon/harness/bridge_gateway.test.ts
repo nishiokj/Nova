@@ -60,7 +60,7 @@ class FakeHarness {
       tools: { workingDir: process.cwd(), bashTimeoutMs: 1, maxOutputLength: 1 },
       graphd: { enabled: false, host: '127.0.0.1', port: 0, dbPath: '' },
       context: { maxTokens: 1 },
-      skills: { enabled: false, directory: 'config/skills', definitions: [] },
+      skills: { enabled: false, directory: '.agent/skills', definitions: [] },
       hooks: { enabled: false, directory: 'config/hooks', definitions: [] },
     };
   }

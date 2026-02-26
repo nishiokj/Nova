@@ -361,7 +361,7 @@ export const DEFAULT_CONTEXT_CONFIG: ContextConfigSection = {
 
 export const DEFAULT_SKILLS_CONFIG: SkillsConfigSection = {
   enabled: true,
-  directory: 'config/skills',
+  directory: '.agent/skills',
   definitions: [],
 };
 

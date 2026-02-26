@@ -60,9 +60,9 @@ temp/
 htmlcovrepo-test/
 
 # Skills (installed per-editor, not shared)
-config/skills/**/agent-browser/
-config/skills/.*/
-config/skills/skills/
+.agent/skills/**/agent-browser/
+.agent/skills/.*/
+.agent/skills/skills/
 
 # Release binaries
 dist/binaries/

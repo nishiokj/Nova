@@ -106,7 +106,7 @@
 
   "skills": {
     "enabled": true,
-    "directory": "config/skills"
+    "directory": ".agent/skills"
   },
 
   "hooks": {
