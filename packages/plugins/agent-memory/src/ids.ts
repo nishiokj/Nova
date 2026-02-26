@@ -27,7 +27,7 @@ export const ConnectorTypeSchema = z.enum([
   'xcom',
   'imessage',
   'claude_sessions',
-  'rex_sessions',
+  'nova_sessions',
   'google-calendar',
   'obsidian',
   'watcher_sessions',

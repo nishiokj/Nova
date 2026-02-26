@@ -5,7 +5,7 @@
  * prompts stay coupled to the tool skin definitions and can't drift.
  */
 import type { ToolVocabulary } from 'llm';
-import { REX_VOCAB, vocabForProvider } from 'llm';
+import { NOVA_VOCAB, vocabForProvider } from 'llm';
 
 // ============================================
 // SHARED BLOCKS
@@ -645,9 +645,7 @@ const AGENT_PROMPT_BUILDERS: Record<string, (t: ToolVocabulary) => string> = {
   runtime_script: buildRuntimeScriptPrompt,
   standard: buildStandardPrompt,
   coding: buildCodingAgentPrompt,
-  debugger: buildStandardPrompt,
   context_compactor: buildStandardPrompt,
-  planner: buildPlannerPrompt,
 };
 
 /**
@@ -711,7 +709,7 @@ export function buildEnvironmentPrompt(env: EnvironmentContext): string {
 /**
  * Build a full AgentConfig from agent type.
  * Uses prompts from this module; tools/budgets/llmParams are supplied by config.
- * The systemPrompt is pre-built with REX_VOCAB; the agent rebuilds at runtime
+ * The systemPrompt is pre-built with NOVA_VOCAB; the agent rebuilds at runtime
  * with the correct provider vocabulary.
  */
 export function buildAgentConfig(
@@ -730,7 +728,7 @@ export function buildAgentConfig(
   llmParams: { maxTokens: number; temperature: number };
   outputSchema?: import('types').StructuredOutputSchema;
 } {
-  const basePrompt = getAgentPrompt(agentType, REX_VOCAB);
+  const basePrompt = getAgentPrompt(agentType, NOVA_VOCAB);
   const envPrompt = envContext ? buildEnvironmentPrompt(envContext) : undefined;
   const systemPrompt = envPrompt
     ? `${basePrompt}\n\n${envPrompt}`
@@ -748,5 +746,5 @@ export function buildAgentConfig(
 }
 
 // Re-export for downstream use
-export { REX_VOCAB, vocabForProvider };
+export { NOVA_VOCAB, vocabForProvider };
 export type { ToolVocabulary };

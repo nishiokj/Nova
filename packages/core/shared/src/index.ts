@@ -18,7 +18,6 @@ export {
   unwrapStructuredOutput,
   OUTPUT_SCHEMAS,
   type OutputSchemaName,
-  type RoutingOutput,
   type AgentAction,
   type AgentActionOutput,
   type GoalDrivenOutput,
@@ -26,7 +25,6 @@ export {
   type ExplorerOutput,
   type WorkItemOutput,
   type RuntimeScriptOutput,
-  type PlannerOutput,
 } from './structured_output.js';
 export {
   buildLLMRequestConfig,

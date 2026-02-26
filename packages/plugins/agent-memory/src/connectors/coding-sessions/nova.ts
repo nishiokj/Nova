@@ -1,10 +1,10 @@
 /**
- * Rex Session Connector (GraphD SQLite)
+ * Nova Session Connector (GraphD SQLite)
  *
- * Connector for ingesting Rex coding agent session data directly from
+ * Connector for ingesting Nova coding agent session data directly from
  * the GraphD SQLite database, with optional webhook-style event triggers.
  *
- * @module connectors/coding-sessions/rex
+ * @module connectors/coding-sessions/nova
  */
 
 import { Database } from 'bun:sqlite'
@@ -30,13 +30,13 @@ import type {
   FetchPageResult,
   SourceItem,
 } from '../../sync/types.js'
-import { RexSessionMessageSchema, type RexSessionMessage } from './schemas.js'
+import { NovaSessionMessageSchema, type NovaSessionMessage } from './schemas.js'
 import type { TransformationRegistry } from '../../transform/registry.js'
-import { rexTransforms } from './transforms.js'
+import { novaTransforms } from './transforms.js'
 
 // ============ Configuration ============
 
-export interface RexSessionConnectorConfig {
+export interface NovaSessionConnectorConfig {
   /** Path to GraphD SQLite database (default: ~/.graphd/graphd.db) */
   databasePath?: string
   /** Only sync sessions whose working_dir matches these substrings */
@@ -76,7 +76,7 @@ const GraphDMessageRowSchema = z.object({
 })
 
 type GraphDMessageRow = z.infer<typeof GraphDMessageRowSchema>
-type RexConversationMessage = Extract<RexSessionMessage, { type: 'user' | 'assistant' }>
+type NovaConversationMessage = Extract<NovaSessionMessage, { type: 'user' | 'assistant' }>
 
 // ============ Cursor Types ============
 
@@ -89,11 +89,11 @@ interface IncrementalCursor {
   lastTimestamp: number
 }
 
-// ============ Rex Session Connector ============
+// ============ Nova Session Connector ============
 
-export class RexSessionConnector implements Connector {
-  readonly type: ConnectorType = 'rex_sessions'
-  readonly displayName = 'Rex Sessions (GraphD)'
+export class NovaSessionConnector implements Connector {
+  readonly type: ConnectorType = 'nova_sessions'
+  readonly displayName = 'Nova Sessions (GraphD)'
 
   readonly capabilities: ConnectorCapabilities = {
     supportsBackfill: true,
@@ -117,7 +117,7 @@ export class RexSessionConnector implements Connector {
   private webhookLastRowId: number | null = null
   private webhookSubscriptions = new Map<string, () => void>()
 
-  constructor(config: RexSessionConnectorConfig = {}) {
+  constructor(config: NovaSessionConnectorConfig = {}) {
     this.databasePath = config.databasePath ?? DEFAULT_DB_PATH
     this.projectFilter = config.projectFilter
     this.sessionFilter = config.sessionFilter
@@ -139,8 +139,8 @@ export class RexSessionConnector implements Connector {
 
     if (!existsSync(this.databasePath)) {
       throw new Error(
-        `Rex GraphD database not found at ${this.databasePath}. ` +
-        'Set rex_sessions.databasePath to the GraphD SQLite file.'
+        `Nova GraphD database not found at ${this.databasePath}. ` +
+        'Set nova_sessions.databasePath to the GraphD SQLite file.'
       )
     }
 
@@ -188,7 +188,7 @@ export class RexSessionConnector implements Connector {
     const timestamp = new Date(row.created_at * 1000).toISOString()
     const project = row.working_dir ? basename(row.working_dir) : undefined
 
-    const message: RexConversationMessage = {
+    const message: NovaConversationMessage = {
       type: role,
       id: String(row.id),
       session_id: row.session_key,
@@ -207,7 +207,7 @@ export class RexSessionConnector implements Connector {
           project,
           working_dir: row.working_dir ?? undefined,
           client_type: row.client_type ?? undefined,
-          agent: 'rex',
+          agent: 'nova',
         },
       },
       source_timestamp: message.timestamp,
@@ -271,7 +271,7 @@ export class RexSessionConnector implements Connector {
 
     return [{
       externalId: 'local',
-      displayName: `Rex Sessions (GraphD) (${username})`,
+      displayName: `Nova Sessions (GraphD) (${username})`,
       username,
       isPrimary: true,
       metadata: {
@@ -307,7 +307,7 @@ export class RexSessionConnector implements Connector {
           count,
           description: `${count} session messages`,
         }],
-        summary: `Rex sessions in GraphD (${count} messages)`,
+        summary: `Nova sessions in GraphD (${count} messages)`,
       }
     } catch {
       return {
@@ -457,7 +457,7 @@ export class RexSessionConnector implements Connector {
     callbackUrl: string,
     _options?: WebhookSubscribeOptions
   ): Promise<WebhookSubscription> {
-    const subscriptionId = `rexdb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const subscriptionId = `novadb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
     if (!existsSync(this.databasePath)) {
       throw new Error(`GraphD database not found at ${this.databasePath}`)
     }
@@ -539,16 +539,16 @@ export class RexSessionConnector implements Connector {
 
   getSourceSchema(entityType: string): z.ZodSchema | undefined {
     if (entityType === 'session_message') {
-      return RexSessionMessageSchema
+      return NovaSessionMessageSchema
     }
     return undefined
   }
 
   /**
-   * Register Rex session transformations with a registry.
+   * Register Nova session transformations with a registry.
    */
   registerTransforms(registry: TransformationRegistry): void {
-    for (const transform of rexTransforms) {
+    for (const transform of novaTransforms) {
       registry.register(transform as any)
     }
   }
@@ -556,8 +556,8 @@ export class RexSessionConnector implements Connector {
 
 // ============ Factory ============
 
-export function createRexSessionConnector(
-  config: RexSessionConnectorConfig
-): RexSessionConnector {
-  return new RexSessionConnector(config)
+export function createNovaSessionConnector(
+  config: NovaSessionConnectorConfig
+): NovaSessionConnector {
+  return new NovaSessionConnector(config)
 }

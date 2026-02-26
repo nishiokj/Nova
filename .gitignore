@@ -67,9 +67,9 @@ config/skills/skills/
 # Release binaries
 dist/binaries/
 *.exe
-rex-linux-*
-rex-darwin-*
-rex-windows-*
+nova-linux-*
+nova-darwin-*
+nova-windows-*
 latest-version.txt
 
 # Worktrees

@@ -86,7 +86,7 @@ const DEFAULT_PORT = 0;
 function failUsage(message: string): never {
   throw new Error(
     `${message}\n` +
-      'Usage: rex run (--input <prompt> | --input-file <path> | <input_path>) [<output_path>] [options]\n' +
+      'Usage: nova run (--input <prompt> | --input-file <path> | <input_path>) [<output_path>] [options]\n' +
       'Options:\n' +
       '  --output <path>\n' +
       '  --events <path>\n' +
@@ -104,7 +104,7 @@ function failUsage(message: string): never {
       '  --bindings-file <path> (legacy)\n' +
       '  --provider-env <provider=ENV_NAME> (repeatable)\n\n' +
       'AgentLab container example:\n' +
-      '  rex run \\\n' +
+      '  nova run \\\n' +
       '    --provider z.ai-coder \\\n' +
       '    --model glm-5 \\\n' +
       '    /in/task.json /out/result.json'

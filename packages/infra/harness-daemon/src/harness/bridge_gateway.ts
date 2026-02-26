@@ -1511,15 +1511,10 @@ export class BridgeGateway {
   }
 
   private ensureAsyncCompanionSelections(
-    sessionKey: string,
-    fallbackSelection: PersistedModelSelection
+    _sessionKey: string,
+    _fallbackSelection: PersistedModelSelection
   ): void {
-    for (const companionAgentType of ['planner'] as const) {
-      const existingSelection = this.harness.getSessionSelectedModel?.(sessionKey, companionAgentType);
-      if (!existingSelection?.model || !existingSelection?.provider) {
-        this.harness.setSessionSelectedModel?.(sessionKey, companionAgentType, fallbackSelection);
-      }
-    }
+    // No companion agents to configure
   }
 
   private handleSetModel(
@@ -2174,7 +2169,7 @@ export class BridgeGateway {
       const handle = this.harness.run({
         requestId,
         inputText: goal,
-        tier: 'planner',
+        tier: 'standard',
         sessionKey,
         workingDir,
       });

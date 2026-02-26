@@ -8,7 +8,7 @@
 
 set -e
 
-echo "=== Rex Distribution Test ==="
+echo "=== Nova Distribution Test ==="
 echo ""
 
 # Colors
@@ -18,9 +18,9 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Test directories
-TEST_DIR_1="/tmp/rex-test-project-a"
-TEST_DIR_2="/tmp/rex-test-project-b"
-DAEMON_DIR="/tmp/rex-daemon-location"
+TEST_DIR_1="/tmp/nova-test-project-a"
+TEST_DIR_2="/tmp/nova-test-project-b"
+DAEMON_DIR="/tmp/nova-daemon-location"
 
 # Cleanup and setup
 echo "Setting up test directories..."
@@ -40,14 +40,14 @@ echo ""
 
 # Kill any existing daemon
 echo "Stopping any existing daemon..."
-pkill -f "rex-daemon" 2>/dev/null || true
+pkill -f "nova-daemon" 2>/dev/null || true
 pkill -f "harness-daemon" 2>/dev/null || true
 sleep 1
 
 # Start daemon from DAEMON_DIR (not either project directory)
 echo "Starting daemon from $DAEMON_DIR..."
 cd "$DAEMON_DIR"
-rex-daemon &
+nova-daemon &
 DAEMON_PID=$!
 sleep 2
 
@@ -89,8 +89,8 @@ echo "The daemon is running from: $DAEMON_DIR"
 echo "But TUI sessions should execute tools relative to their own cwd."
 echo ""
 echo "To manually test:"
-echo "  1. Open terminal 1: cd $TEST_DIR_1 && rex"
-echo "  2. Open terminal 2: cd $TEST_DIR_2 && rex"
+echo "  1. Open terminal 1: cd $TEST_DIR_1 && nova"
+echo "  2. Open terminal 2: cd $TEST_DIR_2 && nova"
 echo "  3. In each TUI, run: Read marker.txt"
 echo "  4. Verify each returns the correct marker for its directory"
 echo ""

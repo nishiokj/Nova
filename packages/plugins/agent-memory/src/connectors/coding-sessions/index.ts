@@ -1,7 +1,7 @@
 /**
  * Coding Agent Session Connectors
  *
- * Connectors for ingesting session data from coding agents (Claude Code, Rex).
+ * Connectors for ingesting session data from coding agents (Claude Code, Nova).
  *
  * @module connectors/coding-sessions
  */
@@ -43,15 +43,15 @@ export {
   type ClaudeSummaryMessage,
   type ClaudeFileHistorySnapshot,
   type ClaudeSessionMessage,
-  // Rex schemas
-  RexUserMessageSchema,
-  RexAssistantMessageSchema,
-  RexSummaryMessageSchema,
-  RexSessionMessageSchema,
-  type RexUserMessage,
-  type RexAssistantMessage,
-  type RexSummaryMessage,
-  type RexSessionMessage,
+  // Nova schemas
+  NovaUserMessageSchema,
+  NovaAssistantMessageSchema,
+  NovaSummaryMessageSchema,
+  NovaSessionMessageSchema,
+  type NovaUserMessage,
+  type NovaAssistantMessage,
+  type NovaSummaryMessage,
+  type NovaSessionMessage,
 } from './schemas.js'
 
 // ============ Claude Connector ============
@@ -62,13 +62,13 @@ export {
   type ClaudeSessionConnectorConfig,
 } from './claude.js'
 
-// ============ Rex Connector ============
+// ============ Nova Connector ============
 
 export {
-  RexSessionConnector,
-  createRexSessionConnector,
-  type RexSessionConnectorConfig,
-} from './rex.js'
+  NovaSessionConnector,
+  createNovaSessionConnector,
+  type NovaSessionConnectorConfig,
+} from './nova.js'
 
 // ============ Transformations ============
 

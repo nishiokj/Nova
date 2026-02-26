@@ -1,7 +1,7 @@
 /**
  * Tool Skins — Per-provider tool name/schema translations.
  *
- * Maps Rex tool definitions (Bash, Read, Grep, Glob) to Codex-native
+ * Maps Nova tool definitions (Bash, Read, Grep, Glob) to Codex-native
  * definitions (shell_command, read_file, grep_files, list_dir) that
  * OpenAI models were trained on.
  */
@@ -12,24 +12,24 @@ import type { ToolDefinition } from 'types';
 // NAME MAPS
 // ============================================
 
-/** Codex tool name → Rex tool name */
-export const CODEX_TO_REX: Record<string, string> = {
+/** Codex tool name → Nova tool name */
+export const CODEX_TO_NOVA: Record<string, string> = {
   shell_command: 'Bash',
   read_file: 'Read',
   grep_files: 'Grep',
   list_dir: 'Glob',
 };
 
-/** Rex tool name → Codex tool name */
-export const REX_TO_CODEX: Record<string, string> = {
+/** Nova tool name → Codex tool name */
+export const NOVA_TO_CODEX: Record<string, string> = {
   Bash: 'shell_command',
   Read: 'read_file',
   Grep: 'grep_files',
   Glob: 'list_dir',
 };
 
-/** Rex tools to filter out when using OpenAI (replaced by apply_patch) */
-export const FILTERED_REX_TOOLS = new Set(['Edit', 'Write', 'BatchEdit']);
+/** Nova tools to filter out when using OpenAI (replaced by apply_patch) */
+export const FILTERED_NOVA_TOOLS = new Set(['Edit', 'Write', 'BatchEdit']);
 
 // ============================================
 // CODEX TOOL DEFINITIONS
@@ -178,9 +178,9 @@ export function supportsCustomTools(model: string): boolean {
 // ============================================
 
 /**
- * Translate Codex arguments to Rex arguments (inbound: model → executor).
+ * Translate Codex arguments to Nova arguments (inbound: model → executor).
  */
-export function translateCodexArgsToRex(
+export function translateCodexArgsToNova(
   codexName: string,
   args: Record<string, unknown>
 ): Record<string, unknown> {
@@ -205,7 +205,7 @@ export function translateCodexArgsToRex(
         result.startLine = offset;
         const limit = args.limit ?? args.endLine;
         if (limit !== undefined) {
-          // If model sent endLine (Rex-style), use directly; otherwise compute from offset+limit
+          // If model sent endLine (Nova-style), use directly; otherwise compute from offset+limit
           result.endLine = args.endLine ?? ((offset as number) + (limit as number) - 1);
         }
       }
@@ -238,15 +238,15 @@ export function translateCodexArgsToRex(
 }
 
 /**
- * Translate Rex arguments to Codex arguments (outbound: executor → model).
- * Reverse of translateCodexArgsToRex so the model sees its native arg names
+ * Translate Nova arguments to Codex arguments (outbound: executor → model).
+ * Reverse of translateCodexArgsToNova so the model sees its native arg names
  * in conversation history.
  */
-export function translateRexArgsToCodex(
-  rexName: string,
+export function translateNovaArgsToCodex(
+  novaName: string,
   args: Record<string, unknown>
 ): Record<string, unknown> {
-  switch (rexName) {
+  switch (novaName) {
     case 'Bash': {
       const result: Record<string, unknown> = {
         command: args.command,
@@ -314,8 +314,8 @@ export interface ToolVocabulary {
   promptUser: string;
 }
 
-/** Rex (internal) tool names — used for Anthropic and other non-OpenAI providers. */
-export const REX_VOCAB: ToolVocabulary = {
+/** Nova (internal) tool names — used for Anthropic and other non-OpenAI providers. */
+export const NOVA_VOCAB: ToolVocabulary = {
   read: 'Read',
   glob: 'Glob',
   grep: 'Grep',
@@ -326,12 +326,12 @@ export const REX_VOCAB: ToolVocabulary = {
   promptUser: 'PromptUser',
 };
 
-/** Codex tool names — derived from REX_TO_CODEX map. Used for OpenAI/Codex providers. */
+/** Codex tool names — derived from NOVA_TO_CODEX map. Used for OpenAI/Codex providers. */
 export const CODEX_VOCAB: ToolVocabulary = {
-  read: REX_TO_CODEX['Read'] ?? 'Read',
-  glob: REX_TO_CODEX['Glob'] ?? 'Glob',
-  grep: REX_TO_CODEX['Grep'] ?? 'Grep',
-  bash: REX_TO_CODEX['Bash'] ?? 'Bash',
+  read: NOVA_TO_CODEX['Read'] ?? 'Read',
+  glob: NOVA_TO_CODEX['Glob'] ?? 'Glob',
+  grep: NOVA_TO_CODEX['Grep'] ?? 'Grep',
+  bash: NOVA_TO_CODEX['Bash'] ?? 'Bash',
   edit: 'apply_patch',
   write: 'apply_patch',
   explorer: 'Explorer',
@@ -342,7 +342,7 @@ export const CODEX_VOCAB: ToolVocabulary = {
 export function vocabForProvider(canonicalProvider: string): ToolVocabulary {
   return canonicalProvider === 'openai' || canonicalProvider === 'codex'
     ? CODEX_VOCAB
-    : REX_VOCAB;
+    : NOVA_VOCAB;
 }
 
 // ============================================
@@ -350,14 +350,14 @@ export function vocabForProvider(canonicalProvider: string): ToolVocabulary {
 // ============================================
 
 /**
- * Format a single Rex tool definition as its Codex-native equivalent for the OpenAI API.
+ * Format a single Nova tool definition as its Codex-native equivalent for the OpenAI API.
  */
 export function formatToolForOpenAI(
   tool: ToolDefinition,
   model: string
 ): Record<string, unknown> | null {
   // Filter out tools replaced by apply_patch
-  if (FILTERED_REX_TOOLS.has(tool.name)) {
+  if (FILTERED_NOVA_TOOLS.has(tool.name)) {
     return null;
   }
 
@@ -395,7 +395,7 @@ export function formatToolForOpenAI(
   }
 
   // 1:1 skinned tools
-  const codexName = REX_TO_CODEX[tool.name];
+  const codexName = NOVA_TO_CODEX[tool.name];
   if (codexName) {
     const codexDef = CODEX_TOOL_DEFS[codexName];
     return {

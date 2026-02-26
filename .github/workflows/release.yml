@@ -58,15 +58,15 @@ jobs:
           bun build --compile \
             --target=${{ matrix.bun-target }} \
             --minify \
-            --define "process.env.REX_VERSION='\"${{ steps.version.outputs.VERSION }}\"'" \
+            --define "process.env.NOVA_VERSION='\"${{ steps.version.outputs.VERSION }}\"'" \
             ./packages/launcher/standalone.ts \
-            --outfile ./rex-${{ matrix.target }}${EXT}
+            --outfile ./nova-${{ matrix.target }}${EXT}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rex-${{ matrix.target }}
-          path: rex-${{ matrix.target }}*
+          name: nova-${{ matrix.target }}
+          path: nova-${{ matrix.target }}*
 
   release:
     name: Create Release
@@ -84,14 +84,14 @@ jobs:
       - name: Generate checksums
         run: |
           cd artifacts
-          sha256sum rex-* > checksums.txt
+          sha256sum nova-* > checksums.txt
           cat checksums.txt
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/rex-*
+            artifacts/nova-*
             artifacts/checksums.txt
           generate_release_notes: true
           draft: false

@@ -23,11 +23,11 @@ import type { ProviderContext, LLMProviderAdapter } from './types.js';
 import { PartialStreamError, toLLMExecutionError } from './types.js';
 import { compileSchemaForCodex } from './schema_compiler.js';
 import {
-  CODEX_TO_REX,
-  REX_TO_CODEX,
+  CODEX_TO_NOVA,
+  NOVA_TO_CODEX,
   formatToolForOpenAI,
-  translateCodexArgsToRex,
-  translateRexArgsToCodex,
+  translateCodexArgsToNova,
+  translateNovaArgsToCodex,
 } from './tool_skins.js';
 
 const DEFAULT_CODEX_REQUEST_TIMEOUT_MS = 120_000;
@@ -633,7 +633,7 @@ export class CodexProvider implements LLMProviderAdapter {
       if (type === 'function_call') {
         const callId = this.pickFirstString(item.call_id, item.callId, item.id);
         const rawName = this.pickFirstString(item.name);
-        const mappedName = rawName ? (REX_TO_CODEX[rawName] ?? rawName) : undefined;
+        const mappedName = rawName ? (NOVA_TO_CODEX[rawName] ?? rawName) : undefined;
         const name = this.normalizeCodexToolName(mappedName);
         if (!callId || !name) continue;
         let args = item.arguments as string | Record<string, unknown> | undefined;
@@ -654,16 +654,16 @@ export class CodexProvider implements LLMProviderAdapter {
           }
         }
 
-        // Translate Rex args → Codex args so the model sees its native param names
+        // Translate Nova args → Codex args so the model sees its native param names
         // in conversation history (e.g. path → file_path for read_file).
         // getItemsForLLM() emits arguments as JSON strings, so parse first.
-        if (rawName && REX_TO_CODEX[rawName] && name !== 'apply_patch') {
+        if (rawName && NOVA_TO_CODEX[rawName] && name !== 'apply_patch') {
           let argsObj = args;
           if (typeof argsObj === 'string') {
             try { argsObj = JSON.parse(argsObj); } catch { /* leave as-is */ }
           }
           if (typeof argsObj === 'object' && argsObj !== null) {
-            args = JSON.stringify(translateRexArgsToCodex(rawName, argsObj as Record<string, unknown>));
+            args = JSON.stringify(translateNovaArgsToCodex(rawName, argsObj as Record<string, unknown>));
           }
         }
 
@@ -792,12 +792,12 @@ export class CodexProvider implements LLMProviderAdapter {
     }
 
     let args = this.parseArguments(argsRaw);
-    if (CODEX_TO_REX[codexName]) {
-      args = translateCodexArgsToRex(codexName, args);
+    if (CODEX_TO_NOVA[codexName]) {
+      args = translateCodexArgsToNova(codexName, args);
     }
-    const rexName = CODEX_TO_REX[codexName] ?? codexName;
+    const novaName = CODEX_TO_NOVA[codexName] ?? codexName;
 
-    return { id: callId, name: rexName, arguments: args };
+    return { id: callId, name: novaName, arguments: args };
   }
 
   private parseOutputItemText(item: Record<string, unknown>): string {

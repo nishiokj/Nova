@@ -15,11 +15,11 @@ import path from 'path';
 
 /**
  * Minimal user config template.
- * API keys are stored in GraphD (use `rex providers set <provider> <key>`).
+ * API keys are stored in GraphD (use `nova providers set <provider> <key>`).
  * All other settings come from config/defaults.json
  */
 const MINIMAL_USER_CONFIG = {
-  $comment: "User preferences. API keys are stored securely in GraphD - use 'rex providers set <provider> <key>' to configure them.",
+  $comment: "User preferences. API keys are stored securely in GraphD - use 'nova providers set <provider> <key>' to configure them.",
   models: {
     default: ""
   }
@@ -37,12 +37,12 @@ const { values, positionals } = parseArgs({
 
 if (values.version) {
   // Embedded at build time
-  console.log(`rex ${process.env.REX_VERSION ?? 'dev'}`);
+  console.log(`nova ${process.env.NOVA_VERSION ?? 'dev'}`);
   process.exit(0);
 }
 
 if (values.help) {
-  console.log(`Usage: rex [options] [prompt]
+  console.log(`Usage: nova [options] [prompt]
 
 Options:
   --daemon-only  Run daemon in foreground without TUI
@@ -50,12 +50,12 @@ Options:
   -h, --help     Show this help
 
 Commands:
-  rex                    Start interactive TUI with daemon
-  rex --daemon-only      Run daemon in foreground mode
-  rex "prompt"           Start with initial prompt
+  nova                    Start interactive TUI with daemon
+  nova --daemon-only      Run daemon in foreground mode
+  nova "prompt"           Start with initial prompt
 
 Configuration:
-  Config file: ~/.rex/config.json
+  Config file: ~/.nova/config.json
   On first run, a default config is created.
   Edit this file to configure LLM providers and API keys.
 `);
@@ -68,18 +68,18 @@ Configuration:
 const PROJECT_CONFIG_NAME = path.join('config', 'harness_config.json');
 
 function ensureConfig(): string {
-  const configDir = path.join(homedir(), '.rex');
+  const configDir = path.join(homedir(), '.nova');
   const configPath = path.join(configDir, 'config.json');
 
   if (!existsSync(configDir)) {
     mkdirSync(configDir, { recursive: true });
-    console.log(`[rex] Created config directory: ${configDir}`);
+    console.log(`[nova] Created config directory: ${configDir}`);
   }
 
   if (!existsSync(configPath)) {
     writeFileSync(configPath, JSON.stringify(MINIMAL_USER_CONFIG, null, 2) + '\n', 'utf-8');
-    console.log(`[rex] Created user config: ${configPath}`);
-    console.log('[rex] To add API keys, use: rex providers set <provider> <key>');
+    console.log(`[nova] Created user config: ${configPath}`);
+    console.log('[nova] To add API keys, use: nova providers set <provider> <key>');
   }
 
   return configPath;
@@ -125,7 +125,7 @@ async function main(): Promise<void> {
 
     // Run daemon startup
     const address = await daemon.start();
-    console.log(`[rex] Daemon started on ${address.host}:${address.port}`);
+    console.log(`[nova] Daemon started on ${address.host}:${address.port}`);
 
     // Small delay for daemon to fully initialize
     await new Promise(r => setTimeout(r, 200));
@@ -149,6 +149,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error('[rex] Fatal error:', error instanceof Error ? error.message : error);
+  console.error('[nova] Fatal error:', error instanceof Error ? error.message : error);
   process.exit(1);
 });

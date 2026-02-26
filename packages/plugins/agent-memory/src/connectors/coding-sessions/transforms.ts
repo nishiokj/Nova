@@ -18,12 +18,12 @@ import {
   type ClaudeUserMessage,
   type ClaudeAssistantMessage,
   type ClaudeSummaryMessage,
-  RexSessionMessageSchema,
-  RexSummaryMessageSchema,
-  type RexSessionMessage,
-  type RexUserMessage,
-  type RexAssistantMessage,
-  type RexSummaryMessage,
+  NovaSessionMessageSchema,
+  NovaSummaryMessageSchema,
+  type NovaSessionMessage,
+  type NovaUserMessage,
+  type NovaAssistantMessage,
+  type NovaSummaryMessage,
 } from './schemas.js'
 
 // ============ Helper Functions ============
@@ -364,18 +364,18 @@ export const claudeSummaryTransform: Transformation<ClaudeSummaryMessage> = {
   description: 'Transforms Claude session summaries into Notification canonical entities',
 }
 
-// ============ Rex Session Transformations ============
+// ============ Nova Session Transformations ============
 
 /**
- * Transform individual Rex session message to Message entity.
+ * Transform individual Nova session message to Message entity.
  * Used when processing messages one at a time (incremental sync).
  */
-export const rexMessageTransform: Transformation<RexSessionMessage> = {
-  id: 'rex_sessions:message_to_message',
-  name: 'Rex Message → Message',
+export const novaMessageTransform: Transformation<NovaSessionMessage> = {
+  id: 'nova_sessions:message_to_message',
+  name: 'Nova Message → Message',
 
   source: {
-    connector: 'rex_sessions',
+    connector: 'nova_sessions',
     entityType: 'session_message',
     filter: (raw: unknown) => {
       const msg = raw as { type?: string }
@@ -383,11 +383,11 @@ export const rexMessageTransform: Transformation<RexSessionMessage> = {
     },
   },
 
-  inputSchema: RexSessionMessageSchema,
+  inputSchema: NovaSessionMessageSchema,
 
   outputType: ['conversation', 'message'],
 
-  transform: (msg: RexSessionMessage, ctx: TransformContext): TransformResult => {
+  transform: (msg: NovaSessionMessage, ctx: TransformContext): TransformResult => {
     if (msg.type !== 'user' && msg.type !== 'assistant') {
       throw new Error(`Unexpected message type: ${msg.type}`)
     }
@@ -396,8 +396,8 @@ export const rexMessageTransform: Transformation<RexSessionMessage> = {
     const textContent = extractTextContent(msg.content)
     const sessionId = msg.session_id
 
-    const sourceRef = createSourceRef(ctx.accountId, 'message', msg.id, undefined, 'rex_sessions')
-    const conversationSourceRef = createSourceRef(ctx.accountId, 'conversation', sessionId, undefined, 'rex_sessions')
+    const sourceRef = createSourceRef(ctx.accountId, 'message', msg.id, undefined, 'nova_sessions')
+    const conversationSourceRef = createSourceRef(ctx.accountId, 'conversation', sessionId, undefined, 'nova_sessions')
     const conversationSourceRefKey = sourceRefToKey(conversationSourceRef)
 
     return {
@@ -436,7 +436,7 @@ export const rexMessageTransform: Transformation<RexSessionMessage> = {
           topic: `Session ${sessionId.slice(0, 8)}...`,
           is_archived: false,
           metadata: {
-            agent: 'rex',
+            agent: 'nova',
             session_id: sessionId,
             project: meta.project,
           },
@@ -449,28 +449,28 @@ export const rexMessageTransform: Transformation<RexSessionMessage> = {
   onError: 'skip',
   enabled: true,
   version: 1,
-  description: 'Transforms individual Rex session messages into Message canonical entities',
+  description: 'Transforms individual Nova session messages into Message canonical entities',
 }
 
 /**
- * Transform Rex session summary to a Notification entity.
+ * Transform Nova session summary to a Notification entity.
  */
-export const rexSummaryTransform: Transformation<RexSummaryMessage> = {
-  id: 'rex_sessions:summary_to_notification',
-  name: 'Rex Summary → Notification',
+export const novaSummaryTransform: Transformation<NovaSummaryMessage> = {
+  id: 'nova_sessions:summary_to_notification',
+  name: 'Nova Summary → Notification',
 
   source: {
-    connector: 'rex_sessions',
+    connector: 'nova_sessions',
     entityType: 'session_summary',
   },
 
-  inputSchema: RexSummaryMessageSchema,
+  inputSchema: NovaSummaryMessageSchema,
 
   outputType: 'notification',
 
-  transform: (msg: RexSummaryMessage, ctx: TransformContext): TransformResult => {
+  transform: (msg: NovaSummaryMessage, ctx: TransformContext): TransformResult => {
     const meta = (msg as { _meta?: { sessionId?: string; project?: string } })._meta ?? {}
-    const sourceRef = createSourceRef(ctx.accountId, 'summary', msg.session_id, undefined, 'rex_sessions')
+    const sourceRef = createSourceRef(ctx.accountId, 'summary', msg.session_id, undefined, 'nova_sessions')
 
     return {
       primary: {
@@ -484,7 +484,7 @@ export const rexSummaryTransform: Transformation<RexSummaryMessage> = {
           body: msg.summary,
           triggered_at: msg.created_at,
           metadata: {
-            agent: 'rex',
+            agent: 'nova',
             session_id: msg.session_id,
             project: meta.project,
           },
@@ -497,7 +497,7 @@ export const rexSummaryTransform: Transformation<RexSummaryMessage> = {
   onError: 'skip',
   enabled: true,
   version: 1,
-  description: 'Transforms Rex session summaries into Notification canonical entities',
+  description: 'Transforms Nova session summaries into Notification canonical entities',
 }
 
 // ============ Exports ============
@@ -508,7 +508,7 @@ export const transforms = [
   claudeSummaryTransform,
 ]
 
-export const rexTransforms = [
-  rexMessageTransform,
-  rexSummaryTransform,
+export const novaTransforms = [
+  novaMessageTransform,
+  novaSummaryTransform,
 ]

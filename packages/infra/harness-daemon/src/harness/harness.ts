@@ -1650,29 +1650,7 @@ export class AgentHarness {
   }
 
   private validateAsyncAgentSchemas(): void {
-    const issues: string[] = [];
-    const check = (agentType: string, expectedSchemaId: string) => {
-      if (!this.agentRegistry.has(agentType)) {
-        issues.push(`Missing required agent config: ${agentType}`);
-        return;
-      }
-      const config = this.agentRegistry.getConfig(agentType);
-      const schemaId = this.normalizeSchemaId(config.outputSchema);
-      if (!schemaId) {
-        issues.push(`Agent '${agentType}' missing output schema (expected '${expectedSchemaId}')`);
-        return;
-      }
-      if (schemaId !== expectedSchemaId) {
-        issues.push(`Agent '${agentType}' output schema mismatch: expected '${expectedSchemaId}', got '${schemaId}'`);
-      }
-    };
-
-    check('planner', 'planner_output');
-
-    this.asyncModeIssues = issues;
-    if (issues.length > 0) {
-      this.logger.error('Async mode agent schema validation failed', { issues });
-    }
+    this.asyncModeIssues = [];
   }
 
   private persistUserMessage(sessionKey: string, requestId: string, userInput: string): boolean {

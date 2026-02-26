@@ -4,7 +4,7 @@ export const BENCHMARK_PROFILES = {
     defaultDataset: '.lab/experiments/data/swebench_lite_curated.task_boundary_v2.jsonl',
     sourceDatasetV1: '.lab/experiments/data/swebench_lite_curated.task_boundary_v1.jsonl',
     defaultOutput: '.lab/experiments/swebench_lite_curated_glm5_vs_codex_spark.yaml',
-    defaultAgentArtifact: '.lab/agents/rex-current.tar.gz',
+    defaultAgentArtifact: '.lab/agents/nova-current.tar.gz',
     defaultWorkspace: '/testbed',
     timeoutMs: 1_800_000,
     experiment: {

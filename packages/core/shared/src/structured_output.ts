@@ -29,7 +29,6 @@ export {
 
 // Re-export all inferred types
 export type {
-  RoutingOutput,
   AgentAction,
   AgentActionOutput,
   GoalDrivenOutput,
@@ -37,7 +36,6 @@ export type {
   ExplorerOutput,
   WorkItemOutput,
   RuntimeScriptOutput,
-  PlannerOutput,
 } from './output_schemas.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {

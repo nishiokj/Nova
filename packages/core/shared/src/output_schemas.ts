@@ -17,13 +17,6 @@ import { z, toJSONSchema } from 'zod';
  */
 export const AgentActionSchema = z.enum(['done', 'continue']);
 
-/**
- * Routing output - used by the router agent.
- */
-export const RoutingOutputSchema = z.object({
-  tier: z.enum(['simple', 'standard', 'complex']),
-}).strict();
-
 // --------------------------------------------
 // Base action outputs (explicit state handling)
 // --------------------------------------------
@@ -168,15 +161,6 @@ export const RuntimeScriptOutputSchema = z.union([
   }).strict(),
 ]);
 
-/**
- * Planner output schema (planning agent).
- */
-export const PlannerOutputSchema = z.union([
-  DoneGoalReachedOutputSchema,
-  DoneAwaitingUserInputOutputSchema,
-  ContinueOutputSchema,
-]);
-
 // ============================================
 // SCHEMA REGISTRY
 // ============================================
@@ -185,12 +169,10 @@ export const PlannerOutputSchema = z.union([
  * Registry mapping schema names to Zod schemas.
  */
 export const OUTPUT_SCHEMAS = {
-  routing: RoutingOutputSchema,
   agent_action: AgentActionOutputSchema,
   goal_driven: GoalDrivenOutputSchema,
   explorer: ExplorerOutputSchema,
   runtime_script: RuntimeScriptOutputSchema,
-  planner_output: PlannerOutputSchema,
 } as const;
 
 export type OutputSchemaName = keyof typeof OUTPUT_SCHEMAS;
@@ -199,7 +181,6 @@ export type OutputSchemaName = keyof typeof OUTPUT_SCHEMAS;
 // INFERRED TYPES
 // ============================================
 
-export type RoutingOutput = z.infer<typeof RoutingOutputSchema>;
 export type AgentAction = z.infer<typeof AgentActionSchema>;
 export type AgentActionOutput = z.infer<typeof AgentActionOutputSchema>;
 export type GoalDrivenOutput = z.infer<typeof GoalDrivenOutputSchema>;
@@ -207,7 +188,6 @@ export type Artifact = z.infer<typeof ArtifactSchema>;
 export type ExplorerOutput = z.infer<typeof ExplorerOutputSchema>;
 export type WorkItemOutput = z.infer<typeof WorkItemOutputSchema>;
 export type RuntimeScriptOutput = z.infer<typeof RuntimeScriptOutputSchema>;
-export type PlannerOutput = z.infer<typeof PlannerOutputSchema>;
 
 // ============================================
 // JSON SCHEMA CONVERSION

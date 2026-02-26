@@ -44,7 +44,7 @@ import { getOutputSchemaJson, OUTPUT_SCHEMAS, type OutputSchemaName } from 'shar
 import { stderrLogger, type HarnessLogger } from './harness_infra.js';
 
 const DEFAULT_CONFIG_PATH = 'config/defaults.json';
-const USER_CONFIG_PATH = '~/.rex/config.json';
+const USER_CONFIG_PATH = '~/.nova/config.json';
 const BEHAVIORAL_RULES_PATH = 'config/behavioral_rules.md';
 
 /** Module-level logger, overridden when callers pass a logger */
@@ -184,7 +184,7 @@ export function loadConfigFile(configPath?: string, logger: HarnessLogger = stde
     }
   }
 
-  // 3. Check user config (~/.rex/config.json)
+  // 3. Check user config (~/.nova/config.json)
   const userPath = expandHome(USER_CONFIG_PATH);
   if (existsSync(userPath)) {
     const content = readFileSync(userPath, 'utf-8');
@@ -635,7 +635,7 @@ export function createConfigFromFile(
  * Search order:
  * 1. Explicit configPath (if provided)
  * 2. cwd/config/defaults.json (project config)
- * 3. ~/.rex/config.json (user fallback)
+ * 3. ~/.nova/config.json (user fallback)
  * 4. Package bundled config
  *
  * Each config must be complete and valid. No partial configs or merging.
@@ -652,7 +652,7 @@ export function loadConfig(
     throw new Error(
       'No configuration file found. Please create one of the following:\n' +
       '  - <project>/config/defaults.json (project config)\n' +
-      '  - ~/.rex/config.json (user config)\n' +
+      '  - ~/.nova/config.json (user config)\n' +
       'Or specify an explicit config path via the --config option.'
     );
   }
