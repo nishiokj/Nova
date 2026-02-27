@@ -179,6 +179,40 @@ describe('classifyChanges', () => {
     expect(result[0].changeKind).toBe('body_changed')
   })
 
+  it('classifies exported entity with hunk on export line only as export_changed', async () => {
+    // authenticate starts at line 10, is exported — hunk touching only line 10
+    const sql = mockSql(entities)
+    const changes: FileChange[] = [
+      {
+        filepath: 'src/auth.ts',
+        status: 'modified',
+        hunks: [{ oldStart: 10, oldCount: 1, newStart: 10, newCount: 1 }],
+      },
+    ]
+
+    const result = await classifyChanges(sql, changes)
+    expect(result).toHaveLength(1)
+    expect(result[0].entity.name).toBe('authenticate')
+    expect(result[0].changeKind).toBe('export_changed')
+  })
+
+  it('classifies non-exported entity with hunk on first line as signature_changed, not export_changed', async () => {
+    // hashPassword starts at line 30, is NOT exported — hunk on line 30 only
+    const sql = mockSql(entities)
+    const changes: FileChange[] = [
+      {
+        filepath: 'src/auth.ts',
+        status: 'modified',
+        hunks: [{ oldStart: 30, oldCount: 1, newStart: 30, newCount: 1 }],
+      },
+    ]
+
+    const result = await classifyChanges(sql, changes)
+    expect(result).toHaveLength(1)
+    expect(result[0].entity.name).toBe('hashPassword')
+    expect(result[0].changeKind).toBe('signature_changed')
+  })
+
   it('classifies renamed file — old entities deleted, new entities added', async () => {
     const oldEntity = makeEntity({
       id: 'function:src/old.ts:foo',
