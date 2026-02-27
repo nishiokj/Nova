@@ -6,7 +6,7 @@
  */
 
 import type { Sql } from 'postgres'
-import type { Entity, EntityKind, GraphStats } from './types.js'
+import type { Entity, EntityKind, EdgeType, GraphStats } from './types.js'
 
 // --- Row type from Postgres ---
 
@@ -204,6 +204,95 @@ export async function dependentsOf(
   }
 
   return rows.map(rowToEntity)
+}
+
+/**
+ * Find entities whose line ranges overlap any of the given ranges.
+ * Bridges git diff hunks to the entity graph.
+ */
+export async function entitiesAtLines(
+  sql: Sql,
+  filepath: string,
+  ranges: Array<{ startLine: number; endLine: number }>,
+): Promise<Entity[]> {
+  if (ranges.length === 0) return []
+
+  // Build OR clause for overlapping ranges:
+  // entity overlaps range when entity.start_line <= range.end AND entity.end_line >= range.start
+  const conditions = ranges
+    .map((_, i) => `(e.start_line <= $${i * 2 + 2} AND e.end_line >= $${i * 2 + 1})`)
+    .join(' OR ')
+
+  const params: (string | number)[] = [filepath]
+  for (const r of ranges) {
+    params.push(r.startLine, r.endLine)
+  }
+
+  const query = `
+    SELECT DISTINCT e.* FROM entity_graph.entities e
+    WHERE e.filepath = $1
+      AND e.kind != 'file'
+      AND (${conditions})
+    ORDER BY e.start_line ASC NULLS LAST
+  `
+  const rows = await sql.unsafe<EntityRow[]>(query, params)
+  return rows.map(rowToEntity)
+}
+
+/**
+ * Entity-level blast radius. Given specific entity IDs, walk dependency edges
+ * and return each affected entity with its depth and the edge type that linked it.
+ */
+export interface BlastRadiusEntry {
+  entity: Entity
+  depth: number
+  via: EdgeType
+}
+
+export async function entityBlastRadius(
+  sql: Sql,
+  entityIds: string[],
+  maxDepth: number = 2,
+): Promise<BlastRadiusEntry[]> {
+  if (entityIds.length === 0) return []
+
+  const rows = await sql<Array<EntityRow & { depth: number; via: string }>>`
+    WITH RECURSIVE affected AS (
+      SELECT id, kind, name, filepath, start_line, end_line, exported, async, raw_text,
+             0 AS depth, 'seed' AS via
+      FROM entity_graph.entities
+      WHERE id = ANY(${entityIds})
+
+      UNION
+
+      SELECT DISTINCT e.id, e.kind, e.name, e.filepath, e.start_line, e.end_line,
+             e.exported, e.async, e.raw_text,
+             a.depth + 1, edges.edge_type
+      FROM affected a
+      JOIN (
+        SELECT importer_id AS dependent_id, imported_id AS dependency_id, 'imports' AS edge_type FROM entity_graph.imports
+        UNION ALL
+        SELECT caller_id, callee_id, 'calls' FROM entity_graph.calls
+        UNION ALL
+        SELECT user_id, used_id, 'uses' FROM entity_graph.uses
+        UNION ALL
+        SELECT child_id, parent_id, 'extends' FROM entity_graph.extends
+        UNION ALL
+        SELECT implementor_id, interface_id, 'implements' FROM entity_graph.implements
+      ) edges ON edges.dependency_id = a.id
+      JOIN entity_graph.entities e ON e.id = edges.dependent_id
+      WHERE a.depth < ${maxDepth}
+    )
+    SELECT * FROM affected
+    WHERE via != 'seed'
+    ORDER BY depth ASC, filepath ASC
+  `
+
+  return rows.map(row => ({
+    entity: rowToEntity(row),
+    depth: row.depth,
+    via: row.via as EdgeType,
+  }))
 }
 
 /**
