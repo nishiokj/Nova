@@ -23,10 +23,15 @@ import {
   callersOf,
   usersOf,
   blastRadius,
+  entitiesAtLines,
+  entityBlastRadius,
   dependentsOf,
   unusedExports,
   graphStats,
 } from './queries.js'
+import type { BlastRadiusEntry } from './queries.js'
+import { reviewDiff } from './pr-review/review.js'
+import type { PRReview } from './pr-review/types.js'
 import { cleanExpiredLeases } from './leasing.js'
 import { createEntityGraphHooks } from './hooks.js'
 
@@ -126,8 +131,26 @@ export class EntityGraph {
     return unusedExports(this.sql, filepath)
   }
 
+  async entitiesAtLines(
+    filepath: string,
+    ranges: Array<{ startLine: number; endLine: number }>,
+  ): Promise<Entity[]> {
+    return entitiesAtLines(this.sql, filepath, ranges)
+  }
+
+  async entityBlastRadius(entityIds: string[], maxDepth?: number): Promise<BlastRadiusEntry[]> {
+    return entityBlastRadius(this.sql, entityIds, maxDepth)
+  }
+
   async graphStats(): Promise<GraphStats> {
     return graphStats(this.sql)
+  }
+
+  /**
+   * Run the full PR review pipeline from a unified diff string.
+   */
+  async reviewDiff(diffText: string, maxDepth?: number): Promise<PRReview> {
+    return reviewDiff(this.sql, diffText, maxDepth)
   }
 
   /**
@@ -167,10 +190,27 @@ export {
   callersOf,
   usersOf,
   blastRadius,
+  entitiesAtLines,
+  entityBlastRadius,
   dependentsOf,
   unusedExports,
   graphStats,
 } from './queries.js'
+export type { BlastRadiusEntry } from './queries.js'
+
+// --- PR Review ---
+export { parseDiff, parseHunkHeader } from './pr-review/diff.js'
+export { classifyChanges } from './pr-review/classifier.js'
+export { scoreRisks } from './pr-review/scorer.js'
+export { reviewDiff } from './pr-review/review.js'
+export type {
+  FileChange,
+  Hunk,
+  ChangeKind,
+  EntityChange,
+  RiskSignal,
+  PRReview,
+} from './pr-review/types.js'
 export { acquireLease, releaseLease, cleanExpiredLeases } from './leasing.js'
 export { createEntityGraphHooks } from './hooks.js'
 export { entityId } from './parser/extractor.js'
