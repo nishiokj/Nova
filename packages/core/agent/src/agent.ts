@@ -442,9 +442,14 @@ export class Agent {
       return 'user_input';
     }
 
+    // When streaming, responseText may be stripped. Use structuredOutput.response as fallback.
+    const structuredResponseDirect = typeof structuredOutput?.response === 'string'
+      ? (structuredOutput.response as string)
+      : '';
+
     const shouldInferUserPrompt = action !== 'done' || structuredOutput?.goalStateReached !== true;
     if (shouldInferUserPrompt) {
-      const responseCandidate = (responseText ?? contentFallback ?? structuredFallback ?? '').trim();
+      const responseCandidate = (responseText || contentFallback || structuredResponseDirect || structuredFallback || '').trim();
       const inferredPrompt = inferUserPromptFromResponse(responseCandidate);
       if (inferredPrompt) {
         result.needsUserInput = true;
@@ -466,9 +471,14 @@ export class Agent {
         return 'done';
       }
 
-      const finalText = (responseText ?? contentFallback ?? '').trim()
+      // When streaming is active, responseText is intentionally stripped to avoid
+      // double TUI output. Fall back to structuredOutput.response (the canonical
+      // response that was already streamed) before using structuredFallback, so that
+      // downstream validation (refusal, planning-speak) sees the actual response.
+      const primaryCandidate = (responseText ?? contentFallback ?? '').trim();
+      const finalText = primaryCandidate
         ? (responseText ?? contentFallback ?? '')
-        : (structuredFallback ?? '');
+        : (structuredResponseDirect.trim() || structuredFallback || '');
       if (isRefusal(finalText)) {
         result.isRefusal = true;
         result.error = 'LLM refused to complete the task';
@@ -485,7 +495,8 @@ export class Agent {
 
     // Handle continue action
     if (action === 'continue') {
-      const continueText = responseText?.trim() ? responseText : structuredFallback;
+      const continueText = responseText?.trim() ? responseText
+        : (structuredResponseDirect.trim() || structuredFallback);
       if (continueText?.trim()) {
         result.response = continueText;
       }
@@ -2402,7 +2413,15 @@ export class Agent {
     for (const candidate of candidates) {
       if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
       const normalized = this.normalizeActionOutputCandidate(candidate as Record<string, unknown>, schemaId);
-      if (normalized) return normalized;
+      if (normalized) {
+        // Preserve artifacts from original output — they are stripped by .strict()
+        // Zod validation but still needed for extractArtifactsFromOutput.
+        // Individual artifacts are validated downstream by isValidRawArtifact.
+        if (Array.isArray(candidate.artifacts)) {
+          normalized.artifacts = candidate.artifacts;
+        }
+        return normalized;
+      }
     }
     return null;
   }

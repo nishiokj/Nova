@@ -263,28 +263,27 @@ describe('Agent Mutation Tests', () => {
   // Planning-speak validation: should reject "I'll analyze..." responses
   // ================================================================
   describe('planning-speak validation', () => {
-    // Planning-speak validation checks result.response. With structured output + streaming,
-    // the response is streamed to TUI but result.response may be empty. Use non-structured
-    // output mode so the response text lands in result.response for validation to fire.
+    // With Bug 3 fixed, structuredOutput.response now flows through to result.response
+    // even when streaming was active. This means planning-speak validation fires correctly
+    // for structured output agents.
 
     it('rejects short planning-speak response starting with "I\'ll analyze"', async () => {
       const llm = createMockLLM([
-        createRawResponse("I'll analyze the codebase"),
+        createResponse({ action: 'done', response: "I'll analyze the codebase", goalStateReached: true }),
       ]);
-      const agent = createAgent(llm, createToolRegistry(), { outputSchema: undefined });
+      const agent = createAgent(llm, createToolRegistry());
       const result = await runAgent(agent);
 
-      // Non-structured agent with no action → terminates with no_action
-      // Then planning-speak check fires on result.response
       expect(result.success).toBe(false);
       expect(result.terminationReason).toBe('no_action');
+      expect(result.error).toContain('planning text');
     });
 
     it('rejects "Let me start by exploring"', async () => {
       const llm = createMockLLM([
-        createRawResponse('Let me start by exploring the project structure.'),
+        createResponse({ action: 'done', response: 'Let me start by exploring the project structure.', goalStateReached: true }),
       ]);
-      const agent = createAgent(llm, createToolRegistry(), { outputSchema: undefined });
+      const agent = createAgent(llm, createToolRegistry());
       const result = await runAgent(agent);
 
       expect(result.success).toBe(false);
@@ -293,9 +292,9 @@ describe('Agent Mutation Tests', () => {
 
     it('rejects "Now I\'ll investigate"', async () => {
       const llm = createMockLLM([
-        createRawResponse("Now I'll investigate the issue"),
+        createResponse({ action: 'done', response: "Now I'll investigate the issue", goalStateReached: true }),
       ]);
-      const agent = createAgent(llm, createToolRegistry(), { outputSchema: undefined });
+      const agent = createAgent(llm, createToolRegistry());
       const result = await runAgent(agent);
 
       expect(result.success).toBe(false);
@@ -303,9 +302,9 @@ describe('Agent Mutation Tests', () => {
 
     it('rejects "First, let me check"', async () => {
       const llm = createMockLLM([
-        createRawResponse('First, let me check the dependencies'),
+        createResponse({ action: 'done', response: 'First, let me check the dependencies', goalStateReached: true }),
       ]);
-      const agent = createAgent(llm, createToolRegistry(), { outputSchema: undefined });
+      const agent = createAgent(llm, createToolRegistry());
       const result = await runAgent(agent);
 
       expect(result.success).toBe(false);
@@ -434,20 +433,14 @@ describe('Agent Mutation Tests', () => {
   // Refusal detection
   // ================================================================
   describe('refusal detection', () => {
-    // Refusal detection checks the final response text in resolveAction.
-    // With structured output + streaming, the response field is streamed and not
-    // stored in result.response, so refusal check sees empty text.
-    // Use pre-JSON text to ensure the refusal text reaches the refusal check.
+    // With Bug 3 fixed, structuredOutput.response now flows through to resolveAction's
+    // finalText even when streaming was active. Refusal detection works with standard
+    // structured output.
 
-    it('detects "cannot be completed" as refusal via pre-JSON text', async () => {
-      const refusalText = 'This task cannot be completed due to constraints.';
-      const jsonPayload = JSON.stringify({
-        action: 'done', response: refusalText,
-        goalStateReached: true, awaitingUserInput: false,
-      });
-      // Pre-JSON text + JSON: pre-JSON text is combined with parsed response
-      const content = `${refusalText}\n${jsonPayload}`;
-      const llm = createMockLLM([createRawResponse(content)]);
+    it('detects "cannot be completed" as refusal', async () => {
+      const llm = createMockLLM([
+        createResponse({ action: 'done', response: 'This task cannot be completed due to constraints.', goalStateReached: true }),
+      ]);
       const agent = createAgent(llm, createToolRegistry());
       const result = await runAgent(agent);
 
@@ -455,30 +448,21 @@ describe('Agent Mutation Tests', () => {
       expect(result.isRefusal).toBe(true);
     });
 
-    it('detects "unable to complete" via non-structured agent', async () => {
+    it('detects "unable to complete" as refusal', async () => {
       const llm = createMockLLM([
-        createRawResponse('I am unable to complete this request.'),
+        createResponse({ action: 'done', response: 'I am unable to complete this request.', goalStateReached: true }),
       ]);
-      // Non-structured agent: response text goes directly to result.response
-      const agent = createAgent(llm, createToolRegistry(), { outputSchema: undefined });
+      const agent = createAgent(llm, createToolRegistry());
       const result = await runAgent(agent);
 
-      // Non-structured agent terminates with no_action, but response is captured
-      // Refusal detection happens in resolveAction for done action - with no action, it won't fire.
-      // This is a BUG CANDIDATE: refusal text only checked when action is 'done',
-      // meaning non-structured agents with refusal text and no action won't be flagged.
-      expect(result.terminationReason).toBe('no_action');
-      expect(result.response).toContain('unable to complete');
+      expect(result.terminationReason).toBe('refusal');
+      expect(result.isRefusal).toBe(true);
     });
 
-    it('detects "exceeds the budget" via pre-JSON text', async () => {
-      const refusalText = 'The request exceeds the budget allocated.';
-      const jsonPayload = JSON.stringify({
-        action: 'done', response: refusalText,
-        goalStateReached: true, awaitingUserInput: false,
-      });
-      const content = `${refusalText}\n${jsonPayload}`;
-      const llm = createMockLLM([createRawResponse(content)]);
+    it('detects "exceeds the budget" as refusal', async () => {
+      const llm = createMockLLM([
+        createResponse({ action: 'done', response: 'The request exceeds the budget allocated.', goalStateReached: true }),
+      ]);
       const agent = createAgent(llm, createToolRegistry());
       const result = await runAgent(agent);
 
@@ -883,11 +867,10 @@ describe('Agent Mutation Tests', () => {
       expect(result.isIncomplete).toBe(true);
     });
 
-    it('BUG CANDIDATE: explorer with artifacts in structured output may still be incomplete', async () => {
-      // The agent_action Zod schema may strip the artifacts field during validation,
-      // meaning artifacts embedded in the structured JSON response are lost.
-      // This is a potential bug: artifacts in structured output need to survive
-      // schema validation to be extracted by extractArtifactsFromOutput.
+    it('explorer with artifacts in structured output preserves them (Bug 1 fix)', async () => {
+      // With Bug 1 fixed, the lenient parser now preserves artifacts from the
+      // original candidate even when .strict() Zod validation fails. This means
+      // extractArtifactsFromOutput can find and process them.
       const llm = createMockLLM([
         createResponse({
           action: 'continue',
@@ -909,14 +892,9 @@ describe('Agent Mutation Tests', () => {
       const agent = createAgent(llm, createToolRegistry(), { type: 'explorer' });
       const result = await runAgent(agent);
 
-      // If Zod validation strips the artifacts field, isIncomplete will be true.
-      // This documents the actual behavior as a potential design issue.
-      if (result.artifacts && result.artifacts.length > 0) {
-        expect(result.isIncomplete).toBeFalsy();
-      } else {
-        // Artifacts were stripped by schema validation
-        expect(result.isIncomplete).toBe(true);
-      }
+      // Artifacts should survive lenient parsing and not be stripped
+      expect(result.artifacts!.length).toBeGreaterThanOrEqual(1);
+      expect(result.isIncomplete).toBeFalsy();
     });
   });
 
@@ -924,10 +902,10 @@ describe('Agent Mutation Tests', () => {
   // Artifact extraction edge cases
   // ================================================================
   describe('artifact extraction', () => {
-    it('BUG CANDIDATE: artifacts in agent_action schema may be stripped by Zod validation', async () => {
-      // The agent_action schema validates output and may strip unknown fields
-      // like artifacts. This tests that even with valid and invalid artifacts,
-      // the agent doesn't crash.
+    it('preserves valid artifacts and filters invalid ones after Bug 1 fix', async () => {
+      // With Bug 1 fixed, the lenient parser carries artifacts through from the
+      // original candidate. extractArtifactsFromOutput then validates each individually
+      // via isValidRawArtifact, keeping only those with sourcePath, kind, and name.
       const llm = createMockLLM([
         createResponse({
           action: 'done',
@@ -947,9 +925,10 @@ describe('Agent Mutation Tests', () => {
       const result = await runAgent(agent);
 
       expect(result.success).toBe(true);
-      // Artifacts might be 0 if Zod strips them, or 1 if they survive validation
+      // Only the first artifact has all required fields
       const artifacts = result.artifacts ?? [];
-      expect(artifacts.length).toBeLessThanOrEqual(1);
+      expect(artifacts.length).toBe(1);
+      expect(artifacts[0].name).toBe('valid');
     });
 
     it('handles non-array artifacts field', async () => {
@@ -1346,14 +1325,15 @@ describe('Agent Mutation Tests', () => {
   // ================================================================
   describe('question inference from response', () => {
     it('infers question from response containing ?', async () => {
-      // Use pre-JSON text with question so it reaches the inference logic
-      const questionText = 'Should I proceed with option A or option B?';
-      const jsonPayload = JSON.stringify({
-        action: 'continue', response: questionText,
-        goalStateReached: false, awaitingUserInput: false,
-      });
-      const content = `${questionText}\n${jsonPayload}`;
-      const llm = createMockLLM([createRawResponse(content)]);
+      // With Bug 3 fixed, structuredOutput.response is now used as fallback
+      // for question inference when streaming strips responseText.
+      const llm = createMockLLM([
+        createResponse({
+          action: 'continue',
+          response: 'Should I proceed with option A or option B?',
+          goalStateReached: false,
+        }),
+      ]);
       const agent = createAgent(llm, createToolRegistry());
       const result = await runAgent(agent);
 
