@@ -11,7 +11,7 @@ describe('ConfiguredEffectHooksRunner', () => {
       name: 'Abortable Hook',
       description: 'Long-running command for abort test',
       enabled: true,
-      trigger: 'PreToolUse',
+      trigger: 'pre_tool_use',
       priority: 0,
       timeout_ms: 30_000,
       fail_open: true,
@@ -25,7 +25,7 @@ describe('ConfiguredEffectHooksRunner', () => {
     };
 
     const context: HookContext = {
-      event: 'PreToolUse',
+      event: 'pre_tool_use',
       sessionKey: 'session-abort',
       requestId: 'req-abort',
       workingDir: process.cwd(),

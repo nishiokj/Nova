@@ -106,7 +106,12 @@ async function dispatchAgentSession(
     logger.info(`[agentic:${task.name}] Connected to harness at ${config.host}:${config.port}`)
 
     // Dispatch the async session
-    const startResult = await client.asyncStart(prompt)
+    const startResult = await client.request<{
+      success: boolean
+      requestId?: string
+      sessionKey?: string
+      error?: string
+    }>('async.start', { goal: prompt })
 
     if (!startResult.success) {
       throw new Error(`async_start failed: ${startResult.error ?? 'unknown error'}`)

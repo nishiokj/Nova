@@ -5,7 +5,7 @@
  */
 
 import { EventEmitter } from 'events';
-import { HarnessClient, type ConnectionState } from 'harness-client';
+import { HarnessClient, type ConnectionState, type RpcClient, type BridgeCommand as HarnessBridgeCommand } from 'harness-client';
 import { profiler } from 'shared';
 import type { BridgeCommand, BridgeEvent, BridgeEventType, ReadyData, ResponseData } from './types.js';
 
@@ -60,6 +60,10 @@ export class BridgeClient extends EventEmitter {
     return this.client.connected;
   }
 
+  get rpc(): RpcClient {
+    return this.client.rpc;
+  }
+
   constructor(options: BridgeClientOptions) {
     super();
     this.client = new HarnessClient(options);
@@ -100,7 +104,7 @@ export class BridgeClient extends EventEmitter {
 
   send(command: BridgeCommand): boolean {
     profiler.instant(`tui:send:${command.type}`, 'tui', 'p');
-    return this.client.send(command);
+    return this.client.send(command as unknown as HarnessBridgeCommand);
   }
 
   close(): void {
@@ -109,69 +113,5 @@ export class BridgeClient extends EventEmitter {
 
   getConnectionState(): ConnectionState {
     return this.client.getConnectionState();
-  }
-
-  // =========================================================================
-  // Auth Commands (delegated to HarnessClient)
-  // =========================================================================
-
-  async authStart(deviceName?: string) {
-    return this.client.authStart(deviceName);
-  }
-
-  async authPoll(stateToken: string) {
-    return this.client.authPoll(stateToken);
-  }
-
-  async authVerify(sessionToken: string) {
-    return this.client.authVerify(sessionToken);
-  }
-
-  async authLogout(sessionToken: string) {
-    return this.client.authLogout(sessionToken);
-  }
-
-  async providersList(sessionToken?: string) {
-    return this.client.providersList(sessionToken);
-  }
-
-  async providersSave(provider: string, apiKey: string, sessionToken?: string) {
-    return this.client.providersSave(provider, apiKey, sessionToken);
-  }
-
-  async providersDelete(provider: string, sessionToken?: string) {
-    return this.client.providersDelete(provider, sessionToken);
-  }
-
-  async providersTest(provider: string, sessionToken?: string) {
-    return this.client.providersTest(provider, sessionToken);
-  }
-
-  async sessionFork() {
-    return this.client.sessionFork();
-  }
-
-  async sessionClose() {
-    return this.client.sessionClose();
-  }
-
-  async listSessions(options: { workingDir?: string; status?: string | string[]; limit?: number } = {}) {
-    return this.client.listSessions(options);
-  }
-
-  async deleteSession(sessionKey: string) {
-    return this.client.deleteSession(sessionKey);
-  }
-
-  async usageSummary(options: { status?: string | string[]; limit?: number } = {}) {
-    return this.client.usageSummary(options);
-  }
-
-  async setDangerousMode(enabled: boolean) {
-    return this.client.setDangerousMode(enabled);
-  }
-
-  async asyncStart(goal: string, workingDir?: string) {
-    return this.client.asyncStart(goal, workingDir);
   }
 }

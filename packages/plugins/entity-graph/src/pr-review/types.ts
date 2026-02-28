@@ -46,6 +46,15 @@ export interface RiskSignal {
   factors: string[]      // human-readable explanations
 }
 
+// --- Impact Gaps ---
+
+export interface ImpactGap {
+  seed: Entity
+  seedChangeKind: ChangeKind
+  directDependents: Entity[]
+  unresolvedDependents: Entity[]
+}
+
 // --- Review ---
 
 export interface PRReview {
@@ -58,5 +67,6 @@ export interface PRReview {
     totalEntities: number
   }
   risks: RiskSignal[]               // sorted by score desc
+  impactGaps: ImpactGap[]           // contract changes with unresolved dependents
   deadCode: Entity[]                // new unused exports
 }

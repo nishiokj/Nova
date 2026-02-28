@@ -27,6 +27,7 @@ interface ProviderInfo {
 interface ProvidersViewProps {
   width: number;
   bridgeClient: BridgeClient;
+  onModelsChanged: () => void;
   onClose: () => void;
 }
 
@@ -60,7 +61,7 @@ function stripPasteMarkers(str: string): string {
     .replace(/\[20[01]~/g, "");
 }
 
-export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewProps) {
+export function ProvidersView({ width, bridgeClient, onModelsChanged, onClose }: ProvidersViewProps) {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -93,14 +94,14 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
   }, []);
 
   const refreshModels = () => {
-    bridgeClient.send({ type: "get_models" });
+    onModelsChanged();
   };
 
   const loadProviders = async () => {
     setLoading(true);
     try {
       // No authentication required - local provider management
-      const result = await bridgeClient.providersList();
+      const result = await bridgeClient.rpc.call("providers.list", {});
       if (result.success && result.providers) {
         // Check OAuth provider status and merge
         const providerList = [...result.providers];
@@ -136,7 +137,7 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
 
     try {
       // No authentication required - local provider management
-      const result = await bridgeClient.providersSave(provider, cleanKey);
+      const result = await bridgeClient.rpc.call("providers.save", { provider, apiKey: cleanKey });
       if (result.success) {
         setMessage({ text: `API key saved for ${provider}`, type: "success" });
         await loadProviders();
@@ -156,7 +157,7 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
   const deleteApiKey = async (provider: string) => {
     try {
       // No authentication required - local provider management
-      const result = await bridgeClient.providersDelete(provider);
+      const result = await bridgeClient.rpc.call("providers.delete", { provider });
       if (result.success) {
         setMessage({ text: `API key removed for ${provider}`, type: "success" });
         await loadProviders();
@@ -177,7 +178,7 @@ export function ProvidersView({ width, bridgeClient, onClose }: ProvidersViewPro
     setViewMode({ mode: "testing", provider });
     try {
       // No authentication required - local provider management
-      const result = await bridgeClient.providersTest(provider);
+      const result = await bridgeClient.rpc.call("providers.test", { provider });
       if (result.valid) {
         setMessage({ text: `${provider} API key is valid`, type: "success" });
       } else {

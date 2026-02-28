@@ -39,7 +39,7 @@ export function AuthGate({ children, bridgeClient, onAuthenticated }: AuthGatePr
 
     const interval = setInterval(async () => {
       try {
-        const result = await bridgeClient.authPoll(authState.stateToken);
+        const result = await bridgeClient.rpc.call("auth.poll", { stateToken: authState.stateToken });
 
         if (result.success && !result.pending && result.sessionToken && result.userId && result.email) {
           const session: LocalSession = {
@@ -69,7 +69,7 @@ export function AuthGate({ children, bridgeClient, onAuthenticated }: AuthGatePr
     if (session) {
       // Verify with daemon
       try {
-        const result = await bridgeClient.authVerify(session.sessionToken);
+        const result = await bridgeClient.rpc.call("auth.verify", { sessionToken: session.sessionToken });
         if (result.success && result.valid) {
           setAuthState({ status: "authenticated", session });
           onAuthenticated(session);
@@ -82,7 +82,7 @@ export function AuthGate({ children, bridgeClient, onAuthenticated }: AuthGatePr
 
     // Check if auth is available (try starting to see if it's configured)
     try {
-      const result = await bridgeClient.authStart();
+      const result = await bridgeClient.rpc.call("auth.start", {});
       if (!result.success && result.error?.includes("not configured")) {
         // Auth not configured - allow unauthenticated access
         // Create a dummy session for now
@@ -115,7 +115,7 @@ export function AuthGate({ children, bridgeClient, onAuthenticated }: AuthGatePr
   const startSignIn = async () => {
     try {
       const { hostname } = await import("os");
-      const result = await bridgeClient.authStart(hostname());
+      const result = await bridgeClient.rpc.call("auth.start", { device: hostname() });
 
       if (!result.success) {
         setAuthState({ status: "error", message: result.error ?? "Failed to start sign-in" });

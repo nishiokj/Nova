@@ -13,15 +13,18 @@ import {
 } from 'comms-bus';
 import type {
   BridgeCommand,
-  BridgeCommandType,
   BridgeEvent,
   BridgeEventType,
   ConnectionState,
   ReadyData,
   ResponseData,
 } from './types.js';
+import { RpcClient } from './rpc_client.js';
+import type { ProcedureMethod } from './rpc_types.js';
 
 export * from './types.js'
+export * from './rpc_types.js';
+export { RpcClient, RpcCallError } from './rpc_client.js';
 export type { Attachment } from './types.js';
 
 // Valid bridge event types for runtime validation
@@ -77,6 +80,7 @@ function generateRequestId(): string {
 
 export class HarnessClient extends EventEmitter {
   private readonly bus: BusClient;
+  private readonly rpcClient: RpcClient;
   private sessionKey: string | null = null;
   private activeRuns = new Set<string>();
   private connectionState: ConnectionState = 'disconnected';
@@ -85,10 +89,6 @@ export class HarnessClient extends EventEmitter {
   private reconnectDelay: number;
   private requestTimeout: number;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private pendingRequests = new Map<
-    string,
-    { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }
-  >();
 
   get connected(): boolean {
     return this.connectionState === 'connected';
@@ -100,6 +100,13 @@ export class HarnessClient extends EventEmitter {
     this.maxReconnectAttempts = options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
     this.reconnectDelay = options.reconnectDelay ?? DEFAULT_RECONNECT_DELAY;
     this.requestTimeout = options.requestTimeout ?? DEFAULT_REQUEST_TIMEOUT;
+    this.rpcClient = new RpcClient((request) => {
+      if (this.connectionState !== 'connected') {
+        return false;
+      }
+      this.bus.publish(BRIDGE_COMMAND_CHANNEL, request);
+      return true;
+    }, this.requestTimeout);
 
     this.bus.on('event', (payload, channel) => {
       this.handleBusEvent(payload, channel);
@@ -181,7 +188,7 @@ export class HarnessClient extends EventEmitter {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    this.rejectPendingRequests(new Error('Connection closed'));
+    this.rpc.rejectAll(new Error('Connection closed'));
     this.connectionState = 'disconnected';
     this.sessionKey = null;
     this.activeRuns.clear();
@@ -195,6 +202,10 @@ export class HarnessClient extends EventEmitter {
 
   getSessionKey(): string | null {
     return this.sessionKey;
+  }
+
+  get rpc(): RpcClient {
+    return this.rpcClient;
   }
 
   // =========================================================================
@@ -225,242 +236,22 @@ export class HarnessClient extends EventEmitter {
     this.bus.unsubscribe(runChannel(requestId));
   }
 
-  // =========================================================================
-  // Auth Commands
-  // =========================================================================
-
-  async authStart(
-    deviceName?: string
-  ): Promise<{ success: boolean; authUrl?: string; stateToken?: string; error?: string }> {
-    return this.sendAuthCommand('auth_start', { device: deviceName });
-  }
-
-  async authPoll(stateToken: string): Promise<{
-    success: boolean;
-    pending?: boolean;
-    sessionToken?: string;
-    userId?: string;
-    email?: string;
-    name?: string | null;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('auth_poll', { stateToken });
-  }
-
-  async authVerify(sessionToken: string): Promise<{
-    success: boolean;
-    valid?: boolean;
-    user?: { id: string; email: string; name: string | null };
-    error?: string;
-  }> {
-    return this.sendAuthCommand('auth_verify', { sessionToken });
-  }
-
-  async authLogout(sessionToken: string): Promise<{ success: boolean }> {
-    return this.sendAuthCommand('auth_logout', { sessionToken });
-  }
-
-  // =========================================================================
-  // Provider Commands
-  // =========================================================================
-
-  async providersList(sessionToken?: string): Promise<{
-    success: boolean;
-    providers?: Array<{ provider: string; configured: boolean; updatedAt?: number }>;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('providers_list', sessionToken ? { sessionToken } : {});
-  }
-
-  async providersSave(
-    provider: string,
-    apiKey: string,
-    sessionToken?: string
-  ): Promise<{ success: boolean; error?: string }> {
-    const data: Record<string, string> = { provider, apiKey };
-    if (sessionToken) data.sessionToken = sessionToken;
-    return this.sendAuthCommand('providers_save', data);
-  }
-
-  async providersDelete(
-    provider: string,
-    sessionToken?: string
-  ): Promise<{ success: boolean; error?: string }> {
-    const data: Record<string, string> = { provider };
-    if (sessionToken) data.sessionToken = sessionToken;
-    return this.sendAuthCommand('providers_delete', data);
-  }
-
-  async providersTest(
-    provider: string,
-    sessionToken?: string
-  ): Promise<{ success: boolean; valid?: boolean; error?: string }> {
-    const data: Record<string, string> = { provider };
-    if (sessionToken) data.sessionToken = sessionToken;
-    return this.sendAuthCommand('providers_test', data);
-  }
-
-  // =========================================================================
-  // Session Commands
-  // =========================================================================
-
-  async sessionFork(): Promise<{
-    success: boolean;
-    newSessionKey?: string;
-    sourceSessionKey?: string;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('session_fork', {});
-  }
-
-  async sessionClose(): Promise<{
-    success: boolean;
-    sessionKey?: string;
-    message?: string;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('session_close', {});
-  }
-
-  async listSessions(
-    options: { workingDir?: string; status?: string | string[]; limit?: number } = {}
-  ): Promise<{
-    success: boolean;
-    sessions: Array<{
-      sessionKey: string;
-      clientType: string;
-      createdAt: number;
-      lastAccessedAt: number;
-      workingDir: string | null;
-      status: string;
-      lastUserMessagePreview?: string | null;
-    }>;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('list_sessions', options);
-  }
-
-  async deleteSession(sessionKey: string): Promise<{
-    success: boolean;
-    deleted: boolean;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('session_delete', { sessionKey });
-  }
-
-  async usageSummary(
-    options: { status?: string | string[]; limit?: number } = {}
-  ): Promise<{
-    success: boolean;
-    usage?: Array<{ provider: string; model: string; totalTokens: number; sessionCount: number }>;
-    sessions?: Array<{
-      sessionKey: string;
-      clientType: string;
-      createdAt: number;
-      lastAccessedAt: number;
-      workingDir: string | null;
-      status: string;
-      metadataJson: string | null;
-      metadata?: Record<string, unknown>;
-      lastUserMessagePreview?: string | null;
-      goal?: string | null;
-      currentWorkItemId?: string | null;
-      currentObjective?: string | null;
-    }>;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('usage_summary', options);
-  }
-
-  async setDangerousMode(enabled: boolean): Promise<{
-    success: boolean;
-    enabled?: boolean;
-    sessionKey?: string;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('set_dangerous_mode', { enabled });
-  }
-
-  // =========================================================================
-  // Async Session Commands
-  // =========================================================================
-
-  async asyncStart(
-    goal: string,
-    workingDir?: string
-  ): Promise<{ success: boolean; sessionKey?: string; requestId?: string; goal?: string; error?: string }> {
-    const data: Record<string, unknown> = { goal };
-    if (workingDir) data.working_dir = workingDir;
-    return this.sendAuthCommand('async_start', data);
-  }
-
-  async asyncCancel(): Promise<{ success: boolean; error?: string }> {
-    return this.sendAuthCommand('async_cancel', {});
-  }
-
-  async asyncStatus(): Promise<{
-    success: boolean;
-    running?: boolean;
-    requestId?: string;
-    goal?: string;
-    startedAt?: number;
-    elapsedMs?: number;
-    error?: string;
-  }> {
-    return this.sendAuthCommand('async_status', {});
-  }
-
   async request<T extends Record<string, unknown>>(
-    type: BridgeCommandType,
+    method: ProcedureMethod,
     data: Record<string, unknown> = {}
   ): Promise<T> {
-    return this.sendAuthCommand<T>(type, data);
+    return this.rpc.call(method, data as never) as Promise<T>;
   }
 
   // =========================================================================
   // Private Methods
   // =========================================================================
 
-  private sendAuthCommand<T extends Record<string, unknown>>(
-    type: BridgeCommandType,
-    data: Record<string, unknown>
-  ): Promise<T> {
-    return new Promise((resolve, reject) => {
-      if (this.connectionState !== 'connected') {
-        reject(new Error('Not connected to bridge'));
-        return;
-      }
-
-      const requestId = generateRequestId();
-      let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-      const handler = (event: BridgeEvent) => {
-        if (event.type === 'response') {
-          const responseData = event.data as ResponseData;
-          const metadata = responseData?.metadata as { kind?: string; payload?: unknown } | undefined;
-          if (metadata?.kind === type) {
-            if (timeoutId) clearTimeout(timeoutId);
-            this.off('event', handler);
-            this.pendingRequests.delete(requestId);
-            resolve((metadata.payload ?? { success: false }) as T);
-          }
-        }
-      };
-
-      this.pendingRequests.set(requestId, { resolve: resolve as (value: unknown) => void, reject });
-      this.on('event', handler);
-
-      timeoutId = setTimeout(() => {
-        this.off('event', handler);
-        this.pendingRequests.delete(requestId);
-        reject(new Error('Request timeout'));
-      }, this.requestTimeout);
-
-      this.send({ type, data });
-    });
-  }
-
   private handleBusEvent(payload: unknown, channel: string): void {
+    if (this.rpc.handleResponse(payload)) {
+      return;
+    }
+
     const event = validateBridgeEvent(payload);
     if (!event) {
       this.emit('error', { message: 'Malformed event from bridge' });
@@ -498,7 +289,7 @@ export class HarnessClient extends EventEmitter {
 
     this.sessionKey = null;
     this.activeRuns.clear();
-    this.rejectPendingRequests(new Error('Connection lost'));
+    this.rpc.rejectAll(new Error('Connection lost'));
     this.connectionState = 'reconnecting';
     this.emit('connection_state', this.connectionState);
     this.emit('close');
@@ -527,10 +318,4 @@ export class HarnessClient extends EventEmitter {
     }, delay);
   }
 
-  private rejectPendingRequests(error: Error): void {
-    this.pendingRequests.forEach(({ reject }) => {
-      reject(error);
-    });
-    this.pendingRequests.clear();
-  }
 }

@@ -375,7 +375,7 @@ var TelegramConnector = /** @class */ (function () {
                             },
                         });
                         if (!this.dangerousMode) return [3 /*break*/, 2];
-                        return [4 /*yield*/, this.client.setDangerousMode(true)];
+                        return [4 /*yield*/, this.client.request('dangerous_mode.set', { enabled: true })];
                     case 1:
                         _a.sent();
                         _a.label = 2;

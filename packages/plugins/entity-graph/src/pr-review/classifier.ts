@@ -28,8 +28,16 @@ export async function classifyChanges(
     switch (fc.status) {
       case 'added': {
         const entities = await entitiesInFile(sql, fc.filepath)
-        for (const e of entities) {
-          if (e.kind === 'file') continue
+        const nonFile = entities.filter(e => e.kind !== 'file')
+        if (nonFile.length === 0) {
+          results.push({
+            entity: syntheticFileEntity(fc.filepath),
+            changeKind: 'entity_added',
+            fileStatus: 'added',
+          })
+          break
+        }
+        for (const e of nonFile) {
           results.push({ entity: e, changeKind: 'entity_added', fileStatus: 'added' })
         }
         break
@@ -37,8 +45,16 @@ export async function classifyChanges(
 
       case 'deleted': {
         const entities = await entitiesInFile(sql, fc.filepath)
-        for (const e of entities) {
-          if (e.kind === 'file') continue
+        const nonFile = entities.filter(e => e.kind !== 'file')
+        if (nonFile.length === 0) {
+          results.push({
+            entity: syntheticFileEntity(fc.filepath),
+            changeKind: 'entity_deleted',
+            fileStatus: 'deleted',
+          })
+          break
+        }
+        for (const e of nonFile) {
           results.push({ entity: e, changeKind: 'entity_deleted', fileStatus: 'deleted' })
         }
         break
@@ -48,14 +64,29 @@ export async function classifyChanges(
         // Old path entities deleted, new path entities added
         if (fc.oldFilepath) {
           const oldEntities = await entitiesInFile(sql, fc.oldFilepath)
-          for (const e of oldEntities) {
-            if (e.kind === 'file') continue
+          const oldNonFile = oldEntities.filter(e => e.kind !== 'file')
+          if (oldNonFile.length === 0) {
+            results.push({
+              entity: syntheticFileEntity(fc.oldFilepath),
+              changeKind: 'entity_deleted',
+              fileStatus: 'renamed',
+            })
+          }
+          for (const e of oldNonFile) {
             results.push({ entity: e, changeKind: 'entity_deleted', fileStatus: 'renamed' })
           }
         }
         const newEntities = await entitiesInFile(sql, fc.filepath)
-        for (const e of newEntities) {
-          if (e.kind === 'file') continue
+        const newNonFile = newEntities.filter(e => e.kind !== 'file')
+        if (newNonFile.length === 0) {
+          results.push({
+            entity: syntheticFileEntity(fc.filepath),
+            changeKind: 'entity_added',
+            fileStatus: 'renamed',
+          })
+          break
+        }
+        for (const e of newNonFile) {
           results.push({ entity: e, changeKind: 'entity_added', fileStatus: 'renamed' })
         }
         break
@@ -80,6 +111,20 @@ export async function classifyChanges(
   }
 
   return results
+}
+
+function syntheticFileEntity(filepath: string): Entity {
+  return {
+    id: `file:${filepath}:${filepath}`,
+    kind: 'file',
+    name: filepath,
+    filepath,
+    startLine: null,
+    endLine: null,
+    exported: false,
+    async: false,
+    rawText: null,
+  }
 }
 
 /**

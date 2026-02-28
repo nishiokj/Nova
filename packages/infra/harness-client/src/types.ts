@@ -18,58 +18,8 @@ export type BridgeCommandType =
   | 'init'
   | 'send_text'
   | 'send_media'
-  | 'voice_start'
-  | 'voice_stop'
-  | 'get_config'
-  | 'get_models'
-  | 'models_delete'
-  | 'get_status'
-  | 'skills_list'
-  | 'skills_get'
-  | 'skills_create'
-  | 'skills_update'
-  | 'skills_delete'
-  | 'skills_enable'
-  | 'skills_disable'
-  | 'skills_run'
-  | 'hooks_list'
-  | 'hooks_get'
-  | 'hooks_create'
-  | 'hooks_update'
-  | 'hooks_delete'
-  | 'hooks_enable'
-  | 'hooks_disable'
   | 'user_prompt_response'
-  | 'permission_response'
-  | 'auth_start'
-  | 'auth_poll'
-  | 'auth_verify'
-  | 'auth_logout'
-  | 'providers_list'
-  | 'providers_save'
-  | 'providers_delete'
-  | 'providers_test'
-  | 'session_fork'
-  | 'session_close'
-  | 'session_delete'
-  | 'list_sessions'
-  | 'usage_summary'
-  | 'compact_context'
-  | 'set_model'
-  | 'get_model'
-  | 'set_dangerous_mode'
-  | 'async_start'
-  | 'async_cancel'
-  | 'async_status'
-  | 'control_plane_dispatch'
-  | 'control_plane_stop'
-  | 'control_plane_fork'
-  | 'control_plane_permissions_get'
-  | 'control_plane_permissions_update'
-  | 'control_plane_memory_info'
-  | 'control_plane_model_get'
-  | 'control_plane_model_set'
-  | 'shutdown';
+  | 'permission_response';
 
 export interface InitCommandData extends CommandDataBase {
   session_key?: string;
@@ -92,33 +42,6 @@ export interface SendMediaCommandData extends CommandDataBase {
   attachments: Attachment[];
 }
 
-export interface ModelsDeleteCommandData extends CommandDataBase {
-  model?: string;
-  model_id?: string;
-}
-
-export interface SkillIdCommandData extends CommandDataBase {
-  id: string;
-}
-
-export interface SkillsCreateCommandData extends CommandDataBase {
-  skill: Record<string, unknown>;
-}
-
-export interface SkillsUpdateCommandData extends CommandDataBase {
-  id: string;
-  updates: Record<string, unknown>;
-}
-
-export interface HooksCreateCommandData extends CommandDataBase {
-  hook: Record<string, unknown>;
-}
-
-export interface HooksUpdateCommandData extends CommandDataBase {
-  id: string;
-  updates: Record<string, unknown>;
-}
-
 export interface UserPromptResponseCommandData extends CommandDataBase {
   request_id: string;
   answer: string;
@@ -135,178 +58,12 @@ export interface PermissionResponseCommandData extends CommandDataBase {
   allowed?: boolean;
 }
 
-export interface AuthStartCommandData extends CommandDataBase {
-  device?: string;
-}
-
-export interface AuthPollCommandData extends CommandDataBase {
-  stateToken: string;
-}
-
-export interface AuthVerifyCommandData extends CommandDataBase {
-  sessionToken: string;
-}
-
-export interface AuthLogoutCommandData extends CommandDataBase {
-  sessionToken: string;
-}
-
-export interface ProvidersCommandData extends CommandDataBase {
-  sessionToken?: string;
-  provider?: string;
-  apiKey?: string;
-}
-
-export interface ListSessionsCommandData extends CommandDataBase {
-  workingDir?: string;
-  status?: string | string[];
-  limit?: number;
-}
-
-export interface SessionDeleteCommandData extends CommandDataBase {
-  sessionKey?: string;
-  session_key?: string;
-}
-
-export interface UsageSummaryCommandData extends CommandDataBase {
-  status?: string | string[];
-  limit?: number;
-}
-
-export interface SetModelCommandData extends CommandDataBase {
-  agent_type?: string;
-  provider?: string;
-  model?: string;
-  reasoning?: string;
-  reset?: boolean;
-}
-
-export interface GetModelCommandData extends CommandDataBase {
-  agent_type?: string;
-}
-
-export interface PermissionSetDangerousModeData extends CommandDataBase {
-  enabled: boolean;
-}
-
-export interface AsyncStartCommandData extends CommandDataBase {
-  goal: string;
-  working_dir?: string;
-  session_key?: string;
-}
-
-export interface AsyncSessionKeyCommandData extends CommandDataBase {
-  session_key?: string;
-}
-
-export interface ControlPlaneDispatchCommandData extends CommandDataBase {
-  session_key: string;
-  message: string;
-  context?: string;
-  metadata?: Record<string, unknown>;
-  request_id?: string;
-  working_dir?: string;
-}
-
-export interface ControlPlaneStopCommandData extends CommandDataBase {
-  session_key: string;
-  note?: string;
-  action?: 'cancel';
-  timeout_ms?: number;
-  working_dir?: string;
-}
-
-export interface ControlPlaneForkCommandData extends CommandDataBase {
-  source_session_key: string;
-  target_session_key?: string;
-}
-
-export interface ControlPlanePermissionsGetCommandData extends CommandDataBase {
-  session_key: string;
-  working_dir?: string;
-}
-
-export interface ControlPlanePermissionsUpdateCommandData extends CommandDataBase {
-  session_key: string;
-  working_dir?: string;
-  update: {
-    dangerousMode?: boolean;
-    allowOutsideRoot?: boolean;
-    webSearchEnabled?: boolean;
-    writesNoDeletes?: boolean;
-    restrictWriteToPaths?: string[] | null;
-    reloadPersistentConfig?: boolean;
-  };
-}
-
-export interface ControlPlaneModelGetCommandData extends CommandDataBase {
-  session_key: string;
-}
-
-export interface ControlPlaneModelSetCommandData extends CommandDataBase {
-  session_key: string;
-  agent_type?: string;
-  provider: string;
-  model: string;
-  reasoning?: string;
-}
-
 export interface BridgeCommandDataMap {
   init: InitCommandData;
   send_text: SendTextCommandData;
   send_media: SendMediaCommandData;
-  voice_start: NoData;
-  voice_stop: NoData;
-  get_config: NoData;
-  get_models: NoData;
-  models_delete: ModelsDeleteCommandData;
-  get_status: NoData;
-  skills_list: NoData;
-  skills_get: SkillIdCommandData;
-  skills_create: SkillsCreateCommandData;
-  skills_update: SkillsUpdateCommandData;
-  skills_delete: SkillIdCommandData;
-  skills_enable: SkillIdCommandData;
-  skills_disable: SkillIdCommandData;
-  skills_run: NoData;
-  hooks_list: NoData;
-  hooks_get: SkillIdCommandData;
-  hooks_create: HooksCreateCommandData;
-  hooks_update: HooksUpdateCommandData;
-  hooks_delete: SkillIdCommandData;
-  hooks_enable: SkillIdCommandData;
-  hooks_disable: SkillIdCommandData;
   user_prompt_response: UserPromptResponseCommandData;
   permission_response: PermissionResponseCommandData;
-  auth_start: AuthStartCommandData;
-  auth_poll: AuthPollCommandData;
-  auth_verify: AuthVerifyCommandData;
-  auth_logout: AuthLogoutCommandData;
-  providers_list: ProvidersCommandData;
-  providers_save: ProvidersCommandData;
-  providers_delete: ProvidersCommandData;
-  providers_test: ProvidersCommandData;
-  session_fork: NoData;
-  session_close: NoData;
-  session_delete: SessionDeleteCommandData;
-  list_sessions: ListSessionsCommandData;
-  usage_summary: UsageSummaryCommandData;
-  compact_context: NoData;
-  set_model: SetModelCommandData;
-  get_model: GetModelCommandData;
-  set_dangerous_mode: PermissionSetDangerousModeData;
-  async_start: AsyncStartCommandData;
-  async_cancel: AsyncSessionKeyCommandData;
-  async_status: AsyncSessionKeyCommandData;
-  control_plane_dispatch: ControlPlaneDispatchCommandData;
-  control_plane_stop: ControlPlaneStopCommandData;
-  control_plane_fork: ControlPlaneForkCommandData;
-  control_plane_permissions_get: ControlPlanePermissionsGetCommandData;
-  control_plane_permissions_update: ControlPlanePermissionsUpdateCommandData;
-  control_plane_memory_info: NoData;
-  control_plane_model_get: ControlPlaneModelGetCommandData;
-  control_plane_model_set: ControlPlaneModelSetCommandData;
-  shutdown: NoData;
 }
 
 export type BridgeEventType =

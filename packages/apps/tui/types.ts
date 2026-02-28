@@ -1,6 +1,13 @@
 export type BridgeCommandType =
   | "init"
   | "send_text"
+  | "send_media"
+  | "user_prompt_response"
+  | "permission_response";
+
+// TUI-local command surface. RPC-mapped commands never hit the bridge as `type` payloads.
+export type AppCommandType =
+  | BridgeCommandType
   | "voice_start"
   | "voice_stop"
   | "get_config"
@@ -22,8 +29,6 @@ export type BridgeCommandType =
   | "hooks_delete"
   | "hooks_enable"
   | "hooks_disable"
-  | "user_prompt_response"
-  | "permission_response"
   | "auth_start"
   | "auth_poll"
   | "auth_verify"

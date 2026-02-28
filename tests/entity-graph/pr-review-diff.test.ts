@@ -181,4 +181,73 @@ describe('parseDiff', () => {
   it('returns empty array for empty input', () => {
     expect(parseDiff('')).toEqual([])
   })
+
+  it('parses metadata-only diff with no hunks', () => {
+    const diff = [
+      'diff --git a/src/config.ts b/src/config.ts',
+      'index abc1234..def5678 100644',
+      'old mode 100644',
+      'new mode 100755',
+      '--- a/src/config.ts',
+      '+++ b/src/config.ts',
+    ].join('\n')
+
+    const changes = parseDiff(diff)
+    expect(changes).toHaveLength(1)
+    expect(changes[0].filepath).toBe('src/config.ts')
+    expect(changes[0].status).toBe('modified')
+    expect(changes[0].hunks).toEqual([])
+  })
+
+  it('handles CRLF diff text', () => {
+    const diff = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      'index abc..def 100644',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -1,1 +1,2 @@',
+      ' line1',
+      '+line2',
+    ].join('\r\n')
+
+    const changes = parseDiff(diff)
+    expect(changes).toHaveLength(1)
+    expect(changes[0].filepath).toBe('src/a.ts')
+    expect(changes[0].hunks).toHaveLength(1)
+    expect(changes[0].hunks[0].newCount).toBe(2)
+  })
+
+  it('parses rename metadata even when no hunk is present', () => {
+    const diff = [
+      'diff --git a/src/old.ts b/src/new.ts',
+      'similarity index 100%',
+      'rename from src/old.ts',
+      'rename to src/new.ts',
+    ].join('\n')
+
+    const changes = parseDiff(diff)
+    expect(changes).toHaveLength(1)
+    expect(changes[0].status).toBe('renamed')
+    expect(changes[0].oldFilepath).toBe('src/old.ts')
+    expect(changes[0].filepath).toBe('src/new.ts')
+    expect(changes[0].hunks).toEqual([])
+  })
+
+  it('parses paths containing spaces', () => {
+    const diff = [
+      'diff --git a/src/my file.ts b/src/my file.ts',
+      'index abc..def 100644',
+      '--- a/src/my file.ts',
+      '+++ b/src/my file.ts',
+      '@@ -1,1 +1,1 @@',
+      '-export const x = 1',
+      '+export const x = 2',
+    ].join('\n')
+
+    const changes = parseDiff(diff)
+    expect(changes).toHaveLength(1)
+    expect(changes[0].filepath).toBe('src/my file.ts')
+    expect(changes[0].status).toBe('modified')
+    expect(changes[0].hunks).toHaveLength(1)
+  })
 })

@@ -20,6 +20,7 @@ import {
   type BridgeEvent,
   type MessageEntry,
   type Role,
+  type AppCommandType,
   type BridgeCommandType,
   type ProviderKeyRequiredData,
   type ModelChangedData,
@@ -132,6 +133,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const STREAMING_COMMAND_TYPES: ReadonlySet<BridgeCommandType> = new Set<BridgeCommandType>([
+  "init",
+  "send_text",
+  "send_media",
+  "user_prompt_response",
+  "permission_response",
+]);
+
+function isStreamingBridgeCommandType(commandType: AppCommandType): commandType is BridgeCommandType {
+  return STREAMING_COMMAND_TYPES.has(commandType as BridgeCommandType);
+}
+
 function asNumber(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -178,7 +191,7 @@ async function fetchUsageData(client: BridgeClient): Promise<{
   dayStats: UsageDayStats[];
   providerStats: UsageProviderStats[];
 }> {
-  const response = await client.usageSummary({
+  const response = await client.rpc.call("usage.summary", {
     status: ["active", "review", "completed", "failed", "cancelled", "inactive", "expired"],
     limit: 1000,
   });
@@ -583,7 +596,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         // Set dangerous mode for this session if requested
         // Each session has its own dangerous mode state - does not affect other TUIs
         if (options.dangerousMode) {
-          void client.setDangerousMode(true).catch(() => {
+          void client.rpc.call("dangerous_mode.set", { enabled: true }).catch(() => {
             // Silently ignore - do NOT use console.error as it breaks Ink rendering
           });
         }
@@ -600,20 +613,17 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       // Persist all model selections (standard, explorer, coding) on cleanup
       for (const [agentType, selection] of snapshot.modelSelections) {
         if (selection?.model && selection?.provider) {
-          client.send({
-            type: "set_model",
-            data: {
+          void client.rpc.call("model.set", {
               agent_type: agentType,
               provider: selection.provider,
               model: selection.model,
               ...(selection.reasoning ? { reasoning: selection.reasoning } : {}),
-            },
           });
         }
       }
       // Signal session close to harness (don't await - best effort)
       // This marks the session as inactive so it shows correctly in /sessions
-      client.sessionClose().catch(() => {
+      client.rpc.call("session.close", {}).catch(() => {
         // Ignore errors during cleanup - connection may already be closed
       });
       // Small delay to allow the close message to be sent
@@ -769,7 +779,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       if (!client) {
         return;
       }
-      const result = await client.providersList();
+      const result = await client.rpc.call("providers.list", {});
       if (result.success && result.providers) {
         const configuredProviders = result.providers.filter((p) => p.configured);
         if (configuredProviders.length === 0) {
@@ -1007,6 +1017,192 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     store.setContextWindowSize(inputTokens, maxWindowSize);
   };
 
+  const applyModelSelectionPayload = (payload: Record<string, unknown>) => {
+    const agentType = typeof payload.agent_type === "string" ? payload.agent_type : "standard";
+    const selectedModelObj = isRecord(payload.selected_model) ? payload.selected_model : null;
+    const selectedModel =
+      (typeof selectedModelObj?.model === "string" ? selectedModelObj.model : null)
+      ?? (typeof payload.selectedModel === "string" ? payload.selectedModel : null)
+      ?? (typeof payload.model === "string" ? payload.model : null);
+    const selectedProvider =
+      (typeof selectedModelObj?.provider === "string" ? selectedModelObj.provider : null)
+      ?? (typeof payload.selectedProvider === "string" ? payload.selectedProvider : null)
+      ?? (typeof payload.provider === "string" ? payload.provider : null);
+    const reasoning =
+      (typeof selectedModelObj?.reasoning === "string" ? selectedModelObj.reasoning : null)
+      ?? (typeof payload.reasoning === "string" ? payload.reasoning : null);
+
+    store.batch(() => {
+      if (selectedModel && selectedProvider) {
+        store.setModelSelection(agentType, {
+          model: selectedModel,
+          provider: selectedProvider,
+          reasoning: reasoning ?? undefined,
+        });
+      } else {
+        store.setModelSelection(agentType, null);
+      }
+    });
+  };
+
+  const applyRpcCommandResult = (commandType: AppCommandType, payload: Record<string, unknown>) => {
+    switch (commandType) {
+      case "get_config": {
+        store.addMessage("system", JSON.stringify(payload, null, 2));
+        return;
+      }
+      case "get_status": {
+        const state = typeof payload.state === "string" ? payload.state : "unknown";
+        const message = typeof payload.message === "string" ? payload.message : "";
+        store.addMessage("system", `Status: ${state}${message ? ` - ${message}` : ""}`);
+        return;
+      }
+      case "get_models": {
+        const models = Array.isArray(payload.models)
+          ? (payload.models as Array<{ id: string; name: string; provider?: string; reasoning?: string[] }>)
+          : [];
+        const available = Array.isArray(payload.available)
+          ? (payload.available as Array<{ id: string; name: string; provider?: string; reasoning?: string[] }>)
+          : models;
+        if (pendingModelsModeRef.current) {
+          pendingModelsModeRef.current = false;
+          store.setModelsList(models, available);
+        } else {
+          store.updateModelsList(models, available);
+        }
+        return;
+      }
+      case "models_delete": {
+        if (payload.success === false) {
+          store.addMessage("system", `Model delete failed: ${String(payload.error ?? "unknown error")}`);
+          return;
+        }
+        store.addMessage("system", `Model hidden: ${String(payload.model ?? "unknown")}`);
+        sendCommand("get_models");
+        sendCommand("get_model");
+        return;
+      }
+      case "skills_list": {
+        store.batch(() => {
+          handleSkillsPayload(payload, "");
+          if (payload.success === false && typeof payload.error === "string") {
+            store.addMessage("system", payload.error);
+          }
+          store.clearProgress();
+          store.setState("idle");
+        });
+        return;
+      }
+      case "hooks_list": {
+        store.batch(() => {
+          handleHooksPayload(payload, "");
+          if (payload.success === false && typeof payload.error === "string") {
+            store.addMessage("system", payload.error);
+          }
+          store.clearProgress();
+          store.setState("idle");
+        });
+        return;
+      }
+      case "set_model": {
+        if (payload.success === false) {
+          if (typeof payload.error === "string" && payload.error.length > 0) {
+            store.addMessage("system", payload.error);
+          }
+          sendCommand("get_model");
+          return;
+        }
+        applyModelSelectionPayload(payload);
+        return;
+      }
+      case "get_model": {
+        if (payload.success === false) {
+          if (typeof payload.error === "string" && payload.error.length > 0) {
+            store.addMessage("system", payload.error);
+          }
+          return;
+        }
+        const modelSelections = isRecord(payload.model_selections) ? payload.model_selections : null;
+        if (modelSelections) {
+          store.batch(() => {
+            const agentTypes = ["standard", "explorer", "coding"];
+            for (const agentType of agentTypes) {
+              const selection = isRecord(modelSelections[agentType]) ? modelSelections[agentType] : null;
+              if (typeof selection?.model === "string" && typeof selection?.provider === "string") {
+                store.setModelSelection(agentType, {
+                  model: selection.model,
+                  provider: selection.provider,
+                  reasoning: typeof selection.reasoning === "string" ? selection.reasoning : undefined,
+                });
+              } else {
+                store.setModelSelection(agentType, null);
+              }
+            }
+          });
+          return;
+        }
+        applyModelSelectionPayload(payload);
+        return;
+      }
+      case "compact_context": {
+        store.batch(() => {
+          if (payload.success) {
+            const itemsRemoved = typeof payload.itemsRemoved === "number" ? payload.itemsRemoved : 0;
+            const bytesRecovered = typeof payload.bytesRecovered === "number" ? payload.bytesRecovered : 0;
+            store.addMessage("system", `Context compacted: ${itemsRemoved} items removed, ${bytesRecovered} bytes recovered.`);
+          } else {
+            const errorMsg = payload.error ?? "Unknown error";
+            store.addMessage("system", `Context compaction failed: ${errorMsg}`);
+          }
+          store.clearProgress();
+          store.setState("idle");
+        });
+        return;
+      }
+      case "async_start": {
+        if (payload.success) {
+          store.addMessage("system", `Async session active. Watcher oversight enabled.\nRequest: ${payload.requestId ?? "unknown"}`);
+        } else {
+          store.batch(() => {
+            store.addMessage("system", `Failed to start async session: ${payload.error ?? "unknown error"}`);
+            store.setState("idle");
+          });
+        }
+        return;
+      }
+      case "async_cancel": {
+        if (payload.success === false) {
+          store.addMessage("system", `Failed to cancel async session: ${payload.error ?? "unknown error"}`);
+          return;
+        }
+        const cancelGoal = typeof payload.goal === "string" ? payload.goal : "";
+        store.addMessage("system", `Async session cancelled.${cancelGoal ? `\nGoal was: ${cancelGoal}` : ""}`);
+        return;
+      }
+      case "async_status": {
+        if (payload.success === false) {
+          store.addMessage("system", `Failed to fetch async status: ${payload.error ?? "unknown error"}`);
+          return;
+        }
+        if (payload.running) {
+          const elapsed = typeof payload.elapsedMs === "number" ? Math.round(payload.elapsedMs / 1000) : null;
+          store.addMessage(
+            "system",
+            `Async session running\n` +
+            `  Goal: ${payload.goal ?? "unknown"}\n` +
+            `  Request: ${payload.requestId ?? "unknown"}` +
+            (elapsed !== null ? `\n  Elapsed: ${elapsed}s` : "")
+          );
+        } else {
+          store.addMessage("system", "No async session is currently running.");
+        }
+        return;
+      }
+      default:
+        return;
+    }
+  };
+
   const handleResponse = (data?: ResponseData) => {
     if (!data) {
       return;
@@ -1021,7 +1217,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     // events. The first correctly uses streamingText; the second (after
     // finalizeStreaming clears it) would overwrite with response.content,
     // which may be only the last turn's text in a multi-turn conversation.
-    // Kind-specific responses (models, config, etc.) are stateless and safe to repeat.
+    // Kind-specific side-channel events (watcher/async_complete) are handled separately.
     if (!kind && data.request_id) {
       if (processedResponsesRef.current.has(data.request_id)) {
         return;
@@ -1035,155 +1231,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         : typeof metadata.error === "string"
           ? metadata.error
           : "";
-    if (kind === "config" || kind === "status") {
-      if (content) {
-        store.addMessage("system", content);
-      }
-      return;
-    }
-    if (kind === "models") {
-      const payload = metadata.payload as Array<{ id: string; name: string; provider?: string; reasoning?: string[] }> | undefined;
-      const availableRaw = (metadata as { available?: unknown }).available;
-      const available = Array.isArray(availableRaw)
-        ? (availableRaw as Array<{ id: string; name: string; provider?: string; reasoning?: string[] }>)
-        : undefined;
-      if (payload && Array.isArray(payload)) {
-        if (pendingModelsModeRef.current) {
-          pendingModelsModeRef.current = false;
-          store.setModelsList(payload, available);
-        } else {
-          store.updateModelsList(payload, available);
-        }
-      } else if (content) {
-        store.addMessage("system", content);
-      }
-      return;
-    }
-    if (kind === "set_model") {
-      if (data.success === false) {
-        if (error) {
-          store.addMessage("system", error);
-        }
-        sendCommand("get_model");
-        return;
-      }
-      const payload = metadata.payload as {
-        agent_type?: string | null;
-        selected_model?: { provider?: string; model?: string; reasoning?: string } | null;
-        selectedModel?: string | null;
-        selectedProvider?: string | null;
-        provider?: string | null;
-        model?: string | null;
-        reasoning?: string | null;
-      } | undefined;
-      const agentType = typeof payload?.agent_type === "string" ? payload.agent_type : "standard";
-      const selectedModelObj = payload?.selected_model ?? null;
-      const selectedModel =
-        selectedModelObj?.model ?? payload?.selectedModel ?? payload?.model ?? null;
-      const selectedProvider =
-        selectedModelObj?.provider ?? payload?.selectedProvider ?? payload?.provider ?? null;
-      const reasoning =
-        selectedModelObj?.reasoning ?? (typeof payload?.reasoning === "string" ? payload.reasoning : null);
-      store.batch(() => {
-        if (selectedModel && selectedProvider) {
-          store.setModelSelection(agentType, {
-            model: selectedModel,
-            provider: selectedProvider,
-            reasoning: reasoning ?? undefined,
-          });
-        } else {
-          store.setModelSelection(agentType, null);
-        }
-      });
-      return;
-    }
-    if (kind === "get_model") {
-      if (data.success === false) {
-        if (error) {
-          store.addMessage("system", error);
-        }
-        return;
-      }
-      const payload = metadata.payload as {
-        model_selections?: Record<string, { provider?: string; model?: string; reasoning?: string }>;
-        selectedModel?: string | null;
-        selectedProvider?: string | null;
-        provider?: string | null;
-        model?: string | null;
-        reasoning?: string | null;
-        agent_type?: string | null;
-      } | undefined;
-      const modelSelections = payload?.model_selections;
-      if (modelSelections && typeof modelSelections === "object") {
-        store.batch(() => {
-          const agentTypes = ["standard", "explorer", "coding"];
-          for (const agentType of agentTypes) {
-            const selection = modelSelections[agentType];
-            if (selection?.model && selection?.provider) {
-              store.setModelSelection(agentType, {
-                model: selection.model,
-                provider: selection.provider,
-                reasoning: selection.reasoning ?? undefined,
-              });
-            } else {
-              store.setModelSelection(agentType, null);
-            }
-          }
-        });
-        return;
-      }
-
-      const selectedModel = payload?.selectedModel ?? payload?.model ?? null;
-      const selectedProvider = payload?.selectedProvider ?? payload?.provider ?? null;
-      const reasoning = typeof payload?.reasoning === "string" ? payload.reasoning : null;
-      const agentType = typeof payload?.agent_type === "string" ? payload.agent_type : "standard";
-      store.batch(() => {
-        if (selectedModel && selectedProvider) {
-          store.setModelSelection(agentType, {
-            model: selectedModel,
-            provider: selectedProvider,
-            reasoning: reasoning ?? undefined,
-          });
-        } else {
-          store.setModelSelection(agentType, null);
-        }
-      });
-      return;
-    }
-    if (kind === "skills") {
-      const payload = metadata.payload as Record<string, unknown> | undefined;
-      store.batch(() => {
-        handleSkillsPayload(payload, content);
-        store.clearProgress();
-        store.setState("idle");
-      });
-      return;
-    }
-    if (kind === "hooks") {
-      const payload = metadata.payload as Record<string, unknown> | undefined;
-      store.batch(() => {
-        handleHooksPayload(payload, content);
-        store.clearProgress();
-        store.setState("idle");
-      });
-      return;
-    }
-    if (kind === "compact_context") {
-      const payload = metadata.payload as Record<string, unknown> | undefined;
-      store.batch(() => {
-        if (payload?.success) {
-          const itemsRemoved = payload.itemsRemoved ?? 0;
-          const bytesRecovered = payload.bytesRecovered ?? 0;
-          store.addMessage("system", `Context compacted: ${itemsRemoved} items removed, ${bytesRecovered} bytes recovered.`);
-        } else {
-          const errorMsg = payload?.error ?? "Unknown error";
-          store.addMessage("system", `Context compaction failed: ${errorMsg}`);
-        }
-        store.clearProgress();
-        store.setState("idle");
-      });
-      return;
-    }
     if (typeof kind === "string" && kind.startsWith("watcher_")) {
       const payload = metadata.payload as Record<string, unknown> | undefined;
       store.batch(() => {
@@ -1195,48 +1242,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         store.clearProgress();
         store.setState("idle");
       });
-      return;
-    }
-    if (kind === "async_start") {
-      const payload = metadata.payload as Record<string, unknown> | undefined;
-      if (payload?.success) {
-        store.addMessage("system", `Async session active. Watcher oversight enabled.\nRequest: ${payload?.requestId ?? "unknown"}`);
-      } else {
-        store.batch(() => {
-          store.addMessage("system", `Failed to start async session: ${payload?.error ?? "unknown error"}`);
-          store.setState("idle");
-        });
-      }
-      return;
-    }
-    if (kind === "async_cancel") {
-      const payload = metadata.payload as Record<string, unknown> | undefined;
-      if (payload?.success === false) {
-        store.addMessage("system", `Failed to cancel async session: ${payload?.error ?? "unknown error"}`);
-        return;
-      }
-      const cancelGoal = (payload?.goal as string) ?? "";
-      store.addMessage("system", `Async session cancelled.${cancelGoal ? `\nGoal was: ${cancelGoal}` : ""}`);
-      return;
-    }
-    if (kind === "async_status") {
-      const payload = metadata.payload as Record<string, unknown> | undefined;
-      if (payload?.success === false) {
-        store.addMessage("system", `Failed to fetch async status: ${payload?.error ?? "unknown error"}`);
-        return;
-      }
-      if (payload?.running) {
-        const elapsed = typeof payload.elapsedMs === "number" ? Math.round(payload.elapsedMs / 1000) : null;
-        store.addMessage(
-          "system",
-          `Async session running\n` +
-          `  Goal: ${payload.goal ?? "unknown"}\n` +
-          `  Request: ${payload.requestId ?? "unknown"}` +
-          (elapsed !== null ? `\n  Elapsed: ${elapsed}s` : "")
-        );
-      } else {
-        store.addMessage("system", "No async session is currently running.");
-      }
       return;
     }
     if (kind === "async_complete") {
@@ -1457,17 +1462,143 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     }
   };
 
-  const sendCommand = (type: BridgeCommandType, data?: Record<string, unknown>) => {
+  const sendCommand = (type: AppCommandType, data?: Record<string, unknown>) => {
     const client = clientRef.current;
     if (!client) {
       return;
     }
+
+    const dispatchRpcCommand = (commandType: AppCommandType, commandData?: Record<string, unknown>): boolean => {
+      const rpcData = commandData ?? {};
+
+      const handleRpcError = (err: unknown, label: string) => {
+        const message = err instanceof Error ? err.message : String(err);
+        store.addMessage("system", `${label}: ${message}`);
+      };
+
+      switch (commandType) {
+        case "get_config":
+          void client.rpc.call("config.get", {}).then((result) => {
+            applyRpcCommandResult(commandType, result as Record<string, unknown>);
+          }).catch((err) => {
+            handleRpcError(err, "Failed to fetch config");
+          });
+          return true;
+        case "get_status":
+          void client.rpc.call("status.get", {}).then((result) => {
+            applyRpcCommandResult(commandType, result as Record<string, unknown>);
+          }).catch((err) => {
+            handleRpcError(err, "Failed to fetch status");
+          });
+          return true;
+        case "get_models":
+          void client.rpc.call("models.list", {}).then((result) => {
+            applyRpcCommandResult(commandType, result as Record<string, unknown>);
+          }).catch((err) => {
+            handleRpcError(err, "Failed to fetch models");
+          });
+          return true;
+        case "models_delete":
+          void client.rpc.call("models.delete", rpcData).then((result) => {
+            applyRpcCommandResult(commandType, result as Record<string, unknown>);
+          }).catch((err) => {
+            handleRpcError(err, "Failed to delete model");
+          });
+          return true;
+        case "skills_list":
+          void client.rpc.call("skills.list", {}).then((result) => {
+            applyRpcCommandResult(commandType, result as Record<string, unknown>);
+          }).catch((err) => {
+            handleRpcError(err, "Failed to list skills");
+          });
+          return true;
+        case "hooks_list":
+          void client.rpc.call("hooks.list", {}).then((result) => {
+            applyRpcCommandResult(commandType, result as Record<string, unknown>);
+          }).catch((err) => {
+            handleRpcError(err, "Failed to list hooks");
+          });
+          return true;
+        case "set_model":
+          void client.rpc.call("model.set", rpcData).then((result) => {
+            applyRpcCommandResult(commandType, result as Record<string, unknown>);
+          }).catch((err) => {
+            handleRpcError(err, "Failed to set model");
+          });
+          return true;
+        case "get_model":
+          void client.rpc.call("model.get", rpcData).then((result) => {
+            applyRpcCommandResult(commandType, result as Record<string, unknown>);
+          }).catch((err) => {
+            handleRpcError(err, "Failed to fetch selected model");
+          });
+          return true;
+        case "compact_context":
+          void client.rpc.call("context.compact", {}).then((result) => {
+            applyRpcCommandResult(commandType, result as Record<string, unknown>);
+          }).catch((err) => {
+            handleRpcError(err, "Failed to compact context");
+          });
+          return true;
+        case "async_start":
+          lastRunActivityAtRef.current = Date.now();
+          busyStallReportedRef.current = false;
+          if (typeof rpcData.goal !== "string" || rpcData.goal.trim().length === 0) {
+            store.addMessage("system", "Failed to start async session: goal is required");
+            return true;
+          }
+          void client.rpc.call("async.start", {
+            goal: rpcData.goal,
+            working_dir: typeof rpcData.working_dir === "string" ? rpcData.working_dir : process.cwd(),
+            ...(typeof rpcData.session_key === "string" ? { session_key: rpcData.session_key } : {}),
+          }).then((result) => {
+            applyRpcCommandResult(commandType, result as Record<string, unknown>);
+          }).catch((err) => {
+            handleRpcError(err, "Failed to start async session");
+          });
+          return true;
+        case "async_cancel":
+          void client.rpc.call("async.cancel", rpcData).then((result) => {
+            applyRpcCommandResult(commandType, result as Record<string, unknown>);
+          }).catch((err) => {
+            handleRpcError(err, "Failed to cancel async session");
+          });
+          return true;
+        case "async_status":
+          void client.rpc.call("async.status", {}).then((result) => {
+            applyRpcCommandResult(commandType, result as Record<string, unknown>);
+          }).catch((err) => {
+            handleRpcError(err, "Failed to fetch async status");
+          });
+          return true;
+        case "voice_start":
+          void client.rpc.call("voice.start", {}).catch(() => {
+            store.addMessage("system", "Voice is not yet supported in TypeScript mode");
+          });
+          return true;
+        case "voice_stop":
+          void client.rpc.call("voice.stop", {}).catch(() => {
+            store.addMessage("system", "Voice is not yet supported in TypeScript mode");
+          });
+          return true;
+        default:
+          return false;
+      }
+    };
+
+    if (dispatchRpcCommand(type, data)) {
+      return;
+    }
+    if (!isStreamingBridgeCommandType(type)) {
+      store.addMessage("system", `Unsupported non-streaming command: ${type}`);
+      return;
+    }
+
     // Always include working_dir with requests that trigger agent execution
     // This ensures tools run in the correct directory regardless of where daemon was started
     const needsWorkingDir =
       type === "send_text" ||
-      type === "user_prompt_response" ||
-      type === "async_start";
+      type === "user_prompt_response";
     const payload = needsWorkingDir
       ? { ...data, working_dir: process.cwd() }
       : data;
@@ -1479,7 +1610,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       });
       return;
     }
-    if (type === "send_text" || type === "user_prompt_response" || type === "async_start") {
+    if (type === "send_text" || type === "user_prompt_response") {
       lastRunActivityAtRef.current = Date.now();
       busyStallReportedRef.current = false;
     }
@@ -1499,7 +1630,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     store.addMessage("system", "Forking session...");
 
-    const result = await client.sessionFork();
+    const result = await client.rpc.call("session.fork", {});
 
     if (!result.success) {
       store.addMessage("system", `Fork failed: ${result.error ?? "Unknown error"}`);
@@ -2211,7 +2342,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     store.addMessage("system", "Fetching deletable sessions...");
     try {
-      const result = await client.listSessions({
+      const result = await client.rpc.call("session.list", {
         status: ["active", "review", "completed", "failed", "cancelled", "inactive", "expired"],
         limit: 100,
       });
@@ -2302,7 +2433,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         }
 
         store.addMessage("system", `Deleting session ${target}...`);
-        const result = await client.deleteSession(target);
+        const result = await client.rpc.call("session.delete", { sessionKey: target });
         store.addMessage(
           "system",
           result.success && result.deleted
@@ -2326,7 +2457,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     store.addMessage("system", "Fetching recoverable sessions...");
     try {
-      const result = await client.listSessions({
+      const result = await client.rpc.call("session.list", {
         status: ["active", "inactive"],
         limit: 20,
       });
@@ -3145,6 +3276,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         <ProvidersView
           width={contentWidth}
           bridgeClient={clientRef.current}
+          onModelsChanged={() => sendCommand("get_models")}
           onClose={() => store.setUIMode("chat")}
         />
       ) : isProvidersMode ? (

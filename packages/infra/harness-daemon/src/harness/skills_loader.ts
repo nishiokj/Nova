@@ -6,6 +6,7 @@
 
 import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, rmSync } from 'fs';
 import { resolve, join, dirname } from 'path';
+import type { EffectEventType } from 'orchestrator';
 
 // ============================================
 // SKILL TYPES
@@ -51,8 +52,8 @@ export interface SkillInput {
 // HOOK TYPES
 // ============================================
 
-/** Lifecycle events that can trigger hooks */
-export type HookEvent =
+/** Legacy lifecycle event names preserved for backwards compatibility in input payloads. */
+export type LegacyHookEvent =
   | 'PreToolUse'
   | 'PostToolUse'
   | 'PostGitCommit'
@@ -60,6 +61,61 @@ export type HookEvent =
   | 'Stop'
   | 'SessionStart'
   | 'Notification';
+
+const LEGACY_HOOK_EVENT_TO_EFFECT_EVENT = {
+  PreToolUse: 'pre_tool_use',
+  PostToolUse: 'post_tool_use',
+  PostGitCommit: 'post_git_commit',
+  UserPromptSubmit: 'user_prompt_submit',
+  Stop: 'session_stop',
+  SessionStart: 'session_start',
+  Notification: 'notification',
+} as const satisfies Record<LegacyHookEvent, EffectEventType>;
+
+const EFFECT_EVENT_TYPES = new Set<EffectEventType>([
+  'workitem_created',
+  'turn_completed',
+  'tool_batch_completed',
+  'context_threshold',
+  'artifacts_discovered',
+  'files_modified',
+  'agent_message',
+  'tool_call_completed',
+  'agent_completed',
+  'memory_injected',
+  'git_commit',
+  'observer_agent_stopped',
+  'pre_tool_use',
+  'post_tool_use',
+  'post_git_commit',
+  'user_prompt_submit',
+  'session_start',
+  'session_stop',
+  'notification',
+] as const satisfies readonly EffectEventType[]);
+
+/** Events accepted by hook APIs. Canonical form is unified effect event type. */
+export type HookEvent = EffectEventType | LegacyHookEvent;
+
+export const DEFAULT_HOOK_TRIGGER: EffectEventType = 'post_tool_use';
+
+function isLegacyHookEvent(event: string): event is LegacyHookEvent {
+  return Object.prototype.hasOwnProperty.call(LEGACY_HOOK_EVENT_TO_EFFECT_EVENT, event);
+}
+
+function isEffectEvent(event: string): event is EffectEventType {
+  return EFFECT_EVENT_TYPES.has(event as EffectEventType);
+}
+
+export function normalizeHookTrigger(trigger: string): EffectEventType | null {
+  if (isLegacyHookEvent(trigger)) {
+    return LEGACY_HOOK_EVENT_TO_EFFECT_EVENT[trigger];
+  }
+  if (isEffectEvent(trigger)) {
+    return trigger;
+  }
+  return null;
+}
 
 /** Command hook action */
 export interface CommandHookAction {
@@ -107,6 +163,7 @@ export interface HookDefinitionStub {
  * Full hook definition.
  */
 export interface HookDefinition extends HookDefinitionStub {
+  trigger: EffectEventType;
   matcher?: string;
   timeout_ms?: number;
   fail_open?: boolean;
@@ -343,12 +400,14 @@ export function loadHookDefinitions(hooksDir: string): HookDefinitionStub[] {
       try {
         const content = readFileSync(join(dir, file), 'utf-8');
         const hook = JSON.parse(content);
+        const rawTrigger = typeof hook.trigger === 'string' ? hook.trigger : DEFAULT_HOOK_TRIGGER;
+        const trigger = normalizeHookTrigger(rawTrigger) ?? rawTrigger;
         hooks.push({
           id: hook.id ?? file.replace('.json', ''),
           name: hook.name ?? hook.id ?? file.replace('.json', ''),
           description: hook.description ?? '',
           enabled: hook.enabled ?? true,
-          trigger: hook.trigger ?? 'unknown',
+          trigger,
           priority: hook.priority ?? 0,
         });
       } catch (e) {
@@ -558,12 +617,17 @@ export function getHookDefinition(hooksDir: string, id: string): HookDefinition 
   try {
     const content = readFileSync(hookPath, 'utf-8');
     const hook = JSON.parse(content);
+    const rawTrigger = typeof hook.trigger === 'string' ? hook.trigger : DEFAULT_HOOK_TRIGGER;
+    const trigger = normalizeHookTrigger(rawTrigger);
+    if (!trigger) {
+      return null;
+    }
     return {
       id: hook.id ?? id,
       name: hook.name ?? id,
       description: hook.description ?? '',
       enabled: hook.enabled ?? true,
-      trigger: hook.trigger ?? 'PostToolUse',
+      trigger,
       priority: hook.priority ?? 0,
       matcher: hook.matcher,
       timeout_ms: hook.timeout_ms,
@@ -583,9 +647,13 @@ export function createHook(hooksDir: string, input: HookInput): { id: string; su
   const id = input.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
   const dir = resolve(hooksDir);
   const hookPath = join(dir, `${id}.json`);
+  const trigger = normalizeHookTrigger(input.trigger);
 
   if (existsSync(hookPath)) {
     return { id, success: false, error: `Hook '${id}' already exists` };
+  }
+  if (!trigger) {
+    return { id, success: false, error: `Invalid hook trigger '${input.trigger}'` };
   }
 
   try {
@@ -596,7 +664,7 @@ export function createHook(hooksDir: string, input: HookInput): { id: string; su
       name: input.name,
       description: input.description ?? '',
       enabled: input.enabled ?? true,
-      trigger: input.trigger,
+      trigger,
       matcher: input.matcher,
       priority: input.priority ?? 0,
       timeout_ms: input.timeout_ms,
@@ -625,12 +693,19 @@ export function updateHook(
   }
 
   try {
+    const nextTrigger = updates.trigger
+      ? normalizeHookTrigger(updates.trigger)
+      : existing.trigger;
+    if (!nextTrigger) {
+      return { success: false, error: `Invalid hook trigger '${updates.trigger}'` };
+    }
+
     const hook = {
       id,
       name: updates.name ?? existing.name,
       description: updates.description ?? existing.description,
       enabled: updates.enabled ?? existing.enabled,
-      trigger: updates.trigger ?? existing.trigger,
+      trigger: nextTrigger,
       matcher: updates.matcher ?? existing.matcher,
       priority: updates.priority ?? existing.priority,
       timeout_ms: updates.timeout_ms ?? existing.timeout_ms,

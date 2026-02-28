@@ -351,7 +351,16 @@ async function startAsyncDiagnosis(
     console.log(`[watchdog] Session initialized: ${resolvedSessionKey}`)
 
     // Start async session
-    const result = await client.asyncStart(goal, PROJECT_ROOT)
+    const result = await client.request<{
+      success: boolean
+      sessionKey?: string
+      requestId?: string
+      goal?: string
+      error?: string
+    }>('async.start', {
+      goal,
+      working_dir: PROJECT_ROOT,
+    })
     if (!result.success) {
       console.error(`[watchdog] Failed to start async session: ${result.error}`)
       client.close()

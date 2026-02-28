@@ -220,7 +220,7 @@ export async function entitiesAtLines(
   // Build OR clause for overlapping ranges:
   // entity overlaps range when entity.start_line <= range.end AND entity.end_line >= range.start
   const conditions = ranges
-    .map((_, i) => `(e.start_line <= $${i * 2 + 2} AND e.end_line >= $${i * 2 + 1})`)
+    .map((_, i) => `(e.start_line <= $${i * 2 + 3} AND e.end_line >= $${i * 2 + 2})`)
     .join(' OR ')
 
   const params: (string | number)[] = [filepath]
@@ -247,6 +247,7 @@ export interface BlastRadiusEntry {
   entity: Entity
   depth: number
   via: EdgeType
+  seedId: string
 }
 
 export async function entityBlastRadius(
@@ -256,10 +257,10 @@ export async function entityBlastRadius(
 ): Promise<BlastRadiusEntry[]> {
   if (entityIds.length === 0) return []
 
-  const rows = await sql<Array<EntityRow & { depth: number; via: string }>>`
+  const rows = await sql<Array<EntityRow & { depth: number; via: string; seed_id: string }>>`
     WITH RECURSIVE affected AS (
       SELECT id, kind, name, filepath, start_line, end_line, exported, async, raw_text,
-             0 AS depth, 'seed' AS via
+             0 AS depth, 'seed' AS via, id AS seed_id
       FROM entity_graph.entities
       WHERE id = ANY(${entityIds})
 
@@ -267,7 +268,7 @@ export async function entityBlastRadius(
 
       SELECT DISTINCT e.id, e.kind, e.name, e.filepath, e.start_line, e.end_line,
              e.exported, e.async, e.raw_text,
-             a.depth + 1, edges.edge_type
+             a.depth + 1, edges.edge_type, a.seed_id
       FROM affected a
       JOIN (
         SELECT importer_id AS dependent_id, imported_id AS dependency_id, 'imports' AS edge_type FROM entity_graph.imports
@@ -282,9 +283,15 @@ export async function entityBlastRadius(
       ) edges ON edges.dependency_id = a.id
       JOIN entity_graph.entities e ON e.id = edges.dependent_id
       WHERE a.depth < ${maxDepth}
+    ),
+    ranked AS (
+      SELECT *,
+             ROW_NUMBER() OVER (PARTITION BY id, seed_id ORDER BY depth ASC, via ASC) AS rn
+      FROM affected
+      WHERE via != 'seed'
     )
-    SELECT * FROM affected
-    WHERE via != 'seed'
+    SELECT * FROM ranked
+    WHERE rn = 1
     ORDER BY depth ASC, filepath ASC
   `
 
@@ -292,6 +299,7 @@ export async function entityBlastRadius(
     entity: rowToEntity(row),
     depth: row.depth,
     via: row.via as EdgeType,
+    seedId: row.seed_id,
   }))
 }
 

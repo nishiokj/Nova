@@ -205,7 +205,9 @@ export class TelegramConnector {
         // Close the existing session on the bridge side so context is persisted + cleared
         const oldSession = this.sessions.get(chatId)
         if (oldSession?.initialized) {
-          this.client.send({ type: 'session_close', data: {} })
+          void this.client.request<{ success: boolean }>('session.close', {}).catch(() => {
+            // best-effort close for session rollover
+          })
         }
         this.sessions.delete(chatId)
 
@@ -253,7 +255,16 @@ export class TelegramConnector {
 
         await this.sendMessage(chatId, `🟡 Starting async session...\nGoal: ${goal}`)
 
-        const result = await this.client.asyncStart(goal, this.workingDir)
+        const result = await this.client.request<{
+          success: boolean
+          sessionKey?: string
+          requestId?: string
+          goal?: string
+          error?: string
+        }>('async.start', {
+          goal,
+          working_dir: this.workingDir,
+        })
         if (!result.success) {
           await this.sendMessage(chatId, `⚠️ Failed to start async session: ${result.error ?? 'Unknown error'}`)
           return true
@@ -511,7 +522,7 @@ export class TelegramConnector {
 
     // Enable dangerous mode if configured
     if (this.dangerousMode) {
-      await this.client.setDangerousMode(true)
+      await this.client.request<{ success: boolean; error?: string }>('dangerous_mode.set', { enabled: true })
     }
 
     this.sessions.set(chatId, { initialized: true, sessionKey })

@@ -402,7 +402,7 @@ export async function run(ctx: DerivedRunContext): Promise<DerivedRunResult> {
     logger.info(`Session "${config.sessionKey}" initialized`)
 
     // Auto-approve all tool operations
-    await client.setDangerousMode(true)
+    await client.request<{ success: boolean; error?: string }>('dangerous_mode.set', { enabled: true })
     logger.info('Dangerous mode enabled')
 
     // ── Send setup prompt ─────────────────────────────────────────────────

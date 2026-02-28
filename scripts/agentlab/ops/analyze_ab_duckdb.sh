@@ -13,7 +13,7 @@ JSON=0
 
 usage() {
   cat <<USAGE
-Usage: bash scripts/agentlab/analyze_ab_duckdb.sh --baseline-run-id <run_id> --treatment-run-id <run_id> [options]
+Usage: bash scripts/agentlab/ops/analyze_ab_duckdb.sh --baseline-run-id <run_id> --treatment-run-id <run_id> [options]
 
 Options:
   --baseline-run-id <id>      Baseline run id (required)
