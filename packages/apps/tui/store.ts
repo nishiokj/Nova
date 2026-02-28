@@ -3,7 +3,7 @@ import type { MessageEntry, Role, TUIState, UIMode, WizardType, EventLevel, Even
 import { fuzzyMatch } from "./file_cache.js";
 import { SLASH_COMMANDS } from "./commands.js";
 import { highlightCode, isLanguageSupported } from "./utils/syntax.js";
-import { toGatewayModel } from "types";
+import { GATEWAY_MODEL_PROVIDERS, toGatewayModel } from "types";
 
 /**
  * TUI Store - Central state management for the terminal UI
@@ -42,15 +42,6 @@ import { toGatewayModel } from "types";
 const MAX_STREAMING_BYTES = 5 * 1024 * 1024;  // 5MB - cap streaming text
 
 const GATEWAY_PROVIDER_ID = "vercel-gateway";
-const GATEWAY_MODEL_PROVIDERS = new Set<string>([
-  "anthropic",
-  "openai",
-  "cerebras",
-  "groq",
-  "gemini",
-  "z.ai-coder",
-  "claude",
-]);
 
 function expandGatewayModels(models: ModelEntry[]): ModelEntry[] {
   if (models.length === 0) return models;

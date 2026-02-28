@@ -61,6 +61,7 @@ import { ConfiguredEffectHooksRunner } from './configured_effect_hooks.js';
 import {
   loadHookDefinitions,
   getHookDefinition,
+  normalizeHookTrigger,
   type HookContext as SkillHookContext,
   type HookDefinition,
   type HookResult as LegacyHookResult,
@@ -76,6 +77,7 @@ import type { EntityGraph, EntityGraphConfig } from 'entity-graph';
 import {
   createSessionScopedUnifiedHookRegistry,
   runUnifiedEffectHooksForSession,
+  type EffectEventType,
   type UnifiedHookRegistry,
   type SessionScopedUnifiedHookRegistry,
 } from 'orchestrator';
@@ -635,35 +637,18 @@ export class AgentHarness {
     return runtime;
   }
 
-  private mapConfiguredHookTriggerToEffectEvent(trigger: string): string | null {
-    switch (trigger) {
-      case 'PreToolUse': return 'pre_tool_use';
-      case 'PostToolUse': return 'post_tool_use';
-      case 'PostGitCommit': return 'post_git_commit';
-      case 'UserPromptSubmit': return 'user_prompt_submit';
-      case 'Stop': return 'session_stop';
-      case 'SessionStart': return 'session_start';
-      case 'Notification': return 'notification';
-      default: return null;
-    }
+  private mapConfiguredHookTriggerToEffectEvent(trigger: string): EffectEventType | null {
+    return normalizeHookTrigger(trigger);
   }
-
-  private static readonly HOOK_EVENT_MAP: Record<string, string> = {
-    pre_tool_use: 'PreToolUse',
-    post_tool_use: 'PostToolUse',
-    post_git_commit: 'PostGitCommit',
-    user_prompt_submit: 'UserPromptSubmit',
-    session_start: 'SessionStart',
-    session_stop: 'Stop',
-  };
 
   private buildSkillHookContext(
     eventType: string,
     payload: Record<string, unknown>,
     context: { sessionKey: string; requestId: string; workingDir: string }
   ): SkillHookContext {
+    const normalizedEvent = normalizeHookTrigger(eventType) ?? 'notification';
     const base: SkillHookContext = {
-      event: AgentHarness.HOOK_EVENT_MAP[eventType] ?? 'Notification',
+      event: normalizedEvent,
       sessionKey: context.sessionKey,
       requestId: context.requestId,
       workingDir: context.workingDir,

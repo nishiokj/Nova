@@ -395,6 +395,22 @@ export const OPENAI_COMPAT_PROVIDERS = new Set<string>(
 );
 
 /**
+ * Providers whose models should be expanded into Vercel AI Gateway variants.
+ * Keep this as the single source of truth for daemon + TUI model listing.
+ */
+export const GATEWAY_MODEL_PROVIDER_IDS = [
+  'anthropic',
+  'openai',
+  'cerebras',
+  'groq',
+  'gemini',
+  'z.ai-coder',
+  'claude',
+] as const satisfies ReadonlyArray<SupportedProvider>;
+
+export const GATEWAY_MODEL_PROVIDERS = new Set<string>(GATEWAY_MODEL_PROVIDER_IDS);
+
+/**
  * Map our provider IDs to Vercel AI Gateway slugs.
  * Most match, but some need translation.
  */

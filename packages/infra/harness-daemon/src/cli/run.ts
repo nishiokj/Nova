@@ -561,7 +561,10 @@ async function maybeSaveProviderKeys(
         `Missing env var ${mapping.envName} for --provider-env ${mapping.provider}=${mapping.envName}`
       );
     }
-    const result = await client.providersSave(mapping.provider, key);
+    const result = await client.request<{ success: boolean; error?: string }>('providers.save', {
+      provider: mapping.provider,
+      apiKey: key,
+    });
     if (!result.success) {
       throw new Error(
         `providers_save failed for ${mapping.provider}: ${result.error ?? 'unknown error'}`
@@ -705,7 +708,9 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
     await waitForReady(client, options.sessionKey, options.timeoutMs);
 
     if (options.dangerous) {
-      const dangerousResult = await client.setDangerousMode(true);
+      const dangerousResult = await client.request<{ success: boolean; error?: string }>('dangerous_mode.set', {
+        enabled: true,
+      });
       if (!dangerousResult.success) {
         throw new Error(
           `set_dangerous_mode failed: ${dangerousResult.error ?? 'unknown error'}`
@@ -716,14 +721,14 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
     await maybeSaveProviderKeys(client, options.providerEnv);
 
     if (modelSelection) {
-      const setModel = await client.request<{ success?: boolean; error?: string }>('set_model', {
+      const setModel = await client.request<{ success?: boolean; error?: string }>('model.set', {
         agent_type: modelSelection.agentType,
         provider: modelSelection.provider,
         model: modelSelection.model,
         ...(modelSelection.reasoning ? { reasoning: modelSelection.reasoning } : {}),
       });
       if (!setModel.success) {
-        throw new Error(`set_model failed: ${setModel.error ?? 'unknown error'}`);
+        throw new Error(`model.set failed: ${setModel.error ?? 'unknown error'}`);
       }
     }
 

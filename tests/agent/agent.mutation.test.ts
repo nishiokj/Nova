@@ -846,7 +846,7 @@ describe('Agent Mutation Tests', () => {
   // Explorer agent specific behaviors
   // ================================================================
   describe('explorer agent edge cases', () => {
-    it('explorer with files read but no artifacts marks isIncomplete', async () => {
+    it('explorer with files read but no artifacts synthesizes fallback artifacts', async () => {
       const llm = createMockLLM([
         createResponse({
           action: 'continue',
@@ -864,7 +864,9 @@ describe('Agent Mutation Tests', () => {
       const agent = createAgent(llm, createToolRegistry(), { type: 'explorer' });
       const result = await runAgent(agent);
 
-      expect(result.isIncomplete).toBe(true);
+      expect(result.isIncomplete).toBeFalsy();
+      expect(result.artifacts?.some((artifact) => artifact.sourcePath === '/tmp/test.ts')).toBe(true);
+      expect(result.artifacts?.some((artifact) => artifact.kind === 'summary')).toBe(true);
     });
 
     it('explorer with artifacts in structured output preserves them (Bug 1 fix)', async () => {

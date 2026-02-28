@@ -22,10 +22,14 @@ FREEZE_AGENT="${AGENTLAB_FREEZE_AGENT:-1}"
 ENSURE_DATASET_V2="${AGENTLAB_ENSURE_DATASET_V2:-1}"
 FORCE_DATASET_V2="${AGENTLAB_FORCE_DATASET_V2:-0}"
 PREPULL_IMAGES="${AGENTLAB_PREPULL_IMAGES:-0}"
+REAP_IMAGES="${AGENTLAB_REAP_IMAGES:-1}"
 
 EXPERIMENT_LIMIT="${AGENTLAB_LIMIT:-}"
 MAX_CONCURRENCY="${AGENTLAB_MAX_CONCURRENCY:-}"
+PREPULL_CONCURRENCY="${AGENTLAB_PREPULL_CONCURRENCY:-8}"
 PROGRESS_INTERVAL_SEC="${AGENTLAB_PROGRESS_INTERVAL_SEC:-15}"
+AUTO_PRUNE_DOCKER="${AGENTLAB_AUTO_PRUNE_DOCKER:-1}"
+DOCKER_PRUNE_TIMEOUT_SEC="${AGENTLAB_DOCKER_PRUNE_TIMEOUT_SEC:-90}"
 
 usage() {
   cat <<USAGE
@@ -52,6 +56,8 @@ Environment overrides:
   AGENTLAB_ENSURE_DATASET_V2  1 generate task_boundary_v2 dataset before run (default), 0 skip.
   AGENTLAB_FORCE_DATASET_V2   1 force rebuild of task_boundary_v2 dataset.
   AGENTLAB_PREPULL_IMAGES     1 pre-pull unique task images from dataset_v2.
+  AGENTLAB_PREPULL_CONCURRENCY  Parallel docker pulls during pre-pull (default: 8).
+  AGENTLAB_REAP_IMAGES        1 (default) remove per-task images after trial completes, 0 keep.
   AGENTLAB_LIMIT              If rebuild enabled, pass --limit to builder.
   AGENTLAB_MAX_CONCURRENCY    If rebuild enabled, pass --max-concurrency to builder.
   AGENTLAB_AGENT_ARTIFACT     Artifact path used by freeze/build scripts.
@@ -59,6 +65,8 @@ Environment overrides:
   AGENTLAB_DATASET_V1         Source v1 dataset path for enrichment.
   AGENTLAB_DATASET_V2         Target v2 dataset path + builder dataset.
   AGENTLAB_PROGRESS_INTERVAL_SEC  Seconds between progress updates (default: 15).
+  AGENTLAB_AUTO_PRUNE_DOCKER  1 (default) runs safe Docker GC after run; 0 skip.
+  AGENTLAB_DOCKER_PRUNE_TIMEOUT_SEC  Timeout per docker prune command (default: 90).
 USAGE
 }
 
@@ -88,9 +96,19 @@ if [[ "$EXECUTOR" == "local_docker" || "$RUN_MODE" == "run_dev" ]]; then
     echo "missing required command: docker" >&2
     exit 1
   fi
-  if ! docker info >/dev/null 2>&1; then
-    echo "docker daemon unavailable or permission denied." >&2
-    echo "fix docker access (daemon running + socket permissions), then retry." >&2
+  DOCKER_OK=0
+  docker info >/dev/null 2>&1 &
+  DOCKER_CHECK_PID=$!
+  for _ in 1 2 3 4 5; do
+    if ! kill -0 "$DOCKER_CHECK_PID" 2>/dev/null; then
+      wait "$DOCKER_CHECK_PID" 2>/dev/null && DOCKER_OK=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$DOCKER_OK" != "1" ]]; then
+    kill "$DOCKER_CHECK_PID" 2>/dev/null; wait "$DOCKER_CHECK_PID" 2>/dev/null || true
+    echo "docker daemon unavailable (not running or timed out)." >&2
     exit 1
   fi
 fi
@@ -113,7 +131,7 @@ if [[ "$ENSURE_DATASET_V2" == "1" ]]; then
   fi
   ENRICH_CMD=(
     node
-    scripts/agentlab/enrich_dataset_v2.mjs
+    scripts/agentlab/data/enrich_dataset_v2.mjs
     "$DATASET_V1"
     "$DATASET_V2"
     --workspace
@@ -131,7 +149,7 @@ fi
 if [[ "$FREEZE_AGENT" == "1" ]]; then
   (
     cd "$ROOT_DIR"
-    bash scripts/agentlab/freeze_agent.sh "$AGENT_ARTIFACT"
+    bash scripts/agentlab/runtime/freeze_agent.sh "$AGENT_ARTIFACT"
   )
 fi
 
@@ -148,9 +166,7 @@ if [[ "$PREPULL_IMAGES" == "1" ]]; then
     echo "dataset_v2 not found for pre-pull: $DATASET_V2" >&2
     exit 1
   fi
-  (
-    cd "$ROOT_DIR"
-    node - "$DATASET_V2" <<'NODE' | while IFS= read -r image; do
+  PREPULL_LIST="$(cd "$ROOT_DIR" && node - "$DATASET_V2" <<'NODE'
 const fs = require('node:fs');
 const datasetPath = process.argv[2];
 const lines = fs.readFileSync(datasetPath, 'utf8').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -166,11 +182,10 @@ for (const image of Array.from(images).sort()) {
   process.stdout.write(`${image}\n`);
 }
 NODE
-      [[ -z "$image" ]] && continue
-      echo "pre-pull: $image"
-      docker pull "$image"
-    done
-  )
+  )"
+  PREPULL_COUNT="$(echo "$PREPULL_LIST" | grep -c . || true)"
+  echo "pre-pulling $PREPULL_COUNT images (concurrency=$PREPULL_CONCURRENCY)..."
+  echo "$PREPULL_LIST" | xargs -P "$PREPULL_CONCURRENCY" -I {} docker pull "{}"
 fi
 
 if [[ "$BUILD_EXPERIMENT" == "1" ]]; then
@@ -180,7 +195,7 @@ if [[ "$BUILD_EXPERIMENT" == "1" ]]; then
   fi
   BUILD_CMD=(
     node
-    scripts/agentlab/build_swebench_curated_ab_experiment.mjs
+    scripts/agentlab/data/build_swebench_curated_ab_experiment.mjs
     --dataset
     "$DATASET_V2"
     --agent-artifact
@@ -292,6 +307,23 @@ detect_run_id_from_fs() {
   return 1
 }
 
+detect_latest_run_id() {
+  find "$ROOT_DIR/.lab/runs" -maxdepth 1 -type d -name 'run_*' -print 2>/dev/null | xargs -r ls -1dt | head -n1 | xargs -r basename
+}
+
+LAST_RUN_ID_FILE="$ROOT_DIR/.lab/last_run_id"
+RECORDED_RUN_ID=""
+record_run_id() {
+  local run_id="$1"
+  [[ -z "$run_id" ]] && return 0
+  if [[ "$run_id" != "$RECORDED_RUN_ID" ]]; then
+    mkdir -p "$(dirname "$LAST_RUN_ID_FILE")"
+    printf '%s\n' "$run_id" > "$LAST_RUN_ID_FILE"
+    echo "run_id=$run_id"
+    RECORDED_RUN_ID="$run_id"
+  fi
+}
+
 extract_progress_field() {
   local file_path="$1"
   local sed_expr="$2"
@@ -309,6 +341,77 @@ extract_completed_slots() {
     return 0
   fi
   grep -c '"schedule_index"' "$progress_file" 2>/dev/null || echo "0"
+}
+
+cleanup_run_images() {
+  local run_id="$1"
+  if [[ "$REAP_IMAGES" != "1" ]]; then
+    return 0
+  fi
+  local trials_dir="$ROOT_DIR/.lab/runs/$run_id/trials"
+  if [[ ! -d "$trials_dir" ]]; then
+    return 0
+  fi
+  local -A seen_images=()
+  local trial_dir dataset_file image
+  for trial_dir in "$trials_dir"/trial_*; do
+    [[ -d "$trial_dir" ]] || continue
+    for dataset_file in "$trial_dir"/dataset/*.jsonl; do
+      [[ -f "$dataset_file" ]] || continue
+      image="$(sed -n 's/.*"image":[[:space:]]*"\([^"]*\)".*/\1/p' "$dataset_file" | head -n1)"
+      if [[ -n "$image" && -z "${seen_images[$image]:-}" ]]; then
+        seen_images["$image"]=1
+      fi
+      break
+    done
+  done
+  if [[ ${#seen_images[@]} -eq 0 ]]; then
+    return 0
+  fi
+  echo "cleaning up ${#seen_images[@]} task images..."
+  for image in "${!seen_images[@]}"; do
+    docker rmi "$image" >/dev/null 2>&1 && echo "  removed: $image" || true
+  done
+}
+
+run_with_timeout_quiet() {
+  local timeout_s="$1"
+  shift
+  "$@" >/dev/null 2>&1 &
+  local cmd_pid=$!
+  local waited=0
+  while kill -0 "$cmd_pid" >/dev/null 2>&1; do
+    if [[ "$waited" -ge "$timeout_s" ]]; then
+      kill "$cmd_pid" >/dev/null 2>&1 || true
+      wait "$cmd_pid" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$cmd_pid"
+}
+
+safe_docker_gc() {
+  if [[ "$AUTO_PRUNE_DOCKER" != "1" ]]; then
+    echo "skipping docker GC (AGENTLAB_AUTO_PRUNE_DOCKER=0)"
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "docker not available; skipping docker GC"
+    return 0
+  fi
+  echo "running safe docker GC (builder cache + dangling images, preserving containers/volumes)"
+  if run_with_timeout_quiet "$DOCKER_PRUNE_TIMEOUT_SEC" docker builder prune -f; then
+    echo "docker builder cache prune complete"
+  else
+    echo "docker builder prune skipped/timeout"
+  fi
+  if run_with_timeout_quiet "$DOCKER_PRUNE_TIMEOUT_SEC" docker image prune -f; then
+    echo "docker dangling image prune complete"
+  else
+    echo "docker image prune skipped/timeout"
+  fi
 }
 
 progress_line_for_run() {
@@ -351,9 +454,7 @@ while kill -0 "$RUN_PID" >/dev/null 2>&1; do
     if [[ -z "$RUN_ID" ]]; then
       RUN_ID="$(detect_run_id_from_fs || true)"
     fi
-    if [[ -n "$RUN_ID" ]]; then
-      echo "run_id=$RUN_ID"
-    fi
+    record_run_id "$RUN_ID"
   fi
 
   if [[ -n "$RUN_ID" ]]; then
@@ -374,10 +475,6 @@ if [[ -n "$TAIL_PID" ]]; then
   wait "$TAIL_PID" 2>/dev/null || true
   TAIL_PID=""
 fi
-if [[ $RUN_STATUS -ne 0 ]]; then
-  echo "lab run failed with status $RUN_STATUS" >&2
-  exit "$RUN_STATUS"
-fi
 
 if [[ -z "$RUN_ID" ]]; then
   RUN_ID="$(grep -Eo 'run_[0-9]{8}_[0-9]{6}' "$RUN_OUTPUT_LOG" | tail -n1 || true)"
@@ -386,12 +483,21 @@ if [[ -z "$RUN_ID" ]]; then
   RUN_ID="$(detect_run_id_from_fs || true)"
 fi
 if [[ -z "$RUN_ID" ]]; then
-  RUN_ID="$(find "$ROOT_DIR/.lab/runs" -maxdepth 1 -type d -name 'run_*' -print 2>/dev/null | xargs -r ls -1dt | head -n1 | xargs -r basename)"
+  RUN_ID="$(detect_latest_run_id || true)"
 fi
+record_run_id "$RUN_ID"
 
 if [[ -z "$RUN_ID" ]]; then
-  echo "unable to determine run_id from lab output" >&2
+  echo "unable to determine run_id from lab output/filesystem" >&2
   exit 1
 fi
+
+if [[ $RUN_STATUS -ne 0 ]]; then
+  echo "lab run failed with status $RUN_STATUS (run_id=$RUN_ID)" >&2
+  exit "$RUN_STATUS"
+fi
+
+cleanup_run_images "$RUN_ID"
+safe_docker_gc
 
 echo "$RUN_ID"

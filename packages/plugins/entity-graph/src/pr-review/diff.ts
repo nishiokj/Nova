@@ -12,7 +12,8 @@ import type { FileChange, Hunk } from './types.js'
  */
 export function parseDiff(diffText: string): FileChange[] {
   const changes: FileChange[] = []
-  const lines = diffText.split('\n')
+  // Normalize CRLF/CR to LF so header parsing remains stable across platforms.
+  const lines = diffText.replace(/\r/g, '').split('\n')
   let i = 0
 
   while (i < lines.length) {

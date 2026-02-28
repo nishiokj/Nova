@@ -1,0 +1,1903 @@
+{
+  "summary": "40 entities changed; 12 direct and 0 transitive dependents affected; 20 warnings.",
+  "changedEntities": [
+    {
+      "entity": {
+        "id": "class:packages/plugins/entity-graph/src/index.ts:EntityGraph",
+        "kind": "class",
+        "name": "EntityGraph",
+        "filepath": "packages/plugins/entity-graph/src/index.ts",
+        "startLine": 38,
+        "endLine": 165,
+        "exported": true,
+        "async": false,
+        "rawText": "class EntityGraph {\n  private sql: Sql\n  private config: EntityGraphConfig\n  private hooks: EntityGraphHooks | null = null\n  private scanPromise: Promise<{ files: number; entities: number; edges: number; durationMs: number } | null> | null = null\n\n  constructor(sql: Sql, config: EntityGraphConfig) {\n    this.sql = sql\n    this.config = config\n  }\n\n  /**\n   * Initialize the entity graph:\n   * 1. Run DDL to create schema + tables (idempotent)\n   * 2. Clean expired leases\n   * 3. Optionally kick off a full startup scan (non-blocking)\n   */\n  async initialize(): Promise<void> {\n    // Create schema and tables\n    await this.sql.unsafe(SCHEMA_DDL)\n\n    // Clean stale leases from previous runs\n    const cleaned = await cleanExpiredLeases(this.sql)\n    if (cleaned > 0) {\n      console.log(`[entity-graph] Cleaned ${cleaned} expired leases`)\n    }\n\n    // Run startup scan in background if configured (default: true)\n    if (this.config.startupScan !== false) {\n      this.scanPromise = buildFullGraph(this.sql, this.config)\n        .then(stats => {\n          console.log(\n            `[entity-graph] Startup scan complete: ${stats.files} files, ${stats.entities} entities, ${stats.edges} edges (${stats.durationMs}ms)`\n          )\n          return stats\n        })\n        .catch(err => {\n          console.error(`[entity-graph] Startup scan failed:`, err)\n          return null\n        })\n    }\n  }\n\n  /**\n   * Wait for the background startup scan to finish (if running).\n   * Returns scan stats, or null if scan was skipped or failed.\n   */\n  async waitForScan(): Promise<{ files: number; entities: number; edges: number; durationMs: number } | null> {\n    return this.scanPromise ?? null\n  }\n\n  /**\n   * Get hook handlers for composing with AgentHooks.\n   * Lazily created on first access.\n   */\n  getHooks(): EntityGraphHooks {\n    if (!this.hooks) {\n      this.hooks = createEntityGraphHooks(this.sql, this.config)\n    }\n    return this.hooks\n  }\n\n  // --- Query Delegation ---\n\n  async enti..."
+      },
+      "changeKind": "body_changed",
+      "fileStatus": "modified"
+    },
+    {
+      "entity": {
+        "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.unusedExports",
+        "kind": "method",
+        "name": "EntityGraph.unusedExports",
+        "filepath": "packages/plugins/entity-graph/src/index.ts",
+        "startLine": 130,
+        "endLine": 132,
+        "exported": true,
+        "async": true,
+        "rawText": "async unusedExports(filepath?: string): Promise<Entity[]> {\n    return unusedExports(this.sql, filepath)\n  }"
+      },
+      "changeKind": "signature_changed",
+      "fileStatus": "modified"
+    },
+    {
+      "entity": {
+        "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.entitiesAtLines",
+        "kind": "method",
+        "name": "EntityGraph.entitiesAtLines",
+        "filepath": "packages/plugins/entity-graph/src/index.ts",
+        "startLine": 134,
+        "endLine": 139,
+        "exported": true,
+        "async": true,
+        "rawText": "async entitiesAtLines(\n    filepath: string,\n    ranges: Array<{ startLine: number; endLine: number }>,\n  ): Promise<Entity[]> {\n    return entitiesAtLines(this.sql, filepath, ranges)\n  }"
+      },
+      "changeKind": "signature_changed",
+      "fileStatus": "modified"
+    },
+    {
+      "entity": {
+        "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.entityBlastRadius",
+        "kind": "method",
+        "name": "EntityGraph.entityBlastRadius",
+        "filepath": "packages/plugins/entity-graph/src/index.ts",
+        "startLine": 141,
+        "endLine": 143,
+        "exported": true,
+        "async": true,
+        "rawText": "async entityBlastRadius(entityIds: string[], maxDepth?: number): Promise<BlastRadiusEntry[]> {\n    return entityBlastRadius(this.sql, entityIds, maxDepth)\n  }"
+      },
+      "changeKind": "signature_changed",
+      "fileStatus": "modified"
+    },
+    {
+      "entity": {
+        "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.graphStats",
+        "kind": "method",
+        "name": "EntityGraph.graphStats",
+        "filepath": "packages/plugins/entity-graph/src/index.ts",
+        "startLine": 145,
+        "endLine": 147,
+        "exported": true,
+        "async": true,
+        "rawText": "async graphStats(): Promise<GraphStats> {\n    return graphStats(this.sql)\n  }"
+      },
+      "changeKind": "signature_changed",
+      "fileStatus": "modified"
+    },
+    {
+      "entity": {
+        "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.reviewDiff",
+        "kind": "method",
+        "name": "EntityGraph.reviewDiff",
+        "filepath": "packages/plugins/entity-graph/src/index.ts",
+        "startLine": 152,
+        "endLine": 154,
+        "exported": true,
+        "async": true,
+        "rawText": "async reviewDiff(diffText: string, maxDepth?: number): Promise<PRReview> {\n    return reviewDiff(this.sql, diffText, maxDepth)\n  }"
+      },
+      "changeKind": "signature_changed",
+      "fileStatus": "modified"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/classifier.ts:classifyChanges",
+        "kind": "function",
+        "name": "classifyChanges",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/classifier.ts",
+        "startLine": 21,
+        "endLine": 114,
+        "exported": true,
+        "async": true,
+        "rawText": "async function classifyChanges(\n  sql: Sql,\n  fileChanges: FileChange[],\n): Promise<EntityChange[]> {\n  const results: EntityChange[] = []\n\n  for (const fc of fileChanges) {\n    switch (fc.status) {\n      case 'added': {\n        const entities = await entitiesInFile(sql, fc.filepath)\n        const nonFile = entities.filter(e => e.kind !== 'file')\n        if (nonFile.length === 0) {\n          results.push({\n            entity: syntheticFileEntity(fc.filepath),\n            changeKind: 'entity_added',\n            fileStatus: 'added',\n          })\n          break\n        }\n        for (const e of nonFile) {\n          results.push({ entity: e, changeKind: 'entity_added', fileStatus: 'added' })\n        }\n        break\n      }\n\n      case 'deleted': {\n        const entities = await entitiesInFile(sql, fc.filepath)\n        const nonFile = entities.filter(e => e.kind !== 'file')\n        if (nonFile.length === 0) {\n          results.push({\n            entity: syntheticFileEntity(fc.filepath),\n            changeKind: 'entity_deleted',\n            fileStatus: 'deleted',\n          })\n          break\n        }\n        for (const e of nonFile) {\n          results.push({ entity: e, changeKind: 'entity_deleted', fileStatus: 'deleted' })\n        }\n        break\n      }\n\n      case 'renamed': {\n        // Old path entities deleted, new path entities added\n        if (fc.oldFilepath) {\n          const oldEntities = await entitiesInFile(sql, fc.oldFilepath)\n          const oldNonFile = oldEntities.filter(e => e.kind !== 'file')\n          if (oldNonFile.length === 0) {\n            results.push({\n              entity: syntheticFileEntity(fc.oldFilepath),\n              changeKind: 'entity_deleted',\n              fileStatus: 'renamed',\n            })\n          }\n          for (const e of oldNonFile) {\n            results.push({ entity: e, changeKind: 'entity_deleted', fileStatus: 'renamed' })\n          }\n        }\n        const newEntities = await entitiesInFile(sql, fc.filepath)\n        co..."
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/classifier.ts:syntheticFileEntity",
+        "kind": "function",
+        "name": "syntheticFileEntity",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/classifier.ts",
+        "startLine": 116,
+        "endLine": 128,
+        "exported": false,
+        "async": false,
+        "rawText": "function syntheticFileEntity(filepath: string): Entity {\n  return {\n    id: `file:${filepath}:${filepath}`,\n    kind: 'file',\n    name: filepath,\n    filepath,\n    startLine: null,\n    endLine: null,\n    exported: false,\n    async: false,\n    rawText: null,\n  }\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/classifier.ts:inferChangeKind",
+        "kind": "function",
+        "name": "inferChangeKind",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/classifier.ts",
+        "startLine": 143,
+        "endLine": 173,
+        "exported": false,
+        "async": false,
+        "rawText": "function inferChangeKind(\n  entity: Entity,\n  ranges: Array<{ startLine: number; endLine: number }>,\n): ChangeKind {\n  const start = entity.startLine ?? 0\n  const exportLine = start          // `export function foo(` lives here\n  const sigEnd = start + 2          // signature ≈ first 3 lines\n\n  const touchesExportLine = ranges.some(\n    r => r.startLine <= exportLine && r.endLine >= exportLine,\n  )\n\n  const touchesSignature = ranges.some(\n    r => r.startLine <= sigEnd && r.endLine >= start,\n  )\n\n  const touchesBeyondExportLine = ranges.some(\n    r => r.endLine > exportLine,\n  )\n\n  // Exported entity, hunk only on the export/declaration line itself\n  if (entity.exported && touchesExportLine && !touchesBeyondExportLine) {\n    return 'export_changed'\n  }\n\n  if (touchesSignature) {\n    return 'signature_changed'\n  }\n\n  return 'body_changed'\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/diff.ts:parseDiff",
+        "kind": "function",
+        "name": "parseDiff",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/diff.ts",
+        "startLine": 13,
+        "endLine": 34,
+        "exported": true,
+        "async": false,
+        "rawText": "function parseDiff(diffText: string): FileChange[] {\n  const changes: FileChange[] = []\n  // Normalize CRLF/CR to LF so header parsing remains stable across platforms.\n  const lines = diffText.replace(/\\r/g, '').split('\\n')\n  let i = 0\n\n  while (i < lines.length) {\n    // Find next \"diff --git\" header\n    if (!lines[i].startsWith('diff --git ')) {\n      i++\n      continue\n    }\n\n    const { change, nextIndex } = parseFileDiff(lines, i)\n    if (change) {\n      changes.push(change)\n    }\n    i = nextIndex\n  }\n\n  return changes\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/diff.ts:parseFileDiff",
+        "kind": "function",
+        "name": "parseFileDiff",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/diff.ts",
+        "startLine": 36,
+        "endLine": 92,
+        "exported": false,
+        "async": false,
+        "rawText": "function parseFileDiff(\n  lines: string[],\n  start: number,\n): { change: FileChange | null; nextIndex: number } {\n  let i = start\n\n  // Parse \"diff --git a/path b/path\"\n  const diffLine = lines[i]\n  const gitMatch = diffLine.match(/^diff --git a\\/(.+) b\\/(.+)$/)\n  if (!gitMatch) return { change: null, nextIndex: i + 1 }\n\n  const aPath = gitMatch[1]\n  const bPath = gitMatch[2]\n  i++\n\n  // Consume metadata lines (old mode, new mode, similarity, index, etc.)\n  let status: FileChange['status'] = 'modified'\n  let oldFilepath: string | undefined\n\n  while (i < lines.length && !lines[i].startsWith('diff --git ')) {\n    const line = lines[i]\n\n    if (line.startsWith('new file mode')) {\n      status = 'added'\n    } else if (line.startsWith('deleted file mode')) {\n      status = 'deleted'\n    } else if (line.startsWith('rename from ')) {\n      status = 'renamed'\n      oldFilepath = line.slice('rename from '.length)\n    } else if (line.startsWith('--- ') || line.startsWith('+++ ')) {\n      // Skip --- / +++ lines, handled by hunk parsing\n    } else if (line.startsWith('@@')) {\n      break // Start of hunks\n    }\n    i++\n  }\n\n  // Parse hunks\n  const hunks: Hunk[] = []\n  while (i < lines.length && !lines[i].startsWith('diff --git ')) {\n    if (lines[i].startsWith('@@')) {\n      const hunk = parseHunkHeader(lines[i])\n      if (hunk) hunks.push(hunk)\n    }\n    i++\n  }\n\n  return {\n    change: {\n      filepath: bPath,\n      status,\n      oldFilepath,\n      hunks,\n    },\n    nextIndex: i,\n  }\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/diff.ts:parseHunkHeader",
+        "kind": "function",
+        "name": "parseHunkHeader",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/diff.ts",
+        "startLine": 97,
+        "endLine": 107,
+        "exported": true,
+        "async": false,
+        "rawText": "function parseHunkHeader(line: string): Hunk | null {\n  const match = line.match(/^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@/)\n  if (!match) return null\n\n  return {\n    oldStart: parseInt(match[1], 10),\n    oldCount: match[2] !== undefined ? parseInt(match[2], 10) : 1,\n    newStart: parseInt(match[3], 10),\n    newCount: match[4] !== undefined ? parseInt(match[4], 10) : 1,\n  }\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "file:packages/plugins/entity-graph/src/pr-review/index.ts:packages/plugins/entity-graph/src/pr-review/index.ts",
+        "kind": "file",
+        "name": "packages/plugins/entity-graph/src/pr-review/index.ts",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/index.ts",
+        "startLine": null,
+        "endLine": null,
+        "exported": false,
+        "async": false,
+        "rawText": null
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/review.ts:reviewDiff",
+        "kind": "function",
+        "name": "reviewDiff",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/review.ts",
+        "startLine": 24,
+        "endLine": 76,
+        "exported": true,
+        "async": true,
+        "rawText": "async function reviewDiff(\n  sql: Sql,\n  diffText: string,\n  maxDepth: number = 2,\n): Promise<PRReview> {\n  // 1. Parse diff → structured file changes\n  const fileChanges = parseDiff(diffText)\n\n  // 2. Classify → entity-level changes\n  const changedEntities = await classifyChanges(sql, fileChanges)\n\n  // 3. Compute entity-level blast radius\n  const seedIds = changedEntities.map(ec => ec.entity.id)\n  const rawBlastEntries = await entityBlastRadius(sql, seedIds, maxDepth)\n  const blastEntries = dedupeBlastEntries(rawBlastEntries)\n\n  const direct = blastEntries.filter(e => e.depth === 1)\n  const transitive = blastEntries.filter(e => e.depth > 1)\n\n  const affectedFiles = new Set<string>()\n  for (const e of blastEntries) affectedFiles.add(e.entity.filepath)\n\n  // 4. Score risks\n  const risks = scoreRisks(changedEntities, rawBlastEntries)\n  const impactGaps = computeImpactGaps(changedEntities, rawBlastEntries)\n\n  // 5. Detect newly-introduced dead code (unused exports in changed files)\n  const addedFiles = fileChanges\n    .filter(fc => fc.status === 'added' || fc.status === 'modified' || fc.status === 'renamed')\n    .map(fc => fc.filepath)\n  const uniqueAddedFiles = Array.from(new Set(addedFiles))\n\n  const deadCode = dedupeEntitiesById((\n    await Promise.all(uniqueAddedFiles.map(fp => unusedExports(sql, fp)))\n  ).flat())\n\n  // 6. Build summary\n  const summary = buildSummary(changedEntities.length, direct.length, transitive.length, risks, impactGaps)\n\n  return {\n    summary,\n    changedEntities,\n    blastRadius: {\n      direct,\n      transitive,\n      totalFiles: affectedFiles.size,\n      totalEntities: blastEntries.length,\n    },\n    risks,\n    impactGaps,\n    deadCode,\n  }\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/review.ts:dedupeBlastEntries",
+        "kind": "function",
+        "name": "dedupeBlastEntries",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/review.ts",
+        "startLine": 78,
+        "endLine": 95,
+        "exported": false,
+        "async": false,
+        "rawText": "function dedupeBlastEntries(entries: Awaited<ReturnType<typeof entityBlastRadius>>): Awaited<ReturnType<typeof entityBlastRadius>> {\n  const byEntity = new Map<string, typeof entries[number]>()\n\n  for (const entry of entries) {\n    const existing = byEntity.get(entry.entity.id)\n    if (!existing || entry.depth < existing.depth) {\n      byEntity.set(entry.entity.id, entry)\n      continue\n    }\n    if (entry.depth === existing.depth && entry.via < existing.via) {\n      byEntity.set(entry.entity.id, entry)\n    }\n  }\n\n  return Array.from(byEntity.values()).sort(\n    (a, b) => a.depth - b.depth || a.entity.filepath.localeCompare(b.entity.filepath) || a.entity.id.localeCompare(b.entity.id),\n  )\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/review.ts:dedupeEntitiesById",
+        "kind": "function",
+        "name": "dedupeEntitiesById",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/review.ts",
+        "startLine": 97,
+        "endLine": 103,
+        "exported": false,
+        "async": false,
+        "rawText": "function dedupeEntitiesById<T extends { id: string }>(items: T[]): T[] {\n  const map = new Map<string, T>()\n  for (const item of items) {\n    if (!map.has(item.id)) map.set(item.id, item)\n  }\n  return Array.from(map.values())\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/review.ts:buildSummary",
+        "kind": "function",
+        "name": "buildSummary",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/review.ts",
+        "startLine": 105,
+        "endLine": 137,
+        "exported": false,
+        "async": false,
+        "rawText": "function buildSummary(\n  changed: number,\n  directCount: number,\n  transitiveCount: number,\n  risks: Array<{ score: number }>,\n  impactGaps: ImpactGap[],\n): string {\n  const critical = risks.filter(r => r.score >= 70).length\n  const warnings = risks.filter(r => r.score >= 40 && r.score < 70).length\n  const unresolvedCount = impactGaps.reduce((sum, gap) => sum + gap.unresolvedDependents.length, 0)\n\n  const parts: string[] = [\n    `${changed} entit${changed === 1 ? 'y' : 'ies'} changed`,\n  ]\n\n  if (directCount > 0 || transitiveCount > 0) {\n    parts.push(`${directCount} direct and ${transitiveCount} transitive dependents affected`)\n  }\n\n  if (critical > 0) {\n    parts.push(`${critical} critical risk${critical === 1 ? '' : 's'}`)\n  }\n  if (warnings > 0) {\n    parts.push(`${warnings} warning${warnings === 1 ? '' : 's'}`)\n  }\n  if (impactGaps.length > 0) {\n    parts.push(\n      `${impactGaps.length} contract gap${impactGaps.length === 1 ? '' : 's'} (${unresolvedCount} unresolved dependent${unresolvedCount === 1 ? '' : 's'})`,\n    )\n  }\n\n  return parts.join('; ') + '.'\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/review.ts:computeImpactGaps",
+        "kind": "function",
+        "name": "computeImpactGaps",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/review.ts",
+        "startLine": 139,
+        "endLine": 178,
+        "exported": false,
+        "async": false,
+        "rawText": "function computeImpactGaps(\n  changedEntities: EntityChange[],\n  blastEntries: Awaited<ReturnType<typeof entityBlastRadius>>,\n): ImpactGap[] {\n  const changedEntityIds = new Set(changedEntities.map(ec => ec.entity.id))\n  const changesByEntityId = new Map(changedEntities.map(ec => [ec.entity.id, ec] as const))\n\n  const directDependentsBySeed = new Map<string, Map<string, typeof blastEntries[number]['entity']>>()\n  for (const entry of blastEntries) {\n    if (entry.depth !== 1) continue\n    if (entry.entity.id === entry.seedId) continue\n    let dependents = directDependentsBySeed.get(entry.seedId)\n    if (!dependents) {\n      dependents = new Map()\n      directDependentsBySeed.set(entry.seedId, dependents)\n    }\n    if (!dependents.has(entry.entity.id)) {\n      dependents.set(entry.entity.id, entry.entity)\n    }\n  }\n\n  const gaps: ImpactGap[] = []\n  for (const changed of changedEntities) {\n    if (!CONTRACT_CHANGE_KINDS.has(changed.changeKind)) continue\n    const directDependents = Array.from(directDependentsBySeed.get(changed.entity.id)?.values() ?? [])\n    if (directDependents.length === 0) continue\n    const unresolved = directDependents.filter(dep => !changedEntityIds.has(dep.id))\n    if (unresolved.length === 0) continue\n\n    gaps.push({\n      seed: changed.entity,\n      seedChangeKind: changesByEntityId.get(changed.entity.id)?.changeKind ?? changed.changeKind,\n      directDependents,\n      unresolvedDependents: unresolved,\n    })\n  }\n\n  gaps.sort((a, b) => b.unresolvedDependents.length - a.unresolvedDependents.length || a.seed.id.localeCompare(b.seed.id))\n  return gaps\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:scoreRisks",
+        "kind": "function",
+        "name": "scoreRisks",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+        "startLine": 38,
+        "endLine": 163,
+        "exported": true,
+        "async": false,
+        "rawText": "function scoreRisks(\n  changedEntities: EntityChange[],\n  blastEntries: BlastRadiusEntry[],\n): RiskSignal[] {\n  const seedSeverity = seedSeverityByEntity(changedEntities)\n  const fallbackWorst = worstUpstreamSeverity(changedEntities)\n  const changedEntityIds = new Set(changedEntities.map(ec => ec.entity.id))\n\n  const blastByEntity = new Map<string, {\n    entity: Entity\n    depth: number\n    vias: Set<string>\n    upstream: { score: number; factor: string | null }\n  }>()\n\n  // Aggregate blast entries by entity to avoid duplicate rows from multi-path traversal.\n  for (const entry of blastEntries) {\n    const upstream = upstreamSeverityForEntry(entry, seedSeverity, fallbackWorst)\n    const existing = blastByEntity.get(entry.entity.id)\n\n    if (!existing) {\n      blastByEntity.set(entry.entity.id, {\n        entity: entry.entity,\n        depth: entry.depth,\n        vias: new Set([entry.via]),\n        upstream,\n      })\n      continue\n    }\n\n    if (entry.depth < existing.depth) {\n      existing.depth = entry.depth\n      existing.vias = new Set([entry.via])\n    } else if (entry.depth === existing.depth) {\n      existing.vias.add(entry.via)\n    }\n\n    if (upstream.score > existing.upstream.score) {\n      existing.upstream = upstream\n    }\n  }\n\n  const signalsByEntity = new Map<string, RiskSignal>()\n\n  // Score blast-radius entities.\n  for (const aggregate of blastByEntity.values()) {\n    const factors: string[] = []\n    let score = 0\n\n    const proximityScore = aggregate.depth === 1\n      ? 25\n      : Math.max(5, 25 - (aggregate.depth - 1) * 8)\n    score += proximityScore\n\n    const viaList = Array.from(aggregate.vias).sort().join(', ')\n    factors.push(`depth ${aggregate.depth} dependent (${viaList} edge)`)\n\n    const kindScore = KIND_WEIGHT[aggregate.entity.kind] ?? 5\n    score += kindScore\n    if (kindScore >= 15) {\n      factors.push(`${aggregate.entity.kind} change has wide contract impact`)\n    }\n\n    if (aggregate.entity.exported) {\n      score += 10\n      factors.pu..."
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:seedSeverityByEntity",
+        "kind": "function",
+        "name": "seedSeverityByEntity",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+        "startLine": 165,
+        "endLine": 181,
+        "exported": false,
+        "async": false,
+        "rawText": "function seedSeverityByEntity(\n  changedEntities: EntityChange[],\n): Map<string, { raw: number; factor: string | null }> {\n  const map = new Map<string, { raw: number; factor: string | null }>()\n\n  for (const ec of changedEntities) {\n    const raw = CHANGE_SEVERITY[ec.changeKind] ?? 0\n    const existing = map.get(ec.entity.id)\n    if (existing && existing.raw >= raw) continue\n    map.set(ec.entity.id, {\n      raw,\n      factor: `upstream ${ec.changeKind.replace(/_/g, ' ')} in ${ec.entity.name}`,\n    })\n  }\n\n  return map\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:upstreamSeverityForEntry",
+        "kind": "function",
+        "name": "upstreamSeverityForEntry",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+        "startLine": 183,
+        "endLine": 191,
+        "exported": false,
+        "async": false,
+        "rawText": "function upstreamSeverityForEntry(\n  entry: BlastRadiusEntry,\n  seedSeverity: Map<string, { raw: number; factor: string | null }>,\n  fallbackWorst: { score: number; factor: string | null },\n): { score: number; factor: string | null } {\n  const seed = seedSeverity.get(entry.seedId)\n  if (!seed) return fallbackWorst\n  return { score: Math.round(seed.raw * 0.5), factor: seed.factor }\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:worstUpstreamSeverity",
+        "kind": "function",
+        "name": "worstUpstreamSeverity",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+        "startLine": 193,
+        "endLine": 208,
+        "exported": false,
+        "async": false,
+        "rawText": "function worstUpstreamSeverity(\n  changedEntities: EntityChange[],\n): { score: number; factor: string | null } {\n  let worst = 0\n  let factor: string | null = null\n\n  for (const ec of changedEntities) {\n    const s = CHANGE_SEVERITY[ec.changeKind] ?? 0\n    if (s > worst) {\n      worst = s\n      factor = `upstream ${ec.changeKind.replace(/_/g, ' ')} in ${ec.entity.name}`\n    }\n  }\n\n  return { score: Math.round(worst * 0.5), factor }\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:uniqueFactors",
+        "kind": "function",
+        "name": "uniqueFactors",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+        "startLine": 210,
+        "endLine": 212,
+        "exported": false,
+        "async": false,
+        "rawText": "function uniqueFactors(factors: string[]): string[] {\n  return Array.from(new Set(factors))\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:contractCoverageAdjustment",
+        "kind": "function",
+        "name": "contractCoverageAdjustment",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+        "startLine": 214,
+        "endLine": 248,
+        "exported": false,
+        "async": false,
+        "rawText": "function contractCoverageAdjustment(\n  entityChange: EntityChange,\n  blastEntries: BlastRadiusEntry[],\n  changedEntityIds: Set<string>,\n): { delta: number; factor: string | null } {\n  if (!CONTRACT_CHANGE_KINDS.has(entityChange.changeKind)) {\n    return { delta: 0, factor: null }\n  }\n\n  const directDependents = new Set(\n    blastEntries\n      .filter(entry => entry.seedId === entityChange.entity.id && entry.depth === 1)\n      .map(entry => entry.entity.id)\n      .filter(id => id !== entityChange.entity.id),\n  )\n\n  if (directDependents.size === 0) {\n    return { delta: -10, factor: 'no direct dependents found in graph' }\n  }\n\n  let unresolved = 0\n  for (const dependentId of directDependents) {\n    if (!changedEntityIds.has(dependentId)) {\n      unresolved += 1\n    }\n  }\n\n  if (unresolved === 0) {\n    return { delta: -15, factor: 'all direct dependents also changed in this PR' }\n  }\n\n  const penalty = Math.min(20, 10 + (unresolved - 1) * 3)\n  const label = unresolved === 1 ? '1 direct dependent not updated in this PR' : `${unresolved} direct dependents not updated in this PR`\n  return { delta: penalty, factor: label }\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:FileChange",
+        "kind": "interface",
+        "name": "FileChange",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 12,
+        "endLine": 17,
+        "exported": true,
+        "async": false,
+        "rawText": "interface FileChange {\n  filepath: string\n  status: 'added' | 'modified' | 'deleted' | 'renamed'\n  oldFilepath?: string // for renames\n  hunks: Hunk[]\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:Hunk",
+        "kind": "interface",
+        "name": "Hunk",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 19,
+        "endLine": 24,
+        "exported": true,
+        "async": false,
+        "rawText": "interface Hunk {\n  oldStart: number\n  oldCount: number\n  newStart: number\n  newCount: number\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "type:packages/plugins/entity-graph/src/pr-review/types.ts:ChangeKind",
+        "kind": "type",
+        "name": "ChangeKind",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 28,
+        "endLine": 33,
+        "exported": true,
+        "async": false,
+        "rawText": "type ChangeKind =\n  | 'signature_changed'  // params/return type changed — callers at risk\n  | 'body_changed'       // implementation changed — behavior risk only\n  | 'entity_added'       // new entity introduced\n  | 'entity_deleted'     // entity removed — broken references\n  | 'export_changed'     // export flag toggled — module boundary risk"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:EntityChange",
+        "kind": "interface",
+        "name": "EntityChange",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 35,
+        "endLine": 39,
+        "exported": true,
+        "async": false,
+        "rawText": "interface EntityChange {\n  entity: Entity\n  changeKind: ChangeKind\n  fileStatus: FileChange['status']\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:RiskSignal",
+        "kind": "interface",
+        "name": "RiskSignal",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 43,
+        "endLine": 47,
+        "exported": true,
+        "async": false,
+        "rawText": "interface RiskSignal {\n  entity: Entity\n  score: number          // 0–100\n  factors: string[]      // human-readable explanations\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:ImpactGap",
+        "kind": "interface",
+        "name": "ImpactGap",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 51,
+        "endLine": 56,
+        "exported": true,
+        "async": false,
+        "rawText": "interface ImpactGap {\n  seed: Entity\n  seedChangeKind: ChangeKind\n  directDependents: Entity[]\n  unresolvedDependents: Entity[]\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:PRReview",
+        "kind": "interface",
+        "name": "PRReview",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 60,
+        "endLine": 72,
+        "exported": true,
+        "async": false,
+        "rawText": "interface PRReview {\n  summary: string\n  changedEntities: EntityChange[]\n  blastRadius: {\n    direct: BlastRadiusEntry[]      // depth 1\n    transitive: BlastRadiusEntry[]  // depth 2+\n    totalFiles: number\n    totalEntities: number\n  }\n  risks: RiskSignal[]               // sorted by score desc\n  impactGaps: ImpactGap[]           // contract changes with unresolved dependents\n  deadCode: Entity[]                // new unused exports\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/queries.ts:dependentsOf",
+        "kind": "function",
+        "name": "dependentsOf",
+        "filepath": "packages/plugins/entity-graph/src/queries.ts",
+        "startLine": 148,
+        "endLine": 207,
+        "exported": true,
+        "async": true,
+        "rawText": "async function dependentsOf(\n  sql: Sql,\n  entityId: string,\n  entityKind: EntityKind\n): Promise<Entity[]> {\n  let rows: EntityRow[]\n\n  switch (entityKind) {\n    case 'file':\n      // Who imports entities from this file?\n      rows = await sql<EntityRow[]>`\n        SELECT DISTINCT e.* FROM entity_graph.entities e\n        JOIN entity_graph.imports i ON i.importer_id = e.id\n        WHERE i.imported_id = ${entityId}\n      `\n      break\n\n    case 'function':\n    case 'method':\n      // Who calls this?\n      rows = await sql<EntityRow[]>`\n        SELECT DISTINCT e.* FROM entity_graph.entities e\n        JOIN entity_graph.calls c ON c.caller_id = e.id\n        WHERE c.callee_id = ${entityId}\n      `\n      break\n\n    case 'type':\n    case 'interface':\n      // Who uses, imports, or implements this?\n      rows = await sql<EntityRow[]>`\n        SELECT DISTINCT e.* FROM entity_graph.entities e\n        WHERE e.id IN (\n          SELECT user_id FROM entity_graph.uses WHERE used_id = ${entityId}\n          UNION\n          SELECT implementor_id FROM entity_graph.implements WHERE interface_id = ${entityId}\n          UNION\n          SELECT importer_id FROM entity_graph.imports WHERE imported_id = ${entityId}\n        )\n      `\n      break\n\n    case 'class':\n      // Who extends, imports, or uses this?\n      rows = await sql<EntityRow[]>`\n        SELECT DISTINCT e.* FROM entity_graph.entities e\n        WHERE e.id IN (\n          SELECT child_id FROM entity_graph.extends WHERE parent_id = ${entityId}\n          UNION\n          SELECT importer_id FROM entity_graph.imports WHERE imported_id = ${entityId}\n        )\n      `\n      break\n\n    default:\n      rows = []\n  }\n\n  return rows.map(rowToEntity)\n}"
+      },
+      "changeKind": "body_changed",
+      "fileStatus": "modified"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/queries.ts:entitiesAtLines",
+        "kind": "function",
+        "name": "entitiesAtLines",
+        "filepath": "packages/plugins/entity-graph/src/queries.ts",
+        "startLine": 213,
+        "endLine": 240,
+        "exported": true,
+        "async": true,
+        "rawText": "async function entitiesAtLines(\n  sql: Sql,\n  filepath: string,\n  ranges: Array<{ startLine: number; endLine: number }>,\n): Promise<Entity[]> {\n  if (ranges.length === 0) return []\n\n  // Build OR clause for overlapping ranges:\n  // entity overlaps range when entity.start_line <= range.end AND entity.end_line >= range.start\n  const conditions = ranges\n    .map((_, i) => `(e.start_line <= $${i * 2 + 3} AND e.end_line >= $${i * 2 + 2})`)\n    .join(' OR ')\n\n  const params: (string | number)[] = [filepath]\n  for (const r of ranges) {\n    params.push(r.startLine, r.endLine)\n  }\n\n  const query = `\n    SELECT DISTINCT e.* FROM entity_graph.entities e\n    WHERE e.filepath = $1\n      AND e.kind != 'file'\n      AND (${conditions})\n    ORDER BY e.start_line ASC NULLS LAST\n  `\n  const rows = await sql.unsafe<EntityRow[]>(query, params)\n  return rows.map(rowToEntity)\n}"
+      },
+      "changeKind": "signature_changed",
+      "fileStatus": "modified"
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/queries.ts:BlastRadiusEntry",
+        "kind": "interface",
+        "name": "BlastRadiusEntry",
+        "filepath": "packages/plugins/entity-graph/src/queries.ts",
+        "startLine": 246,
+        "endLine": 251,
+        "exported": true,
+        "async": false,
+        "rawText": "interface BlastRadiusEntry {\n  entity: Entity\n  depth: number\n  via: EdgeType\n  seedId: string\n}"
+      },
+      "changeKind": "signature_changed",
+      "fileStatus": "modified"
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/queries.ts:entityBlastRadius",
+        "kind": "function",
+        "name": "entityBlastRadius",
+        "filepath": "packages/plugins/entity-graph/src/queries.ts",
+        "startLine": 253,
+        "endLine": 304,
+        "exported": true,
+        "async": true,
+        "rawText": "async function entityBlastRadius(\n  sql: Sql,\n  entityIds: string[],\n  maxDepth: number = 2,\n): Promise<BlastRadiusEntry[]> {\n  if (entityIds.length === 0) return []\n\n  const rows = await sql<Array<EntityRow & { depth: number; via: string; seed_id: string }>>`\n    WITH RECURSIVE affected AS (\n      SELECT id, kind, name, filepath, start_line, end_line, exported, async, raw_text,\n             0 AS depth, 'seed' AS via, id AS seed_id\n      FROM entity_graph.entities\n      WHERE id = ANY(${entityIds})\n\n      UNION\n\n      SELECT DISTINCT e.id, e.kind, e.name, e.filepath, e.start_line, e.end_line,\n             e.exported, e.async, e.raw_text,\n             a.depth + 1, edges.edge_type, a.seed_id\n      FROM affected a\n      JOIN (\n        SELECT importer_id AS dependent_id, imported_id AS dependency_id, 'imports' AS edge_type FROM entity_graph.imports\n        UNION ALL\n        SELECT caller_id, callee_id, 'calls' FROM entity_graph.calls\n        UNION ALL\n        SELECT user_id, used_id, 'uses' FROM entity_graph.uses\n        UNION ALL\n        SELECT child_id, parent_id, 'extends' FROM entity_graph.extends\n        UNION ALL\n        SELECT implementor_id, interface_id, 'implements' FROM entity_graph.implements\n      ) edges ON edges.dependency_id = a.id\n      JOIN entity_graph.entities e ON e.id = edges.dependent_id\n      WHERE a.depth < ${maxDepth}\n    ),\n    ranked AS (\n      SELECT *,\n             ROW_NUMBER() OVER (PARTITION BY id, seed_id ORDER BY depth ASC, via ASC) AS rn\n      FROM affected\n      WHERE via != 'seed'\n    )\n    SELECT * FROM ranked\n    WHERE rn = 1\n    ORDER BY depth ASC, filepath ASC\n  `\n\n  return rows.map(row => ({\n    entity: rowToEntity(row),\n    depth: row.depth,\n    via: row.via as EdgeType,\n    seedId: row.seed_id,\n  }))\n}"
+      },
+      "changeKind": "signature_changed",
+      "fileStatus": "modified"
+    },
+    {
+      "entity": {
+        "id": "function:tests/entity-graph/pr-review-classifier.test.ts:makeEntity",
+        "kind": "function",
+        "name": "makeEntity",
+        "filepath": "tests/entity-graph/pr-review-classifier.test.ts",
+        "startLine": 13,
+        "endLine": 22,
+        "exported": false,
+        "async": false,
+        "rawText": "function makeEntity(overrides: Partial<Entity> & { id: string; kind: Entity['kind']; name: string; filepath: string }): Entity {\n  return {\n    startLine: null,\n    endLine: null,\n    exported: false,\n    async: false,\n    rawText: null,\n    ...overrides,\n  }\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:tests/entity-graph/pr-review-classifier.test.ts:mockSql",
+        "kind": "function",
+        "name": "mockSql",
+        "filepath": "tests/entity-graph/pr-review-classifier.test.ts",
+        "startLine": 29,
+        "endLine": 66,
+        "exported": false,
+        "async": false,
+        "rawText": "function mockSql(entitiesByFile: Record<string, Entity[]>) {\n  // Template tag handler (for entitiesInFile/entityById style queries)\n  const handler = function (strings: TemplateStringsArray, ...values: unknown[]) {\n    const query = strings.join('?')\n    // entitiesInFile: WHERE filepath = <value>\n    if (query.includes('FROM entity_graph.entities WHERE filepath')) {\n      const filepath = values[0] as string\n      return Promise.resolve((entitiesByFile[filepath] ?? []).map(entityToRow))\n    }\n    return Promise.resolve([])\n  } as any\n\n  // sql.unsafe handler (for entitiesAtLines dynamic query)\n  handler.unsafe = (query: string, params: unknown[]) => {\n    if (query.includes('FROM entity_graph.entities e') && query.includes('start_line')) {\n      const filepath = params[0] as string\n      const entities = entitiesByFile[filepath] ?? []\n      // Filter to non-file entities (the real query excludes kind='file')\n      const nonFile = entities.filter(e => e.kind !== 'file')\n\n      // Extract line ranges from params (pairs after filepath)\n      const ranges: Array<{ startLine: number; endLine: number }> = []\n      for (let i = 1; i < params.length; i += 2) {\n        ranges.push({ startLine: params[i] as number, endLine: params[i + 1] as number })\n      }\n\n      // Filter entities that overlap any range\n      const result = nonFile.filter(e => {\n        if (e.startLine == null || e.endLine == null) return false\n        return ranges.some(r => e.startLine! <= r.endLine && e.endLine! >= r.startLine)\n      })\n      return Promise.resolve(result.map(entityToRow))\n    }\n    return Promise.resolve([])\n  }\n\n  return handler\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:tests/entity-graph/pr-review-classifier.test.ts:entityToRow",
+        "kind": "function",
+        "name": "entityToRow",
+        "filepath": "tests/entity-graph/pr-review-classifier.test.ts",
+        "startLine": 68,
+        "endLine": 80,
+        "exported": false,
+        "async": false,
+        "rawText": "function entityToRow(e: Entity) {\n  return {\n    id: e.id,\n    kind: e.kind,\n    name: e.name,\n    filepath: e.filepath,\n    start_line: e.startLine,\n    end_line: e.endLine,\n    exported: e.exported,\n    async: e.async,\n    raw_text: e.rawText,\n  }\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "file:tests/entity-graph/pr-review-diff.test.ts:tests/entity-graph/pr-review-diff.test.ts",
+        "kind": "file",
+        "name": "tests/entity-graph/pr-review-diff.test.ts",
+        "filepath": "tests/entity-graph/pr-review-diff.test.ts",
+        "startLine": null,
+        "endLine": null,
+        "exported": false,
+        "async": false,
+        "rawText": null
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    },
+    {
+      "entity": {
+        "id": "function:tests/entity-graph/pr-review-scorer.test.ts:makeEntity",
+        "kind": "function",
+        "name": "makeEntity",
+        "filepath": "tests/entity-graph/pr-review-scorer.test.ts",
+        "startLine": 10,
+        "endLine": 19,
+        "exported": false,
+        "async": false,
+        "rawText": "function makeEntity(overrides: Partial<Entity> & { id: string; kind: Entity['kind']; name: string; filepath: string }): Entity {\n  return {\n    startLine: null,\n    endLine: null,\n    exported: false,\n    async: false,\n    rawText: null,\n    ...overrides,\n  }\n}"
+      },
+      "changeKind": "entity_added",
+      "fileStatus": "added"
+    }
+  ],
+  "blastRadius": {
+    "direct": [
+      {
+        "entity": {
+          "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.entitiesAtLines",
+          "kind": "method",
+          "name": "EntityGraph.entitiesAtLines",
+          "filepath": "packages/plugins/entity-graph/src/index.ts",
+          "startLine": 134,
+          "endLine": 139,
+          "exported": true,
+          "async": true,
+          "rawText": "async entitiesAtLines(\n    filepath: string,\n    ranges: Array<{ startLine: number; endLine: number }>,\n  ): Promise<Entity[]> {\n    return entitiesAtLines(this.sql, filepath, ranges)\n  }"
+        },
+        "depth": 1,
+        "via": "calls",
+        "seedId": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.entitiesAtLines"
+      },
+      {
+        "entity": {
+          "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.entityBlastRadius",
+          "kind": "method",
+          "name": "EntityGraph.entityBlastRadius",
+          "filepath": "packages/plugins/entity-graph/src/index.ts",
+          "startLine": 141,
+          "endLine": 143,
+          "exported": true,
+          "async": true,
+          "rawText": "async entityBlastRadius(entityIds: string[], maxDepth?: number): Promise<BlastRadiusEntry[]> {\n    return entityBlastRadius(this.sql, entityIds, maxDepth)\n  }"
+        },
+        "depth": 1,
+        "via": "calls",
+        "seedId": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.entityBlastRadius"
+      },
+      {
+        "entity": {
+          "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.graphStats",
+          "kind": "method",
+          "name": "EntityGraph.graphStats",
+          "filepath": "packages/plugins/entity-graph/src/index.ts",
+          "startLine": 145,
+          "endLine": 147,
+          "exported": true,
+          "async": true,
+          "rawText": "async graphStats(): Promise<GraphStats> {\n    return graphStats(this.sql)\n  }"
+        },
+        "depth": 1,
+        "via": "calls",
+        "seedId": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.graphStats"
+      },
+      {
+        "entity": {
+          "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.reviewDiff",
+          "kind": "method",
+          "name": "EntityGraph.reviewDiff",
+          "filepath": "packages/plugins/entity-graph/src/index.ts",
+          "startLine": 152,
+          "endLine": 154,
+          "exported": true,
+          "async": true,
+          "rawText": "async reviewDiff(diffText: string, maxDepth?: number): Promise<PRReview> {\n    return reviewDiff(this.sql, diffText, maxDepth)\n  }"
+        },
+        "depth": 1,
+        "via": "calls",
+        "seedId": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.reviewDiff"
+      },
+      {
+        "entity": {
+          "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.unusedExports",
+          "kind": "method",
+          "name": "EntityGraph.unusedExports",
+          "filepath": "packages/plugins/entity-graph/src/index.ts",
+          "startLine": 130,
+          "endLine": 132,
+          "exported": true,
+          "async": true,
+          "rawText": "async unusedExports(filepath?: string): Promise<Entity[]> {\n    return unusedExports(this.sql, filepath)\n  }"
+        },
+        "depth": 1,
+        "via": "calls",
+        "seedId": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.unusedExports"
+      },
+      {
+        "entity": {
+          "id": "function:packages/plugins/entity-graph/src/pr-review/classifier.ts:classifyChanges",
+          "kind": "function",
+          "name": "classifyChanges",
+          "filepath": "packages/plugins/entity-graph/src/pr-review/classifier.ts",
+          "startLine": 21,
+          "endLine": 114,
+          "exported": true,
+          "async": true,
+          "rawText": "async function classifyChanges(\n  sql: Sql,\n  fileChanges: FileChange[],\n): Promise<EntityChange[]> {\n  const results: EntityChange[] = []\n\n  for (const fc of fileChanges) {\n    switch (fc.status) {\n      case 'added': {\n        const entities = await entitiesInFile(sql, fc.filepath)\n        const nonFile = entities.filter(e => e.kind !== 'file')\n        if (nonFile.length === 0) {\n          results.push({\n            entity: syntheticFileEntity(fc.filepath),\n            changeKind: 'entity_added',\n            fileStatus: 'added',\n          })\n          break\n        }\n        for (const e of nonFile) {\n          results.push({ entity: e, changeKind: 'entity_added', fileStatus: 'added' })\n        }\n        break\n      }\n\n      case 'deleted': {\n        const entities = await entitiesInFile(sql, fc.filepath)\n        const nonFile = entities.filter(e => e.kind !== 'file')\n        if (nonFile.length === 0) {\n          results.push({\n            entity: syntheticFileEntity(fc.filepath),\n            changeKind: 'entity_deleted',\n            fileStatus: 'deleted',\n          })\n          break\n        }\n        for (const e of nonFile) {\n          results.push({ entity: e, changeKind: 'entity_deleted', fileStatus: 'deleted' })\n        }\n        break\n      }\n\n      case 'renamed': {\n        // Old path entities deleted, new path entities added\n        if (fc.oldFilepath) {\n          const oldEntities = await entitiesInFile(sql, fc.oldFilepath)\n          const oldNonFile = oldEntities.filter(e => e.kind !== 'file')\n          if (oldNonFile.length === 0) {\n            results.push({\n              entity: syntheticFileEntity(fc.oldFilepath),\n              changeKind: 'entity_deleted',\n              fileStatus: 'renamed',\n            })\n          }\n          for (const e of oldNonFile) {\n            results.push({ entity: e, changeKind: 'entity_deleted', fileStatus: 'renamed' })\n          }\n        }\n        const newEntities = await entitiesInFile(sql, fc.filepath)\n        co..."
+        },
+        "depth": 1,
+        "via": "calls",
+        "seedId": "function:packages/plugins/entity-graph/src/pr-review/classifier.ts:inferChangeKind"
+      },
+      {
+        "entity": {
+          "id": "function:packages/plugins/entity-graph/src/pr-review/diff.ts:parseDiff",
+          "kind": "function",
+          "name": "parseDiff",
+          "filepath": "packages/plugins/entity-graph/src/pr-review/diff.ts",
+          "startLine": 13,
+          "endLine": 34,
+          "exported": true,
+          "async": false,
+          "rawText": "function parseDiff(diffText: string): FileChange[] {\n  const changes: FileChange[] = []\n  // Normalize CRLF/CR to LF so header parsing remains stable across platforms.\n  const lines = diffText.replace(/\\r/g, '').split('\\n')\n  let i = 0\n\n  while (i < lines.length) {\n    // Find next \"diff --git\" header\n    if (!lines[i].startsWith('diff --git ')) {\n      i++\n      continue\n    }\n\n    const { change, nextIndex } = parseFileDiff(lines, i)\n    if (change) {\n      changes.push(change)\n    }\n    i = nextIndex\n  }\n\n  return changes\n}"
+        },
+        "depth": 1,
+        "via": "calls",
+        "seedId": "function:packages/plugins/entity-graph/src/pr-review/diff.ts:parseFileDiff"
+      },
+      {
+        "entity": {
+          "id": "function:packages/plugins/entity-graph/src/pr-review/diff.ts:parseFileDiff",
+          "kind": "function",
+          "name": "parseFileDiff",
+          "filepath": "packages/plugins/entity-graph/src/pr-review/diff.ts",
+          "startLine": 36,
+          "endLine": 92,
+          "exported": false,
+          "async": false,
+          "rawText": "function parseFileDiff(\n  lines: string[],\n  start: number,\n): { change: FileChange | null; nextIndex: number } {\n  let i = start\n\n  // Parse \"diff --git a/path b/path\"\n  const diffLine = lines[i]\n  const gitMatch = diffLine.match(/^diff --git a\\/(.+) b\\/(.+)$/)\n  if (!gitMatch) return { change: null, nextIndex: i + 1 }\n\n  const aPath = gitMatch[1]\n  const bPath = gitMatch[2]\n  i++\n\n  // Consume metadata lines (old mode, new mode, similarity, index, etc.)\n  let status: FileChange['status'] = 'modified'\n  let oldFilepath: string | undefined\n\n  while (i < lines.length && !lines[i].startsWith('diff --git ')) {\n    const line = lines[i]\n\n    if (line.startsWith('new file mode')) {\n      status = 'added'\n    } else if (line.startsWith('deleted file mode')) {\n      status = 'deleted'\n    } else if (line.startsWith('rename from ')) {\n      status = 'renamed'\n      oldFilepath = line.slice('rename from '.length)\n    } else if (line.startsWith('--- ') || line.startsWith('+++ ')) {\n      // Skip --- / +++ lines, handled by hunk parsing\n    } else if (line.startsWith('@@')) {\n      break // Start of hunks\n    }\n    i++\n  }\n\n  // Parse hunks\n  const hunks: Hunk[] = []\n  while (i < lines.length && !lines[i].startsWith('diff --git ')) {\n    if (lines[i].startsWith('@@')) {\n      const hunk = parseHunkHeader(lines[i])\n      if (hunk) hunks.push(hunk)\n    }\n    i++\n  }\n\n  return {\n    change: {\n      filepath: bPath,\n      status,\n      oldFilepath,\n      hunks,\n    },\n    nextIndex: i,\n  }\n}"
+        },
+        "depth": 1,
+        "via": "calls",
+        "seedId": "function:packages/plugins/entity-graph/src/pr-review/diff.ts:parseHunkHeader"
+      },
+      {
+        "entity": {
+          "id": "function:packages/plugins/entity-graph/src/pr-review/review.ts:reviewDiff",
+          "kind": "function",
+          "name": "reviewDiff",
+          "filepath": "packages/plugins/entity-graph/src/pr-review/review.ts",
+          "startLine": 24,
+          "endLine": 76,
+          "exported": true,
+          "async": true,
+          "rawText": "async function reviewDiff(\n  sql: Sql,\n  diffText: string,\n  maxDepth: number = 2,\n): Promise<PRReview> {\n  // 1. Parse diff → structured file changes\n  const fileChanges = parseDiff(diffText)\n\n  // 2. Classify → entity-level changes\n  const changedEntities = await classifyChanges(sql, fileChanges)\n\n  // 3. Compute entity-level blast radius\n  const seedIds = changedEntities.map(ec => ec.entity.id)\n  const rawBlastEntries = await entityBlastRadius(sql, seedIds, maxDepth)\n  const blastEntries = dedupeBlastEntries(rawBlastEntries)\n\n  const direct = blastEntries.filter(e => e.depth === 1)\n  const transitive = blastEntries.filter(e => e.depth > 1)\n\n  const affectedFiles = new Set<string>()\n  for (const e of blastEntries) affectedFiles.add(e.entity.filepath)\n\n  // 4. Score risks\n  const risks = scoreRisks(changedEntities, rawBlastEntries)\n  const impactGaps = computeImpactGaps(changedEntities, rawBlastEntries)\n\n  // 5. Detect newly-introduced dead code (unused exports in changed files)\n  const addedFiles = fileChanges\n    .filter(fc => fc.status === 'added' || fc.status === 'modified' || fc.status === 'renamed')\n    .map(fc => fc.filepath)\n  const uniqueAddedFiles = Array.from(new Set(addedFiles))\n\n  const deadCode = dedupeEntitiesById((\n    await Promise.all(uniqueAddedFiles.map(fp => unusedExports(sql, fp)))\n  ).flat())\n\n  // 6. Build summary\n  const summary = buildSummary(changedEntities.length, direct.length, transitive.length, risks, impactGaps)\n\n  return {\n    summary,\n    changedEntities,\n    blastRadius: {\n      direct,\n      transitive,\n      totalFiles: affectedFiles.size,\n      totalEntities: blastEntries.length,\n    },\n    risks,\n    impactGaps,\n    deadCode,\n  }\n}"
+        },
+        "depth": 1,
+        "via": "calls",
+        "seedId": "function:packages/plugins/entity-graph/src/pr-review/review.ts:dedupeEntitiesById"
+      },
+      {
+        "entity": {
+          "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:scoreRisks",
+          "kind": "function",
+          "name": "scoreRisks",
+          "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+          "startLine": 38,
+          "endLine": 163,
+          "exported": true,
+          "async": false,
+          "rawText": "function scoreRisks(\n  changedEntities: EntityChange[],\n  blastEntries: BlastRadiusEntry[],\n): RiskSignal[] {\n  const seedSeverity = seedSeverityByEntity(changedEntities)\n  const fallbackWorst = worstUpstreamSeverity(changedEntities)\n  const changedEntityIds = new Set(changedEntities.map(ec => ec.entity.id))\n\n  const blastByEntity = new Map<string, {\n    entity: Entity\n    depth: number\n    vias: Set<string>\n    upstream: { score: number; factor: string | null }\n  }>()\n\n  // Aggregate blast entries by entity to avoid duplicate rows from multi-path traversal.\n  for (const entry of blastEntries) {\n    const upstream = upstreamSeverityForEntry(entry, seedSeverity, fallbackWorst)\n    const existing = blastByEntity.get(entry.entity.id)\n\n    if (!existing) {\n      blastByEntity.set(entry.entity.id, {\n        entity: entry.entity,\n        depth: entry.depth,\n        vias: new Set([entry.via]),\n        upstream,\n      })\n      continue\n    }\n\n    if (entry.depth < existing.depth) {\n      existing.depth = entry.depth\n      existing.vias = new Set([entry.via])\n    } else if (entry.depth === existing.depth) {\n      existing.vias.add(entry.via)\n    }\n\n    if (upstream.score > existing.upstream.score) {\n      existing.upstream = upstream\n    }\n  }\n\n  const signalsByEntity = new Map<string, RiskSignal>()\n\n  // Score blast-radius entities.\n  for (const aggregate of blastByEntity.values()) {\n    const factors: string[] = []\n    let score = 0\n\n    const proximityScore = aggregate.depth === 1\n      ? 25\n      : Math.max(5, 25 - (aggregate.depth - 1) * 8)\n    score += proximityScore\n\n    const viaList = Array.from(aggregate.vias).sort().join(', ')\n    factors.push(`depth ${aggregate.depth} dependent (${viaList} edge)`)\n\n    const kindScore = KIND_WEIGHT[aggregate.entity.kind] ?? 5\n    score += kindScore\n    if (kindScore >= 15) {\n      factors.push(`${aggregate.entity.kind} change has wide contract impact`)\n    }\n\n    if (aggregate.entity.exported) {\n      score += 10\n      factors.pu..."
+        },
+        "depth": 1,
+        "via": "calls",
+        "seedId": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:seedSeverityByEntity"
+      },
+      {
+        "entity": {
+          "id": "file:tests/entity-graph/pr-review-classifier.test.ts:tests/entity-graph/pr-review-classifier.test.ts",
+          "kind": "file",
+          "name": "tests/entity-graph/pr-review-classifier.test.ts",
+          "filepath": "tests/entity-graph/pr-review-classifier.test.ts",
+          "startLine": 1,
+          "endLine": 388,
+          "exported": false,
+          "async": false,
+          "rawText": null
+        },
+        "depth": 1,
+        "via": "calls",
+        "seedId": "function:tests/entity-graph/pr-review-classifier.test.ts:makeEntity"
+      },
+      {
+        "entity": {
+          "id": "file:tests/entity-graph/pr-review-scorer.test.ts:tests/entity-graph/pr-review-scorer.test.ts",
+          "kind": "file",
+          "name": "tests/entity-graph/pr-review-scorer.test.ts",
+          "filepath": "tests/entity-graph/pr-review-scorer.test.ts",
+          "startLine": 1,
+          "endLine": 307,
+          "exported": false,
+          "async": false,
+          "rawText": null
+        },
+        "depth": 1,
+        "via": "calls",
+        "seedId": "function:tests/entity-graph/pr-review-scorer.test.ts:makeEntity"
+      }
+    ],
+    "transitive": [],
+    "totalFiles": 7,
+    "totalEntities": 12
+  },
+  "risks": [
+    {
+      "entity": {
+        "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.entitiesAtLines",
+        "kind": "method",
+        "name": "EntityGraph.entitiesAtLines",
+        "filepath": "packages/plugins/entity-graph/src/index.ts",
+        "startLine": 134,
+        "endLine": 139,
+        "exported": true,
+        "async": true,
+        "rawText": "async entitiesAtLines(\n    filepath: string,\n    ranges: Array<{ startLine: number; endLine: number }>,\n  ): Promise<Entity[]> {\n    return entitiesAtLines(this.sql, filepath, ranges)\n  }"
+      },
+      "score": 61,
+      "factors": [
+        "directly signature changed",
+        "exported entity",
+        "no direct dependents found in graph",
+        "depth 1 dependent (calls edge)",
+        "exported — visible to external consumers",
+        "upstream signature changed in EntityGraph.entitiesAtLines"
+      ]
+    },
+    {
+      "entity": {
+        "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.entityBlastRadius",
+        "kind": "method",
+        "name": "EntityGraph.entityBlastRadius",
+        "filepath": "packages/plugins/entity-graph/src/index.ts",
+        "startLine": 141,
+        "endLine": 143,
+        "exported": true,
+        "async": true,
+        "rawText": "async entityBlastRadius(entityIds: string[], maxDepth?: number): Promise<BlastRadiusEntry[]> {\n    return entityBlastRadius(this.sql, entityIds, maxDepth)\n  }"
+      },
+      "score": 61,
+      "factors": [
+        "directly signature changed",
+        "exported entity",
+        "no direct dependents found in graph",
+        "depth 1 dependent (calls edge)",
+        "exported — visible to external consumers",
+        "upstream signature changed in EntityGraph.entityBlastRadius"
+      ]
+    },
+    {
+      "entity": {
+        "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.graphStats",
+        "kind": "method",
+        "name": "EntityGraph.graphStats",
+        "filepath": "packages/plugins/entity-graph/src/index.ts",
+        "startLine": 145,
+        "endLine": 147,
+        "exported": true,
+        "async": true,
+        "rawText": "async graphStats(): Promise<GraphStats> {\n    return graphStats(this.sql)\n  }"
+      },
+      "score": 61,
+      "factors": [
+        "directly signature changed",
+        "exported entity",
+        "no direct dependents found in graph",
+        "depth 1 dependent (calls edge)",
+        "exported — visible to external consumers",
+        "upstream signature changed in EntityGraph.graphStats"
+      ]
+    },
+    {
+      "entity": {
+        "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.reviewDiff",
+        "kind": "method",
+        "name": "EntityGraph.reviewDiff",
+        "filepath": "packages/plugins/entity-graph/src/index.ts",
+        "startLine": 152,
+        "endLine": 154,
+        "exported": true,
+        "async": true,
+        "rawText": "async reviewDiff(diffText: string, maxDepth?: number): Promise<PRReview> {\n    return reviewDiff(this.sql, diffText, maxDepth)\n  }"
+      },
+      "score": 61,
+      "factors": [
+        "directly signature changed",
+        "exported entity",
+        "no direct dependents found in graph",
+        "depth 1 dependent (calls edge)",
+        "exported — visible to external consumers",
+        "upstream signature changed in EntityGraph.reviewDiff"
+      ]
+    },
+    {
+      "entity": {
+        "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.unusedExports",
+        "kind": "method",
+        "name": "EntityGraph.unusedExports",
+        "filepath": "packages/plugins/entity-graph/src/index.ts",
+        "startLine": 130,
+        "endLine": 132,
+        "exported": true,
+        "async": true,
+        "rawText": "async unusedExports(filepath?: string): Promise<Entity[]> {\n    return unusedExports(this.sql, filepath)\n  }"
+      },
+      "score": 61,
+      "factors": [
+        "directly signature changed",
+        "exported entity",
+        "no direct dependents found in graph",
+        "depth 1 dependent (calls edge)",
+        "exported — visible to external consumers",
+        "upstream signature changed in EntityGraph.unusedExports"
+      ]
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/queries.ts:BlastRadiusEntry",
+        "kind": "interface",
+        "name": "BlastRadiusEntry",
+        "filepath": "packages/plugins/entity-graph/src/queries.ts",
+        "startLine": 246,
+        "endLine": 251,
+        "exported": true,
+        "async": false,
+        "rawText": "interface BlastRadiusEntry {\n  entity: Entity\n  depth: number\n  via: EdgeType\n  seedId: string\n}"
+      },
+      "score": 60,
+      "factors": [
+        "directly signature changed",
+        "exported entity",
+        "no direct dependents found in graph"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/queries.ts:entitiesAtLines",
+        "kind": "function",
+        "name": "entitiesAtLines",
+        "filepath": "packages/plugins/entity-graph/src/queries.ts",
+        "startLine": 213,
+        "endLine": 240,
+        "exported": true,
+        "async": true,
+        "rawText": "async function entitiesAtLines(\n  sql: Sql,\n  filepath: string,\n  ranges: Array<{ startLine: number; endLine: number }>,\n): Promise<Entity[]> {\n  if (ranges.length === 0) return []\n\n  // Build OR clause for overlapping ranges:\n  // entity overlaps range when entity.start_line <= range.end AND entity.end_line >= range.start\n  const conditions = ranges\n    .map((_, i) => `(e.start_line <= $${i * 2 + 3} AND e.end_line >= $${i * 2 + 2})`)\n    .join(' OR ')\n\n  const params: (string | number)[] = [filepath]\n  for (const r of ranges) {\n    params.push(r.startLine, r.endLine)\n  }\n\n  const query = `\n    SELECT DISTINCT e.* FROM entity_graph.entities e\n    WHERE e.filepath = $1\n      AND e.kind != 'file'\n      AND (${conditions})\n    ORDER BY e.start_line ASC NULLS LAST\n  `\n  const rows = await sql.unsafe<EntityRow[]>(query, params)\n  return rows.map(rowToEntity)\n}"
+      },
+      "score": 50,
+      "factors": [
+        "directly signature changed",
+        "exported entity",
+        "no direct dependents found in graph"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/queries.ts:entityBlastRadius",
+        "kind": "function",
+        "name": "entityBlastRadius",
+        "filepath": "packages/plugins/entity-graph/src/queries.ts",
+        "startLine": 253,
+        "endLine": 304,
+        "exported": true,
+        "async": true,
+        "rawText": "async function entityBlastRadius(\n  sql: Sql,\n  entityIds: string[],\n  maxDepth: number = 2,\n): Promise<BlastRadiusEntry[]> {\n  if (entityIds.length === 0) return []\n\n  const rows = await sql<Array<EntityRow & { depth: number; via: string; seed_id: string }>>`\n    WITH RECURSIVE affected AS (\n      SELECT id, kind, name, filepath, start_line, end_line, exported, async, raw_text,\n             0 AS depth, 'seed' AS via, id AS seed_id\n      FROM entity_graph.entities\n      WHERE id = ANY(${entityIds})\n\n      UNION\n\n      SELECT DISTINCT e.id, e.kind, e.name, e.filepath, e.start_line, e.end_line,\n             e.exported, e.async, e.raw_text,\n             a.depth + 1, edges.edge_type, a.seed_id\n      FROM affected a\n      JOIN (\n        SELECT importer_id AS dependent_id, imported_id AS dependency_id, 'imports' AS edge_type FROM entity_graph.imports\n        UNION ALL\n        SELECT caller_id, callee_id, 'calls' FROM entity_graph.calls\n        UNION ALL\n        SELECT user_id, used_id, 'uses' FROM entity_graph.uses\n        UNION ALL\n        SELECT child_id, parent_id, 'extends' FROM entity_graph.extends\n        UNION ALL\n        SELECT implementor_id, interface_id, 'implements' FROM entity_graph.implements\n      ) edges ON edges.dependency_id = a.id\n      JOIN entity_graph.entities e ON e.id = edges.dependent_id\n      WHERE a.depth < ${maxDepth}\n    ),\n    ranked AS (\n      SELECT *,\n             ROW_NUMBER() OVER (PARTITION BY id, seed_id ORDER BY depth ASC, via ASC) AS rn\n      FROM affected\n      WHERE via != 'seed'\n    )\n    SELECT * FROM ranked\n    WHERE rn = 1\n    ORDER BY depth ASC, filepath ASC\n  `\n\n  return rows.map(row => ({\n    entity: rowToEntity(row),\n    depth: row.depth,\n    via: row.via as EdgeType,\n    seedId: row.seed_id,\n  }))\n}"
+      },
+      "score": 50,
+      "factors": [
+        "directly signature changed",
+        "exported entity",
+        "no direct dependents found in graph"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/classifier.ts:classifyChanges",
+        "kind": "function",
+        "name": "classifyChanges",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/classifier.ts",
+        "startLine": 21,
+        "endLine": 114,
+        "exported": true,
+        "async": true,
+        "rawText": "async function classifyChanges(\n  sql: Sql,\n  fileChanges: FileChange[],\n): Promise<EntityChange[]> {\n  const results: EntityChange[] = []\n\n  for (const fc of fileChanges) {\n    switch (fc.status) {\n      case 'added': {\n        const entities = await entitiesInFile(sql, fc.filepath)\n        const nonFile = entities.filter(e => e.kind !== 'file')\n        if (nonFile.length === 0) {\n          results.push({\n            entity: syntheticFileEntity(fc.filepath),\n            changeKind: 'entity_added',\n            fileStatus: 'added',\n          })\n          break\n        }\n        for (const e of nonFile) {\n          results.push({ entity: e, changeKind: 'entity_added', fileStatus: 'added' })\n        }\n        break\n      }\n\n      case 'deleted': {\n        const entities = await entitiesInFile(sql, fc.filepath)\n        const nonFile = entities.filter(e => e.kind !== 'file')\n        if (nonFile.length === 0) {\n          results.push({\n            entity: syntheticFileEntity(fc.filepath),\n            changeKind: 'entity_deleted',\n            fileStatus: 'deleted',\n          })\n          break\n        }\n        for (const e of nonFile) {\n          results.push({ entity: e, changeKind: 'entity_deleted', fileStatus: 'deleted' })\n        }\n        break\n      }\n\n      case 'renamed': {\n        // Old path entities deleted, new path entities added\n        if (fc.oldFilepath) {\n          const oldEntities = await entitiesInFile(sql, fc.oldFilepath)\n          const oldNonFile = oldEntities.filter(e => e.kind !== 'file')\n          if (oldNonFile.length === 0) {\n            results.push({\n              entity: syntheticFileEntity(fc.oldFilepath),\n              changeKind: 'entity_deleted',\n              fileStatus: 'renamed',\n            })\n          }\n          for (const e of oldNonFile) {\n            results.push({ entity: e, changeKind: 'entity_deleted', fileStatus: 'renamed' })\n          }\n        }\n        const newEntities = await entitiesInFile(sql, fc.filepath)\n        co..."
+      },
+      "score": 48,
+      "factors": [
+        "directly entity added",
+        "exported entity",
+        "depth 1 dependent (calls edge)",
+        "exported — visible to external consumers",
+        "upstream entity added in inferChangeKind"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/diff.ts:parseDiff",
+        "kind": "function",
+        "name": "parseDiff",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/diff.ts",
+        "startLine": 13,
+        "endLine": 34,
+        "exported": true,
+        "async": false,
+        "rawText": "function parseDiff(diffText: string): FileChange[] {\n  const changes: FileChange[] = []\n  // Normalize CRLF/CR to LF so header parsing remains stable across platforms.\n  const lines = diffText.replace(/\\r/g, '').split('\\n')\n  let i = 0\n\n  while (i < lines.length) {\n    // Find next \"diff --git\" header\n    if (!lines[i].startsWith('diff --git ')) {\n      i++\n      continue\n    }\n\n    const { change, nextIndex } = parseFileDiff(lines, i)\n    if (change) {\n      changes.push(change)\n    }\n    i = nextIndex\n  }\n\n  return changes\n}"
+      },
+      "score": 48,
+      "factors": [
+        "directly entity added",
+        "exported entity",
+        "depth 1 dependent (calls edge)",
+        "exported — visible to external consumers",
+        "upstream entity added in parseFileDiff"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/review.ts:reviewDiff",
+        "kind": "function",
+        "name": "reviewDiff",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/review.ts",
+        "startLine": 24,
+        "endLine": 76,
+        "exported": true,
+        "async": true,
+        "rawText": "async function reviewDiff(\n  sql: Sql,\n  diffText: string,\n  maxDepth: number = 2,\n): Promise<PRReview> {\n  // 1. Parse diff → structured file changes\n  const fileChanges = parseDiff(diffText)\n\n  // 2. Classify → entity-level changes\n  const changedEntities = await classifyChanges(sql, fileChanges)\n\n  // 3. Compute entity-level blast radius\n  const seedIds = changedEntities.map(ec => ec.entity.id)\n  const rawBlastEntries = await entityBlastRadius(sql, seedIds, maxDepth)\n  const blastEntries = dedupeBlastEntries(rawBlastEntries)\n\n  const direct = blastEntries.filter(e => e.depth === 1)\n  const transitive = blastEntries.filter(e => e.depth > 1)\n\n  const affectedFiles = new Set<string>()\n  for (const e of blastEntries) affectedFiles.add(e.entity.filepath)\n\n  // 4. Score risks\n  const risks = scoreRisks(changedEntities, rawBlastEntries)\n  const impactGaps = computeImpactGaps(changedEntities, rawBlastEntries)\n\n  // 5. Detect newly-introduced dead code (unused exports in changed files)\n  const addedFiles = fileChanges\n    .filter(fc => fc.status === 'added' || fc.status === 'modified' || fc.status === 'renamed')\n    .map(fc => fc.filepath)\n  const uniqueAddedFiles = Array.from(new Set(addedFiles))\n\n  const deadCode = dedupeEntitiesById((\n    await Promise.all(uniqueAddedFiles.map(fp => unusedExports(sql, fp)))\n  ).flat())\n\n  // 6. Build summary\n  const summary = buildSummary(changedEntities.length, direct.length, transitive.length, risks, impactGaps)\n\n  return {\n    summary,\n    changedEntities,\n    blastRadius: {\n      direct,\n      transitive,\n      totalFiles: affectedFiles.size,\n      totalEntities: blastEntries.length,\n    },\n    risks,\n    impactGaps,\n    deadCode,\n  }\n}"
+      },
+      "score": 48,
+      "factors": [
+        "directly entity added",
+        "exported entity",
+        "depth 1 dependent (calls edge)",
+        "exported — visible to external consumers",
+        "upstream entity added in dedupeEntitiesById"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:scoreRisks",
+        "kind": "function",
+        "name": "scoreRisks",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+        "startLine": 38,
+        "endLine": 163,
+        "exported": true,
+        "async": false,
+        "rawText": "function scoreRisks(\n  changedEntities: EntityChange[],\n  blastEntries: BlastRadiusEntry[],\n): RiskSignal[] {\n  const seedSeverity = seedSeverityByEntity(changedEntities)\n  const fallbackWorst = worstUpstreamSeverity(changedEntities)\n  const changedEntityIds = new Set(changedEntities.map(ec => ec.entity.id))\n\n  const blastByEntity = new Map<string, {\n    entity: Entity\n    depth: number\n    vias: Set<string>\n    upstream: { score: number; factor: string | null }\n  }>()\n\n  // Aggregate blast entries by entity to avoid duplicate rows from multi-path traversal.\n  for (const entry of blastEntries) {\n    const upstream = upstreamSeverityForEntry(entry, seedSeverity, fallbackWorst)\n    const existing = blastByEntity.get(entry.entity.id)\n\n    if (!existing) {\n      blastByEntity.set(entry.entity.id, {\n        entity: entry.entity,\n        depth: entry.depth,\n        vias: new Set([entry.via]),\n        upstream,\n      })\n      continue\n    }\n\n    if (entry.depth < existing.depth) {\n      existing.depth = entry.depth\n      existing.vias = new Set([entry.via])\n    } else if (entry.depth === existing.depth) {\n      existing.vias.add(entry.via)\n    }\n\n    if (upstream.score > existing.upstream.score) {\n      existing.upstream = upstream\n    }\n  }\n\n  const signalsByEntity = new Map<string, RiskSignal>()\n\n  // Score blast-radius entities.\n  for (const aggregate of blastByEntity.values()) {\n    const factors: string[] = []\n    let score = 0\n\n    const proximityScore = aggregate.depth === 1\n      ? 25\n      : Math.max(5, 25 - (aggregate.depth - 1) * 8)\n    score += proximityScore\n\n    const viaList = Array.from(aggregate.vias).sort().join(', ')\n    factors.push(`depth ${aggregate.depth} dependent (${viaList} edge)`)\n\n    const kindScore = KIND_WEIGHT[aggregate.entity.kind] ?? 5\n    score += kindScore\n    if (kindScore >= 15) {\n      factors.push(`${aggregate.entity.kind} change has wide contract impact`)\n    }\n\n    if (aggregate.entity.exported) {\n      score += 10\n      factors.pu..."
+      },
+      "score": 48,
+      "factors": [
+        "directly entity added",
+        "exported entity",
+        "depth 1 dependent (calls edge)",
+        "exported — visible to external consumers",
+        "upstream entity added in seedSeverityByEntity"
+      ]
+    },
+    {
+      "entity": {
+        "id": "class:packages/plugins/entity-graph/src/index.ts:EntityGraph",
+        "kind": "class",
+        "name": "EntityGraph",
+        "filepath": "packages/plugins/entity-graph/src/index.ts",
+        "startLine": 38,
+        "endLine": 165,
+        "exported": true,
+        "async": false,
+        "rawText": "class EntityGraph {\n  private sql: Sql\n  private config: EntityGraphConfig\n  private hooks: EntityGraphHooks | null = null\n  private scanPromise: Promise<{ files: number; entities: number; edges: number; durationMs: number } | null> | null = null\n\n  constructor(sql: Sql, config: EntityGraphConfig) {\n    this.sql = sql\n    this.config = config\n  }\n\n  /**\n   * Initialize the entity graph:\n   * 1. Run DDL to create schema + tables (idempotent)\n   * 2. Clean expired leases\n   * 3. Optionally kick off a full startup scan (non-blocking)\n   */\n  async initialize(): Promise<void> {\n    // Create schema and tables\n    await this.sql.unsafe(SCHEMA_DDL)\n\n    // Clean stale leases from previous runs\n    const cleaned = await cleanExpiredLeases(this.sql)\n    if (cleaned > 0) {\n      console.log(`[entity-graph] Cleaned ${cleaned} expired leases`)\n    }\n\n    // Run startup scan in background if configured (default: true)\n    if (this.config.startupScan !== false) {\n      this.scanPromise = buildFullGraph(this.sql, this.config)\n        .then(stats => {\n          console.log(\n            `[entity-graph] Startup scan complete: ${stats.files} files, ${stats.entities} entities, ${stats.edges} edges (${stats.durationMs}ms)`\n          )\n          return stats\n        })\n        .catch(err => {\n          console.error(`[entity-graph] Startup scan failed:`, err)\n          return null\n        })\n    }\n  }\n\n  /**\n   * Wait for the background startup scan to finish (if running).\n   * Returns scan stats, or null if scan was skipped or failed.\n   */\n  async waitForScan(): Promise<{ files: number; entities: number; edges: number; durationMs: number } | null> {\n    return this.scanPromise ?? null\n  }\n\n  /**\n   * Get hook handlers for composing with AgentHooks.\n   * Lazily created on first access.\n   */\n  getHooks(): EntityGraphHooks {\n    if (!this.hooks) {\n      this.hooks = createEntityGraphHooks(this.sql, this.config)\n    }\n    return this.hooks\n  }\n\n  // --- Query Delegation ---\n\n  async enti..."
+      },
+      "score": 45,
+      "factors": [
+        "directly body changed",
+        "exported entity"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/queries.ts:dependentsOf",
+        "kind": "function",
+        "name": "dependentsOf",
+        "filepath": "packages/plugins/entity-graph/src/queries.ts",
+        "startLine": 148,
+        "endLine": 207,
+        "exported": true,
+        "async": true,
+        "rawText": "async function dependentsOf(\n  sql: Sql,\n  entityId: string,\n  entityKind: EntityKind\n): Promise<Entity[]> {\n  let rows: EntityRow[]\n\n  switch (entityKind) {\n    case 'file':\n      // Who imports entities from this file?\n      rows = await sql<EntityRow[]>`\n        SELECT DISTINCT e.* FROM entity_graph.entities e\n        JOIN entity_graph.imports i ON i.importer_id = e.id\n        WHERE i.imported_id = ${entityId}\n      `\n      break\n\n    case 'function':\n    case 'method':\n      // Who calls this?\n      rows = await sql<EntityRow[]>`\n        SELECT DISTINCT e.* FROM entity_graph.entities e\n        JOIN entity_graph.calls c ON c.caller_id = e.id\n        WHERE c.callee_id = ${entityId}\n      `\n      break\n\n    case 'type':\n    case 'interface':\n      // Who uses, imports, or implements this?\n      rows = await sql<EntityRow[]>`\n        SELECT DISTINCT e.* FROM entity_graph.entities e\n        WHERE e.id IN (\n          SELECT user_id FROM entity_graph.uses WHERE used_id = ${entityId}\n          UNION\n          SELECT implementor_id FROM entity_graph.implements WHERE interface_id = ${entityId}\n          UNION\n          SELECT importer_id FROM entity_graph.imports WHERE imported_id = ${entityId}\n        )\n      `\n      break\n\n    case 'class':\n      // Who extends, imports, or uses this?\n      rows = await sql<EntityRow[]>`\n        SELECT DISTINCT e.* FROM entity_graph.entities e\n        WHERE e.id IN (\n          SELECT child_id FROM entity_graph.extends WHERE parent_id = ${entityId}\n          UNION\n          SELECT importer_id FROM entity_graph.imports WHERE imported_id = ${entityId}\n        )\n      `\n      break\n\n    default:\n      rows = []\n  }\n\n  return rows.map(rowToEntity)\n}"
+      },
+      "score": 40,
+      "factors": [
+        "directly body changed",
+        "exported entity"
+      ]
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:EntityChange",
+        "kind": "interface",
+        "name": "EntityChange",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 35,
+        "endLine": 39,
+        "exported": true,
+        "async": false,
+        "rawText": "interface EntityChange {\n  entity: Entity\n  changeKind: ChangeKind\n  fileStatus: FileChange['status']\n}"
+      },
+      "score": 40,
+      "factors": [
+        "directly entity added",
+        "exported entity"
+      ]
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:FileChange",
+        "kind": "interface",
+        "name": "FileChange",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 12,
+        "endLine": 17,
+        "exported": true,
+        "async": false,
+        "rawText": "interface FileChange {\n  filepath: string\n  status: 'added' | 'modified' | 'deleted' | 'renamed'\n  oldFilepath?: string // for renames\n  hunks: Hunk[]\n}"
+      },
+      "score": 40,
+      "factors": [
+        "directly entity added",
+        "exported entity"
+      ]
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:Hunk",
+        "kind": "interface",
+        "name": "Hunk",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 19,
+        "endLine": 24,
+        "exported": true,
+        "async": false,
+        "rawText": "interface Hunk {\n  oldStart: number\n  oldCount: number\n  newStart: number\n  newCount: number\n}"
+      },
+      "score": 40,
+      "factors": [
+        "directly entity added",
+        "exported entity"
+      ]
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:ImpactGap",
+        "kind": "interface",
+        "name": "ImpactGap",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 51,
+        "endLine": 56,
+        "exported": true,
+        "async": false,
+        "rawText": "interface ImpactGap {\n  seed: Entity\n  seedChangeKind: ChangeKind\n  directDependents: Entity[]\n  unresolvedDependents: Entity[]\n}"
+      },
+      "score": 40,
+      "factors": [
+        "directly entity added",
+        "exported entity"
+      ]
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:PRReview",
+        "kind": "interface",
+        "name": "PRReview",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 60,
+        "endLine": 72,
+        "exported": true,
+        "async": false,
+        "rawText": "interface PRReview {\n  summary: string\n  changedEntities: EntityChange[]\n  blastRadius: {\n    direct: BlastRadiusEntry[]      // depth 1\n    transitive: BlastRadiusEntry[]  // depth 2+\n    totalFiles: number\n    totalEntities: number\n  }\n  risks: RiskSignal[]               // sorted by score desc\n  impactGaps: ImpactGap[]           // contract changes with unresolved dependents\n  deadCode: Entity[]                // new unused exports\n}"
+      },
+      "score": 40,
+      "factors": [
+        "directly entity added",
+        "exported entity"
+      ]
+    },
+    {
+      "entity": {
+        "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:RiskSignal",
+        "kind": "interface",
+        "name": "RiskSignal",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 43,
+        "endLine": 47,
+        "exported": true,
+        "async": false,
+        "rawText": "interface RiskSignal {\n  entity: Entity\n  score: number          // 0–100\n  factors: string[]      // human-readable explanations\n}"
+      },
+      "score": 40,
+      "factors": [
+        "directly entity added",
+        "exported entity"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/diff.ts:parseFileDiff",
+        "kind": "function",
+        "name": "parseFileDiff",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/diff.ts",
+        "startLine": 36,
+        "endLine": 92,
+        "exported": false,
+        "async": false,
+        "rawText": "function parseFileDiff(\n  lines: string[],\n  start: number,\n): { change: FileChange | null; nextIndex: number } {\n  let i = start\n\n  // Parse \"diff --git a/path b/path\"\n  const diffLine = lines[i]\n  const gitMatch = diffLine.match(/^diff --git a\\/(.+) b\\/(.+)$/)\n  if (!gitMatch) return { change: null, nextIndex: i + 1 }\n\n  const aPath = gitMatch[1]\n  const bPath = gitMatch[2]\n  i++\n\n  // Consume metadata lines (old mode, new mode, similarity, index, etc.)\n  let status: FileChange['status'] = 'modified'\n  let oldFilepath: string | undefined\n\n  while (i < lines.length && !lines[i].startsWith('diff --git ')) {\n    const line = lines[i]\n\n    if (line.startsWith('new file mode')) {\n      status = 'added'\n    } else if (line.startsWith('deleted file mode')) {\n      status = 'deleted'\n    } else if (line.startsWith('rename from ')) {\n      status = 'renamed'\n      oldFilepath = line.slice('rename from '.length)\n    } else if (line.startsWith('--- ') || line.startsWith('+++ ')) {\n      // Skip --- / +++ lines, handled by hunk parsing\n    } else if (line.startsWith('@@')) {\n      break // Start of hunks\n    }\n    i++\n  }\n\n  // Parse hunks\n  const hunks: Hunk[] = []\n  while (i < lines.length && !lines[i].startsWith('diff --git ')) {\n    if (lines[i].startsWith('@@')) {\n      const hunk = parseHunkHeader(lines[i])\n      if (hunk) hunks.push(hunk)\n    }\n    i++\n  }\n\n  return {\n    change: {\n      filepath: bPath,\n      status,\n      oldFilepath,\n      hunks,\n    },\n    nextIndex: i,\n  }\n}"
+      },
+      "score": 38,
+      "factors": [
+        "directly entity added",
+        "depth 1 dependent (calls edge)",
+        "upstream entity added in parseHunkHeader"
+      ]
+    },
+    {
+      "entity": {
+        "id": "type:packages/plugins/entity-graph/src/pr-review/types.ts:ChangeKind",
+        "kind": "type",
+        "name": "ChangeKind",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+        "startLine": 28,
+        "endLine": 33,
+        "exported": true,
+        "async": false,
+        "rawText": "type ChangeKind =\n  | 'signature_changed'  // params/return type changed — callers at risk\n  | 'body_changed'       // implementation changed — behavior risk only\n  | 'entity_added'       // new entity introduced\n  | 'entity_deleted'     // entity removed — broken references\n  | 'export_changed'     // export flag toggled — module boundary risk"
+      },
+      "score": 38,
+      "factors": [
+        "directly entity added",
+        "exported entity"
+      ]
+    },
+    {
+      "entity": {
+        "id": "file:tests/entity-graph/pr-review-classifier.test.ts:tests/entity-graph/pr-review-classifier.test.ts",
+        "kind": "file",
+        "name": "tests/entity-graph/pr-review-classifier.test.ts",
+        "filepath": "tests/entity-graph/pr-review-classifier.test.ts",
+        "startLine": 1,
+        "endLine": 388,
+        "exported": false,
+        "async": false,
+        "rawText": null
+      },
+      "score": 33,
+      "factors": [
+        "depth 1 dependent (calls edge)",
+        "upstream entity added in makeEntity"
+      ]
+    },
+    {
+      "entity": {
+        "id": "file:tests/entity-graph/pr-review-scorer.test.ts:tests/entity-graph/pr-review-scorer.test.ts",
+        "kind": "file",
+        "name": "tests/entity-graph/pr-review-scorer.test.ts",
+        "filepath": "tests/entity-graph/pr-review-scorer.test.ts",
+        "startLine": 1,
+        "endLine": 307,
+        "exported": false,
+        "async": false,
+        "rawText": null
+      },
+      "score": 33,
+      "factors": [
+        "depth 1 dependent (calls edge)",
+        "upstream entity added in makeEntity"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/diff.ts:parseHunkHeader",
+        "kind": "function",
+        "name": "parseHunkHeader",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/diff.ts",
+        "startLine": 97,
+        "endLine": 107,
+        "exported": true,
+        "async": false,
+        "rawText": "function parseHunkHeader(line: string): Hunk | null {\n  const match = line.match(/^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@/)\n  if (!match) return null\n\n  return {\n    oldStart: parseInt(match[1], 10),\n    oldCount: match[2] !== undefined ? parseInt(match[2], 10) : 1,\n    newStart: parseInt(match[3], 10),\n    newCount: match[4] !== undefined ? parseInt(match[4], 10) : 1,\n  }\n}"
+      },
+      "score": 30,
+      "factors": [
+        "directly entity added",
+        "exported entity"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/classifier.ts:inferChangeKind",
+        "kind": "function",
+        "name": "inferChangeKind",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/classifier.ts",
+        "startLine": 143,
+        "endLine": 173,
+        "exported": false,
+        "async": false,
+        "rawText": "function inferChangeKind(\n  entity: Entity,\n  ranges: Array<{ startLine: number; endLine: number }>,\n): ChangeKind {\n  const start = entity.startLine ?? 0\n  const exportLine = start          // `export function foo(` lives here\n  const sigEnd = start + 2          // signature ≈ first 3 lines\n\n  const touchesExportLine = ranges.some(\n    r => r.startLine <= exportLine && r.endLine >= exportLine,\n  )\n\n  const touchesSignature = ranges.some(\n    r => r.startLine <= sigEnd && r.endLine >= start,\n  )\n\n  const touchesBeyondExportLine = ranges.some(\n    r => r.endLine > exportLine,\n  )\n\n  // Exported entity, hunk only on the export/declaration line itself\n  if (entity.exported && touchesExportLine && !touchesBeyondExportLine) {\n    return 'export_changed'\n  }\n\n  if (touchesSignature) {\n    return 'signature_changed'\n  }\n\n  return 'body_changed'\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/classifier.ts:syntheticFileEntity",
+        "kind": "function",
+        "name": "syntheticFileEntity",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/classifier.ts",
+        "startLine": 116,
+        "endLine": 128,
+        "exported": false,
+        "async": false,
+        "rawText": "function syntheticFileEntity(filepath: string): Entity {\n  return {\n    id: `file:${filepath}:${filepath}`,\n    kind: 'file',\n    name: filepath,\n    filepath,\n    startLine: null,\n    endLine: null,\n    exported: false,\n    async: false,\n    rawText: null,\n  }\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/review.ts:buildSummary",
+        "kind": "function",
+        "name": "buildSummary",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/review.ts",
+        "startLine": 105,
+        "endLine": 137,
+        "exported": false,
+        "async": false,
+        "rawText": "function buildSummary(\n  changed: number,\n  directCount: number,\n  transitiveCount: number,\n  risks: Array<{ score: number }>,\n  impactGaps: ImpactGap[],\n): string {\n  const critical = risks.filter(r => r.score >= 70).length\n  const warnings = risks.filter(r => r.score >= 40 && r.score < 70).length\n  const unresolvedCount = impactGaps.reduce((sum, gap) => sum + gap.unresolvedDependents.length, 0)\n\n  const parts: string[] = [\n    `${changed} entit${changed === 1 ? 'y' : 'ies'} changed`,\n  ]\n\n  if (directCount > 0 || transitiveCount > 0) {\n    parts.push(`${directCount} direct and ${transitiveCount} transitive dependents affected`)\n  }\n\n  if (critical > 0) {\n    parts.push(`${critical} critical risk${critical === 1 ? '' : 's'}`)\n  }\n  if (warnings > 0) {\n    parts.push(`${warnings} warning${warnings === 1 ? '' : 's'}`)\n  }\n  if (impactGaps.length > 0) {\n    parts.push(\n      `${impactGaps.length} contract gap${impactGaps.length === 1 ? '' : 's'} (${unresolvedCount} unresolved dependent${unresolvedCount === 1 ? '' : 's'})`,\n    )\n  }\n\n  return parts.join('; ') + '.'\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/review.ts:computeImpactGaps",
+        "kind": "function",
+        "name": "computeImpactGaps",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/review.ts",
+        "startLine": 139,
+        "endLine": 178,
+        "exported": false,
+        "async": false,
+        "rawText": "function computeImpactGaps(\n  changedEntities: EntityChange[],\n  blastEntries: Awaited<ReturnType<typeof entityBlastRadius>>,\n): ImpactGap[] {\n  const changedEntityIds = new Set(changedEntities.map(ec => ec.entity.id))\n  const changesByEntityId = new Map(changedEntities.map(ec => [ec.entity.id, ec] as const))\n\n  const directDependentsBySeed = new Map<string, Map<string, typeof blastEntries[number]['entity']>>()\n  for (const entry of blastEntries) {\n    if (entry.depth !== 1) continue\n    if (entry.entity.id === entry.seedId) continue\n    let dependents = directDependentsBySeed.get(entry.seedId)\n    if (!dependents) {\n      dependents = new Map()\n      directDependentsBySeed.set(entry.seedId, dependents)\n    }\n    if (!dependents.has(entry.entity.id)) {\n      dependents.set(entry.entity.id, entry.entity)\n    }\n  }\n\n  const gaps: ImpactGap[] = []\n  for (const changed of changedEntities) {\n    if (!CONTRACT_CHANGE_KINDS.has(changed.changeKind)) continue\n    const directDependents = Array.from(directDependentsBySeed.get(changed.entity.id)?.values() ?? [])\n    if (directDependents.length === 0) continue\n    const unresolved = directDependents.filter(dep => !changedEntityIds.has(dep.id))\n    if (unresolved.length === 0) continue\n\n    gaps.push({\n      seed: changed.entity,\n      seedChangeKind: changesByEntityId.get(changed.entity.id)?.changeKind ?? changed.changeKind,\n      directDependents,\n      unresolvedDependents: unresolved,\n    })\n  }\n\n  gaps.sort((a, b) => b.unresolvedDependents.length - a.unresolvedDependents.length || a.seed.id.localeCompare(b.seed.id))\n  return gaps\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/review.ts:dedupeBlastEntries",
+        "kind": "function",
+        "name": "dedupeBlastEntries",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/review.ts",
+        "startLine": 78,
+        "endLine": 95,
+        "exported": false,
+        "async": false,
+        "rawText": "function dedupeBlastEntries(entries: Awaited<ReturnType<typeof entityBlastRadius>>): Awaited<ReturnType<typeof entityBlastRadius>> {\n  const byEntity = new Map<string, typeof entries[number]>()\n\n  for (const entry of entries) {\n    const existing = byEntity.get(entry.entity.id)\n    if (!existing || entry.depth < existing.depth) {\n      byEntity.set(entry.entity.id, entry)\n      continue\n    }\n    if (entry.depth === existing.depth && entry.via < existing.via) {\n      byEntity.set(entry.entity.id, entry)\n    }\n  }\n\n  return Array.from(byEntity.values()).sort(\n    (a, b) => a.depth - b.depth || a.entity.filepath.localeCompare(b.entity.filepath) || a.entity.id.localeCompare(b.entity.id),\n  )\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/review.ts:dedupeEntitiesById",
+        "kind": "function",
+        "name": "dedupeEntitiesById",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/review.ts",
+        "startLine": 97,
+        "endLine": 103,
+        "exported": false,
+        "async": false,
+        "rawText": "function dedupeEntitiesById<T extends { id: string }>(items: T[]): T[] {\n  const map = new Map<string, T>()\n  for (const item of items) {\n    if (!map.has(item.id)) map.set(item.id, item)\n  }\n  return Array.from(map.values())\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:contractCoverageAdjustment",
+        "kind": "function",
+        "name": "contractCoverageAdjustment",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+        "startLine": 214,
+        "endLine": 248,
+        "exported": false,
+        "async": false,
+        "rawText": "function contractCoverageAdjustment(\n  entityChange: EntityChange,\n  blastEntries: BlastRadiusEntry[],\n  changedEntityIds: Set<string>,\n): { delta: number; factor: string | null } {\n  if (!CONTRACT_CHANGE_KINDS.has(entityChange.changeKind)) {\n    return { delta: 0, factor: null }\n  }\n\n  const directDependents = new Set(\n    blastEntries\n      .filter(entry => entry.seedId === entityChange.entity.id && entry.depth === 1)\n      .map(entry => entry.entity.id)\n      .filter(id => id !== entityChange.entity.id),\n  )\n\n  if (directDependents.size === 0) {\n    return { delta: -10, factor: 'no direct dependents found in graph' }\n  }\n\n  let unresolved = 0\n  for (const dependentId of directDependents) {\n    if (!changedEntityIds.has(dependentId)) {\n      unresolved += 1\n    }\n  }\n\n  if (unresolved === 0) {\n    return { delta: -15, factor: 'all direct dependents also changed in this PR' }\n  }\n\n  const penalty = Math.min(20, 10 + (unresolved - 1) * 3)\n  const label = unresolved === 1 ? '1 direct dependent not updated in this PR' : `${unresolved} direct dependents not updated in this PR`\n  return { delta: penalty, factor: label }\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:seedSeverityByEntity",
+        "kind": "function",
+        "name": "seedSeverityByEntity",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+        "startLine": 165,
+        "endLine": 181,
+        "exported": false,
+        "async": false,
+        "rawText": "function seedSeverityByEntity(\n  changedEntities: EntityChange[],\n): Map<string, { raw: number; factor: string | null }> {\n  const map = new Map<string, { raw: number; factor: string | null }>()\n\n  for (const ec of changedEntities) {\n    const raw = CHANGE_SEVERITY[ec.changeKind] ?? 0\n    const existing = map.get(ec.entity.id)\n    if (existing && existing.raw >= raw) continue\n    map.set(ec.entity.id, {\n      raw,\n      factor: `upstream ${ec.changeKind.replace(/_/g, ' ')} in ${ec.entity.name}`,\n    })\n  }\n\n  return map\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:uniqueFactors",
+        "kind": "function",
+        "name": "uniqueFactors",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+        "startLine": 210,
+        "endLine": 212,
+        "exported": false,
+        "async": false,
+        "rawText": "function uniqueFactors(factors: string[]): string[] {\n  return Array.from(new Set(factors))\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:upstreamSeverityForEntry",
+        "kind": "function",
+        "name": "upstreamSeverityForEntry",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+        "startLine": 183,
+        "endLine": 191,
+        "exported": false,
+        "async": false,
+        "rawText": "function upstreamSeverityForEntry(\n  entry: BlastRadiusEntry,\n  seedSeverity: Map<string, { raw: number; factor: string | null }>,\n  fallbackWorst: { score: number; factor: string | null },\n): { score: number; factor: string | null } {\n  const seed = seedSeverity.get(entry.seedId)\n  if (!seed) return fallbackWorst\n  return { score: Math.round(seed.raw * 0.5), factor: seed.factor }\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:worstUpstreamSeverity",
+        "kind": "function",
+        "name": "worstUpstreamSeverity",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+        "startLine": 193,
+        "endLine": 208,
+        "exported": false,
+        "async": false,
+        "rawText": "function worstUpstreamSeverity(\n  changedEntities: EntityChange[],\n): { score: number; factor: string | null } {\n  let worst = 0\n  let factor: string | null = null\n\n  for (const ec of changedEntities) {\n    const s = CHANGE_SEVERITY[ec.changeKind] ?? 0\n    if (s > worst) {\n      worst = s\n      factor = `upstream ${ec.changeKind.replace(/_/g, ' ')} in ${ec.entity.name}`\n    }\n  }\n\n  return { score: Math.round(worst * 0.5), factor }\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:tests/entity-graph/pr-review-classifier.test.ts:entityToRow",
+        "kind": "function",
+        "name": "entityToRow",
+        "filepath": "tests/entity-graph/pr-review-classifier.test.ts",
+        "startLine": 68,
+        "endLine": 80,
+        "exported": false,
+        "async": false,
+        "rawText": "function entityToRow(e: Entity) {\n  return {\n    id: e.id,\n    kind: e.kind,\n    name: e.name,\n    filepath: e.filepath,\n    start_line: e.startLine,\n    end_line: e.endLine,\n    exported: e.exported,\n    async: e.async,\n    raw_text: e.rawText,\n  }\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:tests/entity-graph/pr-review-classifier.test.ts:makeEntity",
+        "kind": "function",
+        "name": "makeEntity",
+        "filepath": "tests/entity-graph/pr-review-classifier.test.ts",
+        "startLine": 13,
+        "endLine": 22,
+        "exported": false,
+        "async": false,
+        "rawText": "function makeEntity(overrides: Partial<Entity> & { id: string; kind: Entity['kind']; name: string; filepath: string }): Entity {\n  return {\n    startLine: null,\n    endLine: null,\n    exported: false,\n    async: false,\n    rawText: null,\n    ...overrides,\n  }\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:tests/entity-graph/pr-review-classifier.test.ts:mockSql",
+        "kind": "function",
+        "name": "mockSql",
+        "filepath": "tests/entity-graph/pr-review-classifier.test.ts",
+        "startLine": 29,
+        "endLine": 66,
+        "exported": false,
+        "async": false,
+        "rawText": "function mockSql(entitiesByFile: Record<string, Entity[]>) {\n  // Template tag handler (for entitiesInFile/entityById style queries)\n  const handler = function (strings: TemplateStringsArray, ...values: unknown[]) {\n    const query = strings.join('?')\n    // entitiesInFile: WHERE filepath = <value>\n    if (query.includes('FROM entity_graph.entities WHERE filepath')) {\n      const filepath = values[0] as string\n      return Promise.resolve((entitiesByFile[filepath] ?? []).map(entityToRow))\n    }\n    return Promise.resolve([])\n  } as any\n\n  // sql.unsafe handler (for entitiesAtLines dynamic query)\n  handler.unsafe = (query: string, params: unknown[]) => {\n    if (query.includes('FROM entity_graph.entities e') && query.includes('start_line')) {\n      const filepath = params[0] as string\n      const entities = entitiesByFile[filepath] ?? []\n      // Filter to non-file entities (the real query excludes kind='file')\n      const nonFile = entities.filter(e => e.kind !== 'file')\n\n      // Extract line ranges from params (pairs after filepath)\n      const ranges: Array<{ startLine: number; endLine: number }> = []\n      for (let i = 1; i < params.length; i += 2) {\n        ranges.push({ startLine: params[i] as number, endLine: params[i + 1] as number })\n      }\n\n      // Filter entities that overlap any range\n      const result = nonFile.filter(e => {\n        if (e.startLine == null || e.endLine == null) return false\n        return ranges.some(r => e.startLine! <= r.endLine && e.endLine! >= r.startLine)\n      })\n      return Promise.resolve(result.map(entityToRow))\n    }\n    return Promise.resolve([])\n  }\n\n  return handler\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "function:tests/entity-graph/pr-review-scorer.test.ts:makeEntity",
+        "kind": "function",
+        "name": "makeEntity",
+        "filepath": "tests/entity-graph/pr-review-scorer.test.ts",
+        "startLine": 10,
+        "endLine": 19,
+        "exported": false,
+        "async": false,
+        "rawText": "function makeEntity(overrides: Partial<Entity> & { id: string; kind: Entity['kind']; name: string; filepath: string }): Entity {\n  return {\n    startLine: null,\n    endLine: null,\n    exported: false,\n    async: false,\n    rawText: null,\n    ...overrides,\n  }\n}"
+      },
+      "score": 15,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "file:packages/plugins/entity-graph/src/pr-review/index.ts:packages/plugins/entity-graph/src/pr-review/index.ts",
+        "kind": "file",
+        "name": "packages/plugins/entity-graph/src/pr-review/index.ts",
+        "filepath": "packages/plugins/entity-graph/src/pr-review/index.ts",
+        "startLine": null,
+        "endLine": null,
+        "exported": false,
+        "async": false,
+        "rawText": null
+      },
+      "score": 10,
+      "factors": [
+        "directly entity added"
+      ]
+    },
+    {
+      "entity": {
+        "id": "file:tests/entity-graph/pr-review-diff.test.ts:tests/entity-graph/pr-review-diff.test.ts",
+        "kind": "file",
+        "name": "tests/entity-graph/pr-review-diff.test.ts",
+        "filepath": "tests/entity-graph/pr-review-diff.test.ts",
+        "startLine": null,
+        "endLine": null,
+        "exported": false,
+        "async": false,
+        "rawText": null
+      },
+      "score": 10,
+      "factors": [
+        "directly entity added"
+      ]
+    }
+  ],
+  "impactGaps": [],
+  "deadCode": [
+    {
+      "id": "class:packages/plugins/entity-graph/src/index.ts:EntityGraph",
+      "kind": "class",
+      "name": "EntityGraph",
+      "filepath": "packages/plugins/entity-graph/src/index.ts",
+      "startLine": 38,
+      "endLine": 165,
+      "exported": true,
+      "async": false,
+      "rawText": "class EntityGraph {\n  private sql: Sql\n  private config: EntityGraphConfig\n  private hooks: EntityGraphHooks | null = null\n  private scanPromise: Promise<{ files: number; entities: number; edges: number; durationMs: number } | null> | null = null\n\n  constructor(sql: Sql, config: EntityGraphConfig) {\n    this.sql = sql\n    this.config = config\n  }\n\n  /**\n   * Initialize the entity graph:\n   * 1. Run DDL to create schema + tables (idempotent)\n   * 2. Clean expired leases\n   * 3. Optionally kick off a full startup scan (non-blocking)\n   */\n  async initialize(): Promise<void> {\n    // Create schema and tables\n    await this.sql.unsafe(SCHEMA_DDL)\n\n    // Clean stale leases from previous runs\n    const cleaned = await cleanExpiredLeases(this.sql)\n    if (cleaned > 0) {\n      console.log(`[entity-graph] Cleaned ${cleaned} expired leases`)\n    }\n\n    // Run startup scan in background if configured (default: true)\n    if (this.config.startupScan !== false) {\n      this.scanPromise = buildFullGraph(this.sql, this.config)\n        .then(stats => {\n          console.log(\n            `[entity-graph] Startup scan complete: ${stats.files} files, ${stats.entities} entities, ${stats.edges} edges (${stats.durationMs}ms)`\n          )\n          return stats\n        })\n        .catch(err => {\n          console.error(`[entity-graph] Startup scan failed:`, err)\n          return null\n        })\n    }\n  }\n\n  /**\n   * Wait for the background startup scan to finish (if running).\n   * Returns scan stats, or null if scan was skipped or failed.\n   */\n  async waitForScan(): Promise<{ files: number; entities: number; edges: number; durationMs: number } | null> {\n    return this.scanPromise ?? null\n  }\n\n  /**\n   * Get hook handlers for composing with AgentHooks.\n   * Lazily created on first access.\n   */\n  getHooks(): EntityGraphHooks {\n    if (!this.hooks) {\n      this.hooks = createEntityGraphHooks(this.sql, this.config)\n    }\n    return this.hooks\n  }\n\n  // --- Query Delegation ---\n\n  async enti..."
+    },
+    {
+      "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.constructor",
+      "kind": "method",
+      "name": "EntityGraph.constructor",
+      "filepath": "packages/plugins/entity-graph/src/index.ts",
+      "startLine": 44,
+      "endLine": 47,
+      "exported": true,
+      "async": false,
+      "rawText": "constructor(sql: Sql, config: EntityGraphConfig) {\n    this.sql = sql\n    this.config = config\n  }"
+    },
+    {
+      "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.initialize",
+      "kind": "method",
+      "name": "EntityGraph.initialize",
+      "filepath": "packages/plugins/entity-graph/src/index.ts",
+      "startLine": 55,
+      "endLine": 79,
+      "exported": true,
+      "async": true,
+      "rawText": "async initialize(): Promise<void> {\n    // Create schema and tables\n    await this.sql.unsafe(SCHEMA_DDL)\n\n    // Clean stale leases from previous runs\n    const cleaned = await cleanExpiredLeases(this.sql)\n    if (cleaned > 0) {\n      console.log(`[entity-graph] Cleaned ${cleaned} expired leases`)\n    }\n\n    // Run startup scan in background if configured (default: true)\n    if (this.config.startupScan !== false) {\n      this.scanPromise = buildFullGraph(this.sql, this.config)\n        .then(stats => {\n          console.log(\n            `[entity-graph] Startup scan complete: ${stats.files} files, ${stats.entities} entities, ${stats.edges} edges (${stats.durationMs}ms)`\n          )\n          return stats\n        })\n        .catch(err => {\n          console.error(`[entity-graph] Startup scan failed:`, err)\n          return null\n        })\n    }\n  }"
+    },
+    {
+      "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.waitForScan",
+      "kind": "method",
+      "name": "EntityGraph.waitForScan",
+      "filepath": "packages/plugins/entity-graph/src/index.ts",
+      "startLine": 85,
+      "endLine": 87,
+      "exported": true,
+      "async": true,
+      "rawText": "async waitForScan(): Promise<{ files: number; entities: number; edges: number; durationMs: number } | null> {\n    return this.scanPromise ?? null\n  }"
+    },
+    {
+      "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.getHooks",
+      "kind": "method",
+      "name": "EntityGraph.getHooks",
+      "filepath": "packages/plugins/entity-graph/src/index.ts",
+      "startLine": 93,
+      "endLine": 98,
+      "exported": true,
+      "async": false,
+      "rawText": "getHooks(): EntityGraphHooks {\n    if (!this.hooks) {\n      this.hooks = createEntityGraphHooks(this.sql, this.config)\n    }\n    return this.hooks\n  }"
+    },
+    {
+      "id": "method:packages/plugins/entity-graph/src/index.ts:EntityGraph.reparse",
+      "kind": "method",
+      "name": "EntityGraph.reparse",
+      "filepath": "packages/plugins/entity-graph/src/index.ts",
+      "startLine": 159,
+      "endLine": 164,
+      "exported": true,
+      "async": true,
+      "rawText": "async reparse(filepath: string): Promise<void> {\n    const result = await parseFile(filepath, this.config.sourceRoot)\n    if (result) {\n      await persistParseResult(this.sql, result)\n    }\n  }"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/pr-review/classifier.ts:classifyChanges",
+      "kind": "function",
+      "name": "classifyChanges",
+      "filepath": "packages/plugins/entity-graph/src/pr-review/classifier.ts",
+      "startLine": 21,
+      "endLine": 114,
+      "exported": true,
+      "async": true,
+      "rawText": "async function classifyChanges(\n  sql: Sql,\n  fileChanges: FileChange[],\n): Promise<EntityChange[]> {\n  const results: EntityChange[] = []\n\n  for (const fc of fileChanges) {\n    switch (fc.status) {\n      case 'added': {\n        const entities = await entitiesInFile(sql, fc.filepath)\n        const nonFile = entities.filter(e => e.kind !== 'file')\n        if (nonFile.length === 0) {\n          results.push({\n            entity: syntheticFileEntity(fc.filepath),\n            changeKind: 'entity_added',\n            fileStatus: 'added',\n          })\n          break\n        }\n        for (const e of nonFile) {\n          results.push({ entity: e, changeKind: 'entity_added', fileStatus: 'added' })\n        }\n        break\n      }\n\n      case 'deleted': {\n        const entities = await entitiesInFile(sql, fc.filepath)\n        const nonFile = entities.filter(e => e.kind !== 'file')\n        if (nonFile.length === 0) {\n          results.push({\n            entity: syntheticFileEntity(fc.filepath),\n            changeKind: 'entity_deleted',\n            fileStatus: 'deleted',\n          })\n          break\n        }\n        for (const e of nonFile) {\n          results.push({ entity: e, changeKind: 'entity_deleted', fileStatus: 'deleted' })\n        }\n        break\n      }\n\n      case 'renamed': {\n        // Old path entities deleted, new path entities added\n        if (fc.oldFilepath) {\n          const oldEntities = await entitiesInFile(sql, fc.oldFilepath)\n          const oldNonFile = oldEntities.filter(e => e.kind !== 'file')\n          if (oldNonFile.length === 0) {\n            results.push({\n              entity: syntheticFileEntity(fc.oldFilepath),\n              changeKind: 'entity_deleted',\n              fileStatus: 'renamed',\n            })\n          }\n          for (const e of oldNonFile) {\n            results.push({ entity: e, changeKind: 'entity_deleted', fileStatus: 'renamed' })\n          }\n        }\n        const newEntities = await entitiesInFile(sql, fc.filepath)\n        co..."
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/pr-review/diff.ts:parseDiff",
+      "kind": "function",
+      "name": "parseDiff",
+      "filepath": "packages/plugins/entity-graph/src/pr-review/diff.ts",
+      "startLine": 13,
+      "endLine": 34,
+      "exported": true,
+      "async": false,
+      "rawText": "function parseDiff(diffText: string): FileChange[] {\n  const changes: FileChange[] = []\n  // Normalize CRLF/CR to LF so header parsing remains stable across platforms.\n  const lines = diffText.replace(/\\r/g, '').split('\\n')\n  let i = 0\n\n  while (i < lines.length) {\n    // Find next \"diff --git\" header\n    if (!lines[i].startsWith('diff --git ')) {\n      i++\n      continue\n    }\n\n    const { change, nextIndex } = parseFileDiff(lines, i)\n    if (change) {\n      changes.push(change)\n    }\n    i = nextIndex\n  }\n\n  return changes\n}"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/pr-review/review.ts:reviewDiff",
+      "kind": "function",
+      "name": "reviewDiff",
+      "filepath": "packages/plugins/entity-graph/src/pr-review/review.ts",
+      "startLine": 24,
+      "endLine": 76,
+      "exported": true,
+      "async": true,
+      "rawText": "async function reviewDiff(\n  sql: Sql,\n  diffText: string,\n  maxDepth: number = 2,\n): Promise<PRReview> {\n  // 1. Parse diff → structured file changes\n  const fileChanges = parseDiff(diffText)\n\n  // 2. Classify → entity-level changes\n  const changedEntities = await classifyChanges(sql, fileChanges)\n\n  // 3. Compute entity-level blast radius\n  const seedIds = changedEntities.map(ec => ec.entity.id)\n  const rawBlastEntries = await entityBlastRadius(sql, seedIds, maxDepth)\n  const blastEntries = dedupeBlastEntries(rawBlastEntries)\n\n  const direct = blastEntries.filter(e => e.depth === 1)\n  const transitive = blastEntries.filter(e => e.depth > 1)\n\n  const affectedFiles = new Set<string>()\n  for (const e of blastEntries) affectedFiles.add(e.entity.filepath)\n\n  // 4. Score risks\n  const risks = scoreRisks(changedEntities, rawBlastEntries)\n  const impactGaps = computeImpactGaps(changedEntities, rawBlastEntries)\n\n  // 5. Detect newly-introduced dead code (unused exports in changed files)\n  const addedFiles = fileChanges\n    .filter(fc => fc.status === 'added' || fc.status === 'modified' || fc.status === 'renamed')\n    .map(fc => fc.filepath)\n  const uniqueAddedFiles = Array.from(new Set(addedFiles))\n\n  const deadCode = dedupeEntitiesById((\n    await Promise.all(uniqueAddedFiles.map(fp => unusedExports(sql, fp)))\n  ).flat())\n\n  // 6. Build summary\n  const summary = buildSummary(changedEntities.length, direct.length, transitive.length, risks, impactGaps)\n\n  return {\n    summary,\n    changedEntities,\n    blastRadius: {\n      direct,\n      transitive,\n      totalFiles: affectedFiles.size,\n      totalEntities: blastEntries.length,\n    },\n    risks,\n    impactGaps,\n    deadCode,\n  }\n}"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/pr-review/scorer.ts:scoreRisks",
+      "kind": "function",
+      "name": "scoreRisks",
+      "filepath": "packages/plugins/entity-graph/src/pr-review/scorer.ts",
+      "startLine": 38,
+      "endLine": 163,
+      "exported": true,
+      "async": false,
+      "rawText": "function scoreRisks(\n  changedEntities: EntityChange[],\n  blastEntries: BlastRadiusEntry[],\n): RiskSignal[] {\n  const seedSeverity = seedSeverityByEntity(changedEntities)\n  const fallbackWorst = worstUpstreamSeverity(changedEntities)\n  const changedEntityIds = new Set(changedEntities.map(ec => ec.entity.id))\n\n  const blastByEntity = new Map<string, {\n    entity: Entity\n    depth: number\n    vias: Set<string>\n    upstream: { score: number; factor: string | null }\n  }>()\n\n  // Aggregate blast entries by entity to avoid duplicate rows from multi-path traversal.\n  for (const entry of blastEntries) {\n    const upstream = upstreamSeverityForEntry(entry, seedSeverity, fallbackWorst)\n    const existing = blastByEntity.get(entry.entity.id)\n\n    if (!existing) {\n      blastByEntity.set(entry.entity.id, {\n        entity: entry.entity,\n        depth: entry.depth,\n        vias: new Set([entry.via]),\n        upstream,\n      })\n      continue\n    }\n\n    if (entry.depth < existing.depth) {\n      existing.depth = entry.depth\n      existing.vias = new Set([entry.via])\n    } else if (entry.depth === existing.depth) {\n      existing.vias.add(entry.via)\n    }\n\n    if (upstream.score > existing.upstream.score) {\n      existing.upstream = upstream\n    }\n  }\n\n  const signalsByEntity = new Map<string, RiskSignal>()\n\n  // Score blast-radius entities.\n  for (const aggregate of blastByEntity.values()) {\n    const factors: string[] = []\n    let score = 0\n\n    const proximityScore = aggregate.depth === 1\n      ? 25\n      : Math.max(5, 25 - (aggregate.depth - 1) * 8)\n    score += proximityScore\n\n    const viaList = Array.from(aggregate.vias).sort().join(', ')\n    factors.push(`depth ${aggregate.depth} dependent (${viaList} edge)`)\n\n    const kindScore = KIND_WEIGHT[aggregate.entity.kind] ?? 5\n    score += kindScore\n    if (kindScore >= 15) {\n      factors.push(`${aggregate.entity.kind} change has wide contract impact`)\n    }\n\n    if (aggregate.entity.exported) {\n      score += 10\n      factors.pu..."
+    },
+    {
+      "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:FileChange",
+      "kind": "interface",
+      "name": "FileChange",
+      "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+      "startLine": 12,
+      "endLine": 17,
+      "exported": true,
+      "async": false,
+      "rawText": "interface FileChange {\n  filepath: string\n  status: 'added' | 'modified' | 'deleted' | 'renamed'\n  oldFilepath?: string // for renames\n  hunks: Hunk[]\n}"
+    },
+    {
+      "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:Hunk",
+      "kind": "interface",
+      "name": "Hunk",
+      "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+      "startLine": 19,
+      "endLine": 24,
+      "exported": true,
+      "async": false,
+      "rawText": "interface Hunk {\n  oldStart: number\n  oldCount: number\n  newStart: number\n  newCount: number\n}"
+    },
+    {
+      "id": "type:packages/plugins/entity-graph/src/pr-review/types.ts:ChangeKind",
+      "kind": "type",
+      "name": "ChangeKind",
+      "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+      "startLine": 28,
+      "endLine": 33,
+      "exported": true,
+      "async": false,
+      "rawText": "type ChangeKind =\n  | 'signature_changed'  // params/return type changed — callers at risk\n  | 'body_changed'       // implementation changed — behavior risk only\n  | 'entity_added'       // new entity introduced\n  | 'entity_deleted'     // entity removed — broken references\n  | 'export_changed'     // export flag toggled — module boundary risk"
+    },
+    {
+      "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:EntityChange",
+      "kind": "interface",
+      "name": "EntityChange",
+      "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+      "startLine": 35,
+      "endLine": 39,
+      "exported": true,
+      "async": false,
+      "rawText": "interface EntityChange {\n  entity: Entity\n  changeKind: ChangeKind\n  fileStatus: FileChange['status']\n}"
+    },
+    {
+      "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:RiskSignal",
+      "kind": "interface",
+      "name": "RiskSignal",
+      "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+      "startLine": 43,
+      "endLine": 47,
+      "exported": true,
+      "async": false,
+      "rawText": "interface RiskSignal {\n  entity: Entity\n  score: number          // 0–100\n  factors: string[]      // human-readable explanations\n}"
+    },
+    {
+      "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:ImpactGap",
+      "kind": "interface",
+      "name": "ImpactGap",
+      "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+      "startLine": 51,
+      "endLine": 56,
+      "exported": true,
+      "async": false,
+      "rawText": "interface ImpactGap {\n  seed: Entity\n  seedChangeKind: ChangeKind\n  directDependents: Entity[]\n  unresolvedDependents: Entity[]\n}"
+    },
+    {
+      "id": "interface:packages/plugins/entity-graph/src/pr-review/types.ts:PRReview",
+      "kind": "interface",
+      "name": "PRReview",
+      "filepath": "packages/plugins/entity-graph/src/pr-review/types.ts",
+      "startLine": 60,
+      "endLine": 72,
+      "exported": true,
+      "async": false,
+      "rawText": "interface PRReview {\n  summary: string\n  changedEntities: EntityChange[]\n  blastRadius: {\n    direct: BlastRadiusEntry[]      // depth 1\n    transitive: BlastRadiusEntry[]  // depth 2+\n    totalFiles: number\n    totalEntities: number\n  }\n  risks: RiskSignal[]               // sorted by score desc\n  impactGaps: ImpactGap[]           // contract changes with unresolved dependents\n  deadCode: Entity[]                // new unused exports\n}"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/queries.ts:entitiesInFile",
+      "kind": "function",
+      "name": "entitiesInFile",
+      "filepath": "packages/plugins/entity-graph/src/queries.ts",
+      "startLine": 44,
+      "endLine": 50,
+      "exported": true,
+      "async": true,
+      "rawText": "async function entitiesInFile(sql: Sql, filepath: string): Promise<Entity[]> {\n  const rows = await sql<EntityRow[]>`\n    SELECT * FROM entity_graph.entities WHERE filepath = ${filepath}\n    ORDER BY start_line ASC NULLS LAST\n  `\n  return rows.map(rowToEntity)\n}"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/queries.ts:entityById",
+      "kind": "function",
+      "name": "entityById",
+      "filepath": "packages/plugins/entity-graph/src/queries.ts",
+      "startLine": 55,
+      "endLine": 60,
+      "exported": true,
+      "async": true,
+      "rawText": "async function entityById(sql: Sql, id: string): Promise<Entity | null> {\n  const [row] = await sql<EntityRow[]>`\n    SELECT * FROM entity_graph.entities WHERE id = ${id}\n  `\n  return row ? rowToEntity(row) : null\n}"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/queries.ts:importersOfFile",
+      "kind": "function",
+      "name": "importersOfFile",
+      "filepath": "packages/plugins/entity-graph/src/queries.ts",
+      "startLine": 67,
+      "endLine": 76,
+      "exported": true,
+      "async": true,
+      "rawText": "async function importersOfFile(sql: Sql, filepath: string): Promise<Entity[]> {\n  const rows = await sql<EntityRow[]>`\n    SELECT DISTINCT e.* FROM entity_graph.entities e\n    JOIN entity_graph.imports i ON i.importer_id = e.id\n    WHERE i.imported_id IN (\n      SELECT id FROM entity_graph.entities WHERE filepath = ${filepath}\n    )\n  `\n  return rows.map(rowToEntity)\n}"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/queries.ts:callersOf",
+      "kind": "function",
+      "name": "callersOf",
+      "filepath": "packages/plugins/entity-graph/src/queries.ts",
+      "startLine": 81,
+      "endLine": 88,
+      "exported": true,
+      "async": true,
+      "rawText": "async function callersOf(sql: Sql, entityId: string): Promise<Entity[]> {\n  const rows = await sql<EntityRow[]>`\n    SELECT DISTINCT e.* FROM entity_graph.entities e\n    JOIN entity_graph.calls c ON c.caller_id = e.id\n    WHERE c.callee_id = ${entityId}\n  `\n  return rows.map(rowToEntity)\n}"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/queries.ts:usersOf",
+      "kind": "function",
+      "name": "usersOf",
+      "filepath": "packages/plugins/entity-graph/src/queries.ts",
+      "startLine": 93,
+      "endLine": 100,
+      "exported": true,
+      "async": true,
+      "rawText": "async function usersOf(sql: Sql, entityId: string): Promise<Entity[]> {\n  const rows = await sql<EntityRow[]>`\n    SELECT DISTINCT e.* FROM entity_graph.entities e\n    JOIN entity_graph.uses u ON u.user_id = e.id\n    WHERE u.used_id = ${entityId}\n  `\n  return rows.map(rowToEntity)\n}"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/queries.ts:blastRadius",
+      "kind": "function",
+      "name": "blastRadius",
+      "filepath": "packages/plugins/entity-graph/src/queries.ts",
+      "startLine": 107,
+      "endLine": 142,
+      "exported": true,
+      "async": true,
+      "rawText": "async function blastRadius(\n  sql: Sql,\n  filepath: string,\n  maxDepth: number = 1,\n): Promise<string[]> {\n  const rows = await sql<{ filepath: string }[]>`\n    WITH RECURSIVE affected AS (\n      -- Seed: entities in the changed file\n      SELECT id, filepath, 0 AS depth\n      FROM entity_graph.entities\n      WHERE filepath = ${filepath}\n\n      UNION\n\n      -- Recurse: entities that depend on already-affected entities\n      SELECT DISTINCT e.id, e.filepath, a.depth + 1\n      FROM affected a\n      JOIN (\n        SELECT importer_id AS dependent_id, imported_id AS dependency_id FROM entity_graph.imports\n        UNION ALL\n        SELECT caller_id, callee_id FROM entity_graph.calls\n        UNION ALL\n        SELECT user_id, used_id FROM entity_graph.uses\n        UNION ALL\n        SELECT child_id, parent_id FROM entity_graph.extends\n        UNION ALL\n        SELECT implementor_id, interface_id FROM entity_graph.implements\n      ) edges ON edges.dependency_id = a.id\n      JOIN entity_graph.entities e ON e.id = edges.dependent_id\n      WHERE a.depth < ${maxDepth}\n    )\n    SELECT DISTINCT filepath FROM affected\n    WHERE filepath != ${filepath}\n  `\n  return rows.map(r => r.filepath)\n}"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/queries.ts:dependentsOf",
+      "kind": "function",
+      "name": "dependentsOf",
+      "filepath": "packages/plugins/entity-graph/src/queries.ts",
+      "startLine": 148,
+      "endLine": 207,
+      "exported": true,
+      "async": true,
+      "rawText": "async function dependentsOf(\n  sql: Sql,\n  entityId: string,\n  entityKind: EntityKind\n): Promise<Entity[]> {\n  let rows: EntityRow[]\n\n  switch (entityKind) {\n    case 'file':\n      // Who imports entities from this file?\n      rows = await sql<EntityRow[]>`\n        SELECT DISTINCT e.* FROM entity_graph.entities e\n        JOIN entity_graph.imports i ON i.importer_id = e.id\n        WHERE i.imported_id = ${entityId}\n      `\n      break\n\n    case 'function':\n    case 'method':\n      // Who calls this?\n      rows = await sql<EntityRow[]>`\n        SELECT DISTINCT e.* FROM entity_graph.entities e\n        JOIN entity_graph.calls c ON c.caller_id = e.id\n        WHERE c.callee_id = ${entityId}\n      `\n      break\n\n    case 'type':\n    case 'interface':\n      // Who uses, imports, or implements this?\n      rows = await sql<EntityRow[]>`\n        SELECT DISTINCT e.* FROM entity_graph.entities e\n        WHERE e.id IN (\n          SELECT user_id FROM entity_graph.uses WHERE used_id = ${entityId}\n          UNION\n          SELECT implementor_id FROM entity_graph.implements WHERE interface_id = ${entityId}\n          UNION\n          SELECT importer_id FROM entity_graph.imports WHERE imported_id = ${entityId}\n        )\n      `\n      break\n\n    case 'class':\n      // Who extends, imports, or uses this?\n      rows = await sql<EntityRow[]>`\n        SELECT DISTINCT e.* FROM entity_graph.entities e\n        WHERE e.id IN (\n          SELECT child_id FROM entity_graph.extends WHERE parent_id = ${entityId}\n          UNION\n          SELECT importer_id FROM entity_graph.imports WHERE imported_id = ${entityId}\n        )\n      `\n      break\n\n    default:\n      rows = []\n  }\n\n  return rows.map(rowToEntity)\n}"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/queries.ts:entitiesAtLines",
+      "kind": "function",
+      "name": "entitiesAtLines",
+      "filepath": "packages/plugins/entity-graph/src/queries.ts",
+      "startLine": 213,
+      "endLine": 240,
+      "exported": true,
+      "async": true,
+      "rawText": "async function entitiesAtLines(\n  sql: Sql,\n  filepath: string,\n  ranges: Array<{ startLine: number; endLine: number }>,\n): Promise<Entity[]> {\n  if (ranges.length === 0) return []\n\n  // Build OR clause for overlapping ranges:\n  // entity overlaps range when entity.start_line <= range.end AND entity.end_line >= range.start\n  const conditions = ranges\n    .map((_, i) => `(e.start_line <= $${i * 2 + 3} AND e.end_line >= $${i * 2 + 2})`)\n    .join(' OR ')\n\n  const params: (string | number)[] = [filepath]\n  for (const r of ranges) {\n    params.push(r.startLine, r.endLine)\n  }\n\n  const query = `\n    SELECT DISTINCT e.* FROM entity_graph.entities e\n    WHERE e.filepath = $1\n      AND e.kind != 'file'\n      AND (${conditions})\n    ORDER BY e.start_line ASC NULLS LAST\n  `\n  const rows = await sql.unsafe<EntityRow[]>(query, params)\n  return rows.map(rowToEntity)\n}"
+    },
+    {
+      "id": "interface:packages/plugins/entity-graph/src/queries.ts:BlastRadiusEntry",
+      "kind": "interface",
+      "name": "BlastRadiusEntry",
+      "filepath": "packages/plugins/entity-graph/src/queries.ts",
+      "startLine": 246,
+      "endLine": 251,
+      "exported": true,
+      "async": false,
+      "rawText": "interface BlastRadiusEntry {\n  entity: Entity\n  depth: number\n  via: EdgeType\n  seedId: string\n}"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/queries.ts:entityBlastRadius",
+      "kind": "function",
+      "name": "entityBlastRadius",
+      "filepath": "packages/plugins/entity-graph/src/queries.ts",
+      "startLine": 253,
+      "endLine": 304,
+      "exported": true,
+      "async": true,
+      "rawText": "async function entityBlastRadius(\n  sql: Sql,\n  entityIds: string[],\n  maxDepth: number = 2,\n): Promise<BlastRadiusEntry[]> {\n  if (entityIds.length === 0) return []\n\n  const rows = await sql<Array<EntityRow & { depth: number; via: string; seed_id: string }>>`\n    WITH RECURSIVE affected AS (\n      SELECT id, kind, name, filepath, start_line, end_line, exported, async, raw_text,\n             0 AS depth, 'seed' AS via, id AS seed_id\n      FROM entity_graph.entities\n      WHERE id = ANY(${entityIds})\n\n      UNION\n\n      SELECT DISTINCT e.id, e.kind, e.name, e.filepath, e.start_line, e.end_line,\n             e.exported, e.async, e.raw_text,\n             a.depth + 1, edges.edge_type, a.seed_id\n      FROM affected a\n      JOIN (\n        SELECT importer_id AS dependent_id, imported_id AS dependency_id, 'imports' AS edge_type FROM entity_graph.imports\n        UNION ALL\n        SELECT caller_id, callee_id, 'calls' FROM entity_graph.calls\n        UNION ALL\n        SELECT user_id, used_id, 'uses' FROM entity_graph.uses\n        UNION ALL\n        SELECT child_id, parent_id, 'extends' FROM entity_graph.extends\n        UNION ALL\n        SELECT implementor_id, interface_id, 'implements' FROM entity_graph.implements\n      ) edges ON edges.dependency_id = a.id\n      JOIN entity_graph.entities e ON e.id = edges.dependent_id\n      WHERE a.depth < ${maxDepth}\n    ),\n    ranked AS (\n      SELECT *,\n             ROW_NUMBER() OVER (PARTITION BY id, seed_id ORDER BY depth ASC, via ASC) AS rn\n      FROM affected\n      WHERE via != 'seed'\n    )\n    SELECT * FROM ranked\n    WHERE rn = 1\n    ORDER BY depth ASC, filepath ASC\n  `\n\n  return rows.map(row => ({\n    entity: rowToEntity(row),\n    depth: row.depth,\n    via: row.via as EdgeType,\n    seedId: row.seed_id,\n  }))\n}"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/queries.ts:unusedExports",
+      "kind": "function",
+      "name": "unusedExports",
+      "filepath": "packages/plugins/entity-graph/src/queries.ts",
+      "startLine": 312,
+      "endLine": 338,
+      "exported": true,
+      "async": true,
+      "rawText": "async function unusedExports(sql: Sql, filepath?: string): Promise<Entity[]> {\n  const rows = filepath\n    ? await sql<EntityRow[]>`\n        SELECT e.* FROM entity_graph.entities e\n        WHERE e.exported = true\n          AND e.kind != 'file'\n          AND e.filepath = ${filepath}\n          AND NOT EXISTS (SELECT 1 FROM entity_graph.imports WHERE imported_id = e.id)\n          AND NOT EXISTS (SELECT 1 FROM entity_graph.calls WHERE callee_id = e.id)\n          AND NOT EXISTS (SELECT 1 FROM entity_graph.uses WHERE used_id = e.id)\n          AND NOT EXISTS (SELECT 1 FROM entity_graph.extends WHERE parent_id = e.id)\n          AND NOT EXISTS (SELECT 1 FROM entity_graph.implements WHERE interface_id = e.id)\n        ORDER BY e.filepath, e.start_line ASC NULLS LAST\n      `\n    : await sql<EntityRow[]>`\n        SELECT e.* FROM entity_graph.entities e\n        WHERE e.exported = true\n          AND e.kind != 'file'\n          AND NOT EXISTS (SELECT 1 FROM entity_graph.imports WHERE imported_id = e.id)\n          AND NOT EXISTS (SELECT 1 FROM entity_graph.calls WHERE callee_id = e.id)\n          AND NOT EXISTS (SELECT 1 FROM entity_graph.uses WHERE used_id = e.id)\n          AND NOT EXISTS (SELECT 1 FROM entity_graph.extends WHERE parent_id = e.id)\n          AND NOT EXISTS (SELECT 1 FROM entity_graph.implements WHERE interface_id = e.id)\n        ORDER BY e.filepath, e.start_line ASC NULLS LAST\n      `\n  return rows.map(rowToEntity)\n}"
+    },
+    {
+      "id": "function:packages/plugins/entity-graph/src/queries.ts:graphStats",
+      "kind": "function",
+      "name": "graphStats",
+      "filepath": "packages/plugins/entity-graph/src/queries.ts",
+      "startLine": 343,
+      "endLine": 375,
+      "exported": true,
+      "async": true,
+      "rawText": "async function graphStats(sql: Sql): Promise<GraphStats> {\n  const [counts] = await sql<[{\n    entities: string\n    imports: string\n    calls: string\n    uses: string\n    owns: string\n    extends: string\n    implements: string\n    file_leases: string\n  }]>`\n    SELECT\n      (SELECT count(*) FROM entity_graph.entities)::text AS entities,\n      (SELECT count(*) FROM entity_graph.imports)::text AS imports,\n      (SELECT count(*) FROM entity_graph.calls)::text AS calls,\n      (SELECT count(*) FROM entity_graph.uses)::text AS uses,\n      (SELECT count(*) FROM entity_graph.owns)::text AS owns,\n      (SELECT count(*) FROM entity_graph.extends)::text AS extends,\n      (SELECT count(*) FROM entity_graph.implements)::text AS implements,\n      (SELECT count(*) FROM entity_graph.file_leases)::text AS file_leases\n  `\n\n  return {\n    entities: parseInt(counts.entities, 10),\n    imports: parseInt(counts.imports, 10),\n    calls: parseInt(counts.calls, 10),\n    uses: parseInt(counts.uses, 10),\n    owns: parseInt(counts.owns, 10),\n    extends: parseInt(counts.extends, 10),\n    implements: parseInt(counts.implements, 10),\n    fileLeases: parseInt(counts.file_leases, 10),\n  }\n}"
+    }
+  ]
+}

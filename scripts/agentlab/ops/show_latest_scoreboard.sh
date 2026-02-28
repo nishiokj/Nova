@@ -11,7 +11,7 @@ SCOREBOARD_ARGS=()
 
 usage() {
   cat <<USAGE
-Usage: bash scripts/agentlab/show_latest_scoreboard.sh [--run-id <run_id>] [--watch] [scoreboard options]
+Usage: bash scripts/agentlab/ops/show_latest_scoreboard.sh [--run-id <run_id>] [--watch] [scoreboard options]
 
 Shows scoreboard for the latest run in .lab/runs by default.
 
@@ -21,9 +21,9 @@ Options:
   -h, --help       Show help.
 
 Examples:
-  bash scripts/agentlab/show_latest_scoreboard.sh
-  bash scripts/agentlab/show_latest_scoreboard.sh --run-id run_20260222_205502
-  bash scripts/agentlab/show_latest_scoreboard.sh --watch --metric-limit 12
+  bash scripts/agentlab/ops/show_latest_scoreboard.sh
+  bash scripts/agentlab/ops/show_latest_scoreboard.sh --run-id run_20260222_205502
+  bash scripts/agentlab/ops/show_latest_scoreboard.sh --watch --metric-limit 12
 USAGE
 }
 

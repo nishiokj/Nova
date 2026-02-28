@@ -1,0 +1,109 @@
+name: PR Review Service Deploy
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/pr-review-service-deploy.yml"
+      - "packages/apps/pr-review-service/**"
+      - "packages/plugins/entity-graph/**"
+      - "scripts/pr-review-ci.ts"
+      - "package.json"
+      - "bun.lock"
+      - "tsconfig.base.json"
+      - ".dockerignore"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/pr-review-service-deploy.yml"
+      - "packages/apps/pr-review-service/**"
+      - "packages/plugins/entity-graph/**"
+      - "scripts/pr-review-ci.ts"
+      - "package.json"
+      - "bun.lock"
+      - "tsconfig.base.json"
+      - ".dockerignore"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Push image to GHCR"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: pr-review-service-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify PR Review Service
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck service
+        run: bun run --cwd packages/apps/pr-review-service lint
+
+      - name: Build service
+        run: bun run --cwd packages/apps/pr-review-service build
+
+      - name: Run PR review CI unit tests
+        run: bun run test -- tests/scripts/pr-review-ci.test.ts
+
+  image:
+    name: Build and Publish Image
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image name
+        id: image
+        shell: bash
+        run: |
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          repo="$(echo "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')"
+          echo "name=ghcr.io/${owner}/${repo}-pr-review-service" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.publish)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and optionally push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/apps/pr-review-service/Dockerfile
+          push: ${{ github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.publish) }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

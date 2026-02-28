@@ -136,6 +136,19 @@ describe('classifyChanges', () => {
     expect(result[0].fileStatus).toBe('added')
   })
 
+  it('falls back to synthetic file entity for added file when no parsed entities exist', async () => {
+    const sql = mockSql({})
+    const changes: FileChange[] = [
+      { filepath: 'docs/readme.md', status: 'added', hunks: [] },
+    ]
+
+    const result = await classifyChanges(sql, changes)
+    expect(result).toHaveLength(1)
+    expect(result[0].changeKind).toBe('entity_added')
+    expect(result[0].entity.kind).toBe('file')
+    expect(result[0].entity.filepath).toBe('docs/readme.md')
+  })
+
   it('classifies deleted file entities as entity_deleted', async () => {
     const sql = mockSql(entities)
     const changes: FileChange[] = [
@@ -145,6 +158,19 @@ describe('classifyChanges', () => {
     const result = await classifyChanges(sql, changes)
     expect(result).toHaveLength(2) // file entity excluded, 2 functions remain
     expect(result.every(r => r.changeKind === 'entity_deleted')).toBe(true)
+  })
+
+  it('falls back to synthetic file entity for deleted file when path is absent in snapshot', async () => {
+    const sql = mockSql({})
+    const changes: FileChange[] = [
+      { filepath: 'src/deleted.ts', status: 'deleted', hunks: [] },
+    ]
+
+    const result = await classifyChanges(sql, changes)
+    expect(result).toHaveLength(1)
+    expect(result[0].changeKind).toBe('entity_deleted')
+    expect(result[0].entity.kind).toBe('file')
+    expect(result[0].entity.filepath).toBe('src/deleted.ts')
   })
 
   it('classifies modified file — hunk overlapping signature as signature_changed', async () => {
@@ -251,6 +277,70 @@ describe('classifyChanges', () => {
     expect(result[0].entity.filepath).toBe('src/old.ts')
     expect(result[1].changeKind).toBe('entity_added')
     expect(result[1].entity.filepath).toBe('src/new.ts')
+  })
+
+  it('falls back to synthetic old-path deletion for renamed files when old path is missing', async () => {
+    const newEntity = makeEntity({
+      id: 'function:src/new-name.ts:foo',
+      kind: 'function',
+      name: 'foo',
+      filepath: 'src/new-name.ts',
+      startLine: 1,
+      endLine: 5,
+    })
+
+    const sql = mockSql({
+      'src/new-name.ts': [newEntity],
+    })
+
+    const changes: FileChange[] = [
+      {
+        filepath: 'src/new-name.ts',
+        status: 'renamed',
+        oldFilepath: 'src/old-name.ts',
+        hunks: [],
+      },
+    ]
+
+    const result = await classifyChanges(sql, changes)
+    expect(result).toHaveLength(2)
+    expect(result[0].changeKind).toBe('entity_deleted')
+    expect(result[0].entity.kind).toBe('file')
+    expect(result[0].entity.filepath).toBe('src/old-name.ts')
+    expect(result[1].changeKind).toBe('entity_added')
+    expect(result[1].entity.filepath).toBe('src/new-name.ts')
+  })
+
+  it('falls back to synthetic new-path addition for renamed files when new path is missing', async () => {
+    const oldEntity = makeEntity({
+      id: 'function:src/old-name.ts:foo',
+      kind: 'function',
+      name: 'foo',
+      filepath: 'src/old-name.ts',
+      startLine: 1,
+      endLine: 5,
+    })
+
+    const sql = mockSql({
+      'src/old-name.ts': [oldEntity],
+    })
+
+    const changes: FileChange[] = [
+      {
+        filepath: 'src/new-name.ts',
+        status: 'renamed',
+        oldFilepath: 'src/old-name.ts',
+        hunks: [],
+      },
+    ]
+
+    const result = await classifyChanges(sql, changes)
+    expect(result).toHaveLength(2)
+    expect(result[0].changeKind).toBe('entity_deleted')
+    expect(result[0].entity.filepath).toBe('src/old-name.ts')
+    expect(result[1].changeKind).toBe('entity_added')
+    expect(result[1].entity.kind).toBe('file')
+    expect(result[1].entity.filepath).toBe('src/new-name.ts')
   })
 
   it('returns empty for modified file with no hunks', async () => {

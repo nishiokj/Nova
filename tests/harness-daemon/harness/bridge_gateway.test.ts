@@ -3,10 +3,13 @@
  */
 
 import { BusServer, BusClient, BRIDGE_COMMAND_CHANNEL, runChannel } from 'comms-bus';
+import { isRpcResponse } from 'harness-client';
 import { BridgeGateway } from 'harness-daemon/harness/bridge_gateway.js';
 import { createReadyEvent } from 'harness-daemon/harness/event_translator.js';
 import type { AgentRunHandle, BridgeEvent } from 'harness-daemon/harness/types.js';
 import type { FullHarnessConfig } from 'harness-daemon/harness/config.js';
+import { readFileSync } from 'fs';
+import path from 'path';
 
 function waitFor(predicate: () => boolean, timeoutMs = 300): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -28,12 +31,14 @@ function waitFor(predicate: () => boolean, timeoutMs = 300): Promise<void> {
 
 class FakeHarness {
   lastRunSessionKey: string | null = null;
+  private readonly sessionAsyncRuns = new Map<string, { requestId: string; goal: string; cancelled: boolean; startedAt: number }>();
   controlCalls: Array<{
     sessionKey: string;
     action: 'pause' | 'resume' | 'cancel';
     reason?: string;
     requestedBy?: 'user' | 'system' | 'policy';
   }> = [];
+  controlDelayMs = 0;
   private readonly config: FullHarnessConfig;
 
   constructor() {
@@ -156,12 +161,37 @@ class FakeHarness {
     reason?: string;
     requestedBy?: 'user' | 'system' | 'policy';
   }): Promise<{ success: boolean; requestId?: string; quiesced?: boolean; error?: string }> {
+    if (this.controlDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.controlDelayMs));
+    }
     this.controlCalls.push(params);
     return {
       success: true,
       requestId: 'req_control',
       quiesced: params.action !== 'resume',
     };
+  }
+
+  setSessionAsyncRun(sessionKey: string, info: { requestId: string; goal: string; cancelled: boolean; startedAt: number }): void {
+    this.sessionAsyncRuns.set(sessionKey, info);
+  }
+
+  getSessionAsyncRun(sessionKey: string): { requestId: string; goal: string; cancelled: boolean; startedAt: number } | null {
+    return this.sessionAsyncRuns.get(sessionKey) ?? null;
+  }
+
+  cancelSessionAsyncRun(sessionKey: string): void {
+    const current = this.sessionAsyncRuns.get(sessionKey);
+    if (!current) return;
+    this.sessionAsyncRuns.set(sessionKey, { ...current, cancelled: true });
+  }
+
+  clearSessionAsyncRun(sessionKey: string): void {
+    this.sessionAsyncRuns.delete(sessionKey);
+  }
+
+  setSessionAsyncModeEnabled(_sessionKey: string, _enabled: boolean): void {
+    // no-op in test harness
   }
 }
 
@@ -239,7 +269,7 @@ describe('BridgeGateway', () => {
     await server.stop();
   });
 
-  it('returns debug memory info over control-plane bridge command', async () => {
+  it('rejects legacy unary commands after rpc cutover', async () => {
     const harness = new FakeHarness();
     let gateway: BridgeGateway;
     const server = new BusServer({
@@ -258,26 +288,45 @@ describe('BridgeGateway', () => {
     });
     await client.connect();
 
-    client.publish(BRIDGE_COMMAND_CHANNEL, { type: 'control_plane_memory_info', data: {} });
-    await waitFor(() => events.some((event) =>
-      event.type === 'response'
-      && isRecord(event.data?.metadata)
-      && event.data.metadata.kind === 'control_plane_memory_info'
-    ));
+    client.publish(BRIDGE_COMMAND_CHANNEL, { type: 'get_models', data: {} });
+    await waitFor(() => events.some((event) => event.type === 'error'));
 
-    const response = events.find((event) =>
-      event.type === 'response'
-      && isRecord(event.data?.metadata)
-      && event.data.metadata.kind === 'control_plane_memory_info'
-    );
-    if (!response || !isRecord(response.data?.metadata)) {
-      throw new Error('Expected control_plane_memory_info response');
+    const errorEvent = events.find((event) => event.type === 'error');
+    expect(String(errorEvent?.data?.message ?? '')).toContain('Legacy unary command removed');
+
+    client.close();
+    await server.stop();
+  });
+
+  it('returns debug memory info over control-plane bridge command', async () => {
+    const harness = new FakeHarness();
+    let gateway: BridgeGateway;
+    const server = new BusServer({
+      host: '127.0.0.1',
+      port: 0,
+      onPublish: (connectionId, channel, payload) =>
+        gateway.handlePublish(connectionId, channel, payload),
+    });
+    gateway = new BridgeGateway(server, harness, process.cwd());
+    const address = await server.start();
+
+    const client = new BusClient({ host: address.host, port: address.port });
+    const rpcResponses: Array<Record<string, unknown>> = [];
+    client.on('event', (payload) => {
+      if (isRpcResponse(payload)) {
+        rpcResponses.push(payload as Record<string, unknown>);
+      }
+    });
+    await client.connect();
+
+    client.publish(BRIDGE_COMMAND_CHANNEL, { rpc: 1, id: 'rpc_memory', method: 'control.memory_info', params: {} });
+    await waitFor(() => rpcResponses.length > 0);
+
+    const response = rpcResponses[0];
+    if (!response || !isRecord(response.result)) {
+      throw new Error('Expected RPC control.memory_info response');
     }
-    const payload = response.data.metadata.payload;
-    expect(isRecord(payload)).toBe(true);
-    if (!isRecord(payload)) {
-      throw new Error('Expected payload record');
-    }
+    const payload = response.result;
     expect(payload.success).toBe(true);
     expect(payload.sessionCount).toBe(1);
     expect(Array.isArray(payload.sessions)).toBe(true);
@@ -359,8 +408,10 @@ describe('BridgeGateway', () => {
     await waitFor(() => events.some((event) => event.type === 'ready'));
 
     client.publish(BRIDGE_COMMAND_CHANNEL, {
-      type: 'control_plane_stop',
-      data: {
+      rpc: 1,
+      id: 'rpc_cp_stop',
+      method: 'control.stop',
+      params: {
         session_key: sessionKey,
         action: 'cancel',
         note: 'cancel from control plane',
@@ -374,6 +425,172 @@ describe('BridgeGateway', () => {
 
     client.close();
     await server.stop();
+  });
+
+  it('preserves async.cancel rpc response when async_complete side-effect event is emitted', async () => {
+    const harness = new FakeHarness();
+    let gateway: BridgeGateway;
+    const server = new BusServer({
+      host: '127.0.0.1',
+      port: 0,
+      onPublish: (connectionId, channel, payload) =>
+        gateway.handlePublish(connectionId, channel, payload),
+    });
+    gateway = new BridgeGateway(server, harness, process.cwd());
+    const address = await server.start();
+
+    const client = new BusClient({ host: address.host, port: address.port });
+    const rpcResponses: Array<Record<string, unknown>> = [];
+    const allEvents: BridgeEvent[] = [];
+    const responseEvents: BridgeEvent[] = [];
+    client.on('event', (payload) => {
+      if (isRpcResponse(payload)) {
+        rpcResponses.push(payload as Record<string, unknown>);
+      }
+      if (isRecord(payload) && typeof payload.type === 'string') {
+        allEvents.push(payload as BridgeEvent);
+      }
+      if (isRecord(payload) && payload.type === 'response') {
+        responseEvents.push(payload as BridgeEvent);
+      }
+    });
+    await client.connect();
+
+    const sessionKey = 'async-cancel-session';
+    client.publish(BRIDGE_COMMAND_CHANNEL, { type: 'init', data: { session_key: sessionKey } });
+    await waitFor(() => allEvents.some((event) => event.type === 'ready'));
+
+    harness.setSessionAsyncRun(sessionKey, {
+      requestId: 'req_async_cancel',
+      goal: 'test goal',
+      cancelled: false,
+      startedAt: Date.now() - 1_000,
+    });
+
+    client.publish(BRIDGE_COMMAND_CHANNEL, {
+      rpc: 1,
+      id: 'rpc_async_cancel',
+      method: 'async.cancel',
+      params: { session_key: sessionKey },
+    });
+
+    await waitFor(() => rpcResponses.length > 0 && responseEvents.some((event) =>
+      event.type === 'response'
+      && isRecord(event.data?.metadata)
+      && event.data.metadata.kind === 'async_complete'
+    ));
+
+    const rpc = rpcResponses[0];
+    expect(isRecord(rpc?.result)).toBe(true);
+    if (!isRecord(rpc?.result)) {
+      throw new Error('Expected rpc async.cancel result payload');
+    }
+    expect(rpc.result.success).toBe(true);
+    expect(rpc.result.requestId).toBe('req_async_cancel');
+    expect(rpc.result.goal).toBe('test goal');
+
+    const asyncComplete = responseEvents.find((event) =>
+      event.type === 'response'
+      && isRecord(event.data?.metadata)
+      && event.data.metadata.kind === 'async_complete'
+    );
+    expect(asyncComplete).toBeDefined();
+
+    client.close();
+    await server.stop();
+  });
+
+  it('serializes concurrent same-method rpc calls on one connection', async () => {
+    const harness = new FakeHarness();
+    harness.controlDelayMs = 15;
+    let gateway: BridgeGateway;
+    const server = new BusServer({
+      host: '127.0.0.1',
+      port: 0,
+      onPublish: (connectionId, channel, payload) =>
+        gateway.handlePublish(connectionId, channel, payload),
+    });
+    gateway = new BridgeGateway(server, harness, process.cwd());
+    const address = await server.start();
+
+    const client = new BusClient({ host: address.host, port: address.port });
+    const events: BridgeEvent[] = [];
+    const rpcResponses: Array<Record<string, unknown>> = [];
+    client.on('event', (payload) => {
+      if (isRpcResponse(payload)) {
+        rpcResponses.push(payload as Record<string, unknown>);
+      }
+      if (isRecord(payload) && typeof payload.type === 'string') {
+        events.push(payload as BridgeEvent);
+      }
+    });
+    await client.connect();
+
+    const sessionKey = 'rpc-queue-session';
+    client.publish(BRIDGE_COMMAND_CHANNEL, { type: 'init', data: { session_key: sessionKey } });
+    await waitFor(() => events.some((event) => event.type === 'ready'));
+
+    client.publish(BRIDGE_COMMAND_CHANNEL, {
+      rpc: 1,
+      id: 'rpc_stop_1',
+      method: 'control.stop',
+      params: { session_key: sessionKey, action: 'cancel', note: 'first' },
+    });
+    client.publish(BRIDGE_COMMAND_CHANNEL, {
+      rpc: 1,
+      id: 'rpc_stop_2',
+      method: 'control.stop',
+      params: { session_key: sessionKey, action: 'cancel', note: 'second' },
+    });
+
+    await waitFor(() => rpcResponses.length >= 2, 800);
+    const first = rpcResponses.find((entry) => entry.id === 'rpc_stop_1');
+    const second = rpcResponses.find((entry) => entry.id === 'rpc_stop_2');
+    expect(isRecord(first?.result)).toBe(true);
+    expect(isRecord(second?.result)).toBe(true);
+    if (isRecord(first?.result)) {
+      expect(first.result.success).toBe(true);
+    }
+    if (isRecord(second?.result)) {
+      expect(second.result.success).toBe(true);
+    }
+    expect(harness.controlCalls).toHaveLength(2);
+    expect(harness.controlCalls[0]?.reason).toBe('first');
+    expect(harness.controlCalls[1]?.reason).toBe('second');
+
+    client.close();
+    await server.stop();
+  });
+
+  it('keeps migrated unary rpc handlers out of bridge_gateway.ts', () => {
+    const sourcePath = path.resolve(process.cwd(), 'packages/infra/harness-daemon/src/harness/bridge_gateway.ts');
+    const source = readFileSync(sourcePath, 'utf8');
+    const bannedSignatures = [
+      'private handleGetConfig(',
+      'private handleGetStatus(',
+      'private handleGetModels(',
+      'private handleModelsDelete(',
+      'private handleSkills',
+      'private handleHooks',
+      'private handleAuth',
+      'private handleProviders',
+      'private handleSessionFork(',
+      'private handleSessionClose(',
+      'private handleSessionDelete(',
+      'private handleUsageSummary(',
+      'private handleCompactContext(',
+      'private handleSetModel(',
+      'private handleGetModel(',
+      'private handleSetDangerousMode(',
+      'private handleControlPlane',
+      'private handleAsyncStart(',
+      'private handleAsyncCancel(',
+      'private handleAsyncStatus(',
+      'private invokeRpcMethod(',
+    ];
+    for (const signature of bannedSignatures) {
+      expect(source).not.toContain(signature);
+    }
   });
 });
 

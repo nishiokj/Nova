@@ -71,7 +71,7 @@
         "max_duration_ms": 45000
       },
       "output_schema": "agent_action"
-    },
+    }
 
   },
 

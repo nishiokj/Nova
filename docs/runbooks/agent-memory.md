@@ -3,8 +3,15 @@
 ## Start
 
 ```bash
-cd packages/agent-memory
-bun run daemon:only
+bun run --cwd packages/plugins/agent-memory daemon
+```
+
+`daemon` already bootstraps Postgres (or reuses existing), runs migrations, and starts the service.
+
+Optional DB-only bootstrap (no daemon):
+
+```bash
+bun run --cwd packages/plugins/agent-memory db:start
 ```
 
 Required env vars (minimum):

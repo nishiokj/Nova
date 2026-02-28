@@ -530,6 +530,53 @@ export class Agent {
   }
 
   /**
+   * Explorer fallback: if files were read but no artifact was produced for a path,
+   * synthesize a minimal summary artifact so downstream agents can still reason
+   * from concrete file-level findings.
+   */
+  private synthesizeExplorerArtifactsFromReadFiles(
+    localReadFiles: Set<string>,
+    localContext: ContextWindow,
+    workItemId?: string
+  ): number {
+    if (this.config.type !== 'explorer' || localReadFiles.size === 0) {
+      return 0;
+    }
+
+    const coveredPaths = new Set(localContext.getArtifacts().map((artifact) => artifact.sourcePath));
+    const synthesizedArtifacts: Array<{
+      sourcePath: string;
+      kind: ArtifactKind;
+      name: string;
+      discoveredBy: string;
+      insight: string;
+    }> = [];
+
+    for (const sourcePath of localReadFiles) {
+      if (coveredPaths.has(sourcePath)) {
+        continue;
+      }
+
+      const baseName = path.basename(sourcePath).trim();
+      synthesizedArtifacts.push({
+        sourcePath,
+        kind: 'summary',
+        name: baseName.length > 0 ? baseName : sourcePath,
+        discoveredBy: this.config.type,
+        insight: 'Fallback summary synthesized because explorer output omitted structured artifacts.',
+      });
+      coveredPaths.add(sourcePath);
+    }
+
+    if (synthesizedArtifacts.length === 0) {
+      return 0;
+    }
+
+    localContext.addArtifacts(synthesizedArtifacts, workItemId);
+    return synthesizedArtifacts.length;
+  }
+
+  /**
    * Parse LLM response content into structured components.
    * Returns action, response text, and structured output for downstream handling.
    */
@@ -747,6 +794,8 @@ export class Agent {
       );
 
       metrics.durationMs = Date.now() - startTime;
+
+      this.synthesizeExplorerArtifactsFromReadFiles(new Set(result.filesRead), localContext, workItem.workId);
 
       // Bundle artifacts explicitly in result for clear contract
       result.artifacts = localContext.getArtifacts();
@@ -1151,8 +1200,8 @@ export class Agent {
         if (toolCalls.length > 0) {
           const toolNames = toolCalls.map(t => t.name);
           const successfulOutputs = toolOutputs.filter(o => !o.isError && o.output);
-          const summary = `Exploration incomplete. Tools called: ${toolNames.join(', ')}. ` +
-            `${successfulOutputs.length} successful results obtained but not synthesized.`;
+          const summary = `Tool exploration produced partial results. Tools called: ${toolNames.join(', ')}. ` +
+            `${successfulOutputs.length} successful results were captured without a final synthesis step.`;
           result.response = summary;
         }
       }
