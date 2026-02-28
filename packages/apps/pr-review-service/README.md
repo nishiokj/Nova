@@ -20,7 +20,7 @@ use per-worker or per-job databases to avoid collisions.
 - `ENTITY_GRAPH_DATABASE_URL` (or `DATABASE_URL`): Postgres URL for entity graph tables.
 - `GITHUB_WEBHOOK_SECRET`: Webhook signature secret (recommended).
 - One GitHub auth mode:
-  - `GITHUB_TOKEN`, or
+  - `GITHUB_TOKEN` (or local GitHub CLI auth via `gh auth login`), or
   - `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY` (GitHub App mode).
 
 ## Optional env vars
