@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import type { ServiceConfig } from './types.js'
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
@@ -31,18 +32,28 @@ function resolveDefaultScriptPath(): string {
   return scriptPath
 }
 
+function resolveGitHubTokenFromCli(): string | undefined {
+  const result = spawnSync('gh', ['auth', 'token'], {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  if (result.status !== 0) return undefined
+  const token = result.stdout.trim()
+  return token.length > 0 ? token : undefined
+}
+
 export function loadConfigFromEnv(): ServiceConfig {
   const entityGraphDatabaseUrl = process.env.ENTITY_GRAPH_DATABASE_URL ?? process.env.DATABASE_URL
   if (!entityGraphDatabaseUrl) {
     throw new Error('Missing ENTITY_GRAPH_DATABASE_URL or DATABASE_URL')
   }
 
-  const staticGithubToken = process.env.GITHUB_TOKEN
   const githubAppId = process.env.GITHUB_APP_ID
   const githubAppPrivateKey = process.env.GITHUB_APP_PRIVATE_KEY
+  const staticGithubToken = process.env.GITHUB_TOKEN ?? resolveGitHubTokenFromCli()
 
   if (!staticGithubToken && (!githubAppId || !githubAppPrivateKey)) {
-    throw new Error('Missing GitHub auth config. Set GITHUB_TOKEN or (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY).')
+    throw new Error('Missing GitHub auth config. Set GITHUB_TOKEN, run "gh auth login", or set (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY).')
   }
 
   return {
