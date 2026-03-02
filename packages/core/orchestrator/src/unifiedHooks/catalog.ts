@@ -1,5 +1,5 @@
 import type { InternalHookEvent } from 'agent';
-import { ALL_EVENT_TYPES, type ControlEventType } from 'protocol';
+import { ALL_EVENT_TYPES, type ControlEventType } from '../control-plane/index.js';
 
 export type HookMode = 'decision' | 'effect';
 export type HookScope = 'orchestrator' | 'agent' | 'harness';

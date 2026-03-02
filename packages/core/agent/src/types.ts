@@ -1,4 +1,4 @@
-import type { WorkItem } from 'work';
+import type { WorkItem } from 'types';
 import type {
   AgentEvent,
   StructuredOutputSchema,
@@ -11,9 +11,9 @@ import type {
 import type { ContextWindow } from 'context';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
-import type { TerminationReason } from 'protocol';
+import type { TerminationReason } from 'types';
 
-// Re-export stop hook types from protocol (moved there to avoid circular deps)
+// Re-export stop hook types from shared types (to avoid orchestrator/agent coupling)
 export type {
   DeferredWorkItem,
   ExecutionSnapshot,
@@ -21,7 +21,7 @@ export type {
   StopHookContext,
   StopHookUserPrompt,
   StopHookHandler,
-} from 'protocol';
+} from 'types';
 
 /**
  * Agent type identifier - any string, defined via config.

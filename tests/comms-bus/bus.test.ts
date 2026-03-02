@@ -1,5 +1,5 @@
 /**
- * Tests for JSONL bus server/client.
+ * Tests for WebSocket bus server/client.
  */
 
 import { BusServer } from 'comms-bus/bus_server.js';

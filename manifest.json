@@ -1,8 +1,0 @@
-{
-  "schema_version": "agent_artifact_v1",
-  "id": "rex",
-  "platform": "linux-x64",
-  "entrypoint": "bin/rex",
-  "frozen_at": "2026-02-23T18:52:07Z",
-  "source_commit": "6cc9f13"
-}

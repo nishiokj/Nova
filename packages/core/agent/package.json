@@ -22,9 +22,7 @@
     "effect": "^3.19.18",
     "llm": "workspace:*",
     "tools": "workspace:*",
-    "context": "workspace:*",
-    "work": "workspace:*",
-    "protocol": "workspace:*"
+    "context": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "^1.0.0",

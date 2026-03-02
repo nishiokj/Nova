@@ -43,10 +43,5 @@ export {
   type HookMode,
 } from './unifiedHooks/index.js';
 
-// Prompt-protocol helpers (re-exported from protocol)
-export {
-  ControlEvents,
-  ControlEventTypeField,
-  DECISION_PROMPT_BY_EVENT,
-  type DecisionPrompt,
-} from 'protocol';
+// Control-plane contracts (events, decisions, patches, hook policies/outcomes)
+export * from './control-plane/index.js';

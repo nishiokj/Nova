@@ -1,60 +1,26 @@
-/**
- * State Patches - Discriminated Union
- *
- * All state modifications are expressed as patches.
- * Hooks return patches; the orchestrator (single writer) applies them.
- */
+import type { TerminationReason } from 'types';
+import { assertNever } from 'types';
+import type { AuditLogEntry, WorkItemSpec } from './state.js';
 
-import type { WorkItemSpec, AuditLogEntry } from '../domain/state.js';
-import type { TerminationReason } from '../domain/termination.js';
-import { assertNever } from '../assertNever.js';
-
-// ============================================
-// STATE PATCH UNION
-// ============================================
-
-/**
- * A single state modification request.
- * Hooks return patches; the orchestrator (single writer) applies them.
- */
 export type StatePatch =
-  // Work queue operations
   | EnqueueWorkPatch
   | CancelWorkPatch
-
-  // Context operations
   | InjectMessagePatch
   | InjectGuidancePatch
-
-  // Counter operations
   | ResetCounterPatch
   | IncrementCounterPatch
-
-  // Termination operations
   | SetTerminationPatch
   | ClearTerminationPatch
   | ForceContinuePatch
-
-  // Metadata operations
   | SetMetadataPatch
   | AppendAuditLogPatch;
 
-// ============================================
-// PATCH DEFINITIONS
-// ============================================
-
-/**
- * Add work items to the queue.
- */
 export interface EnqueueWorkPatch {
   op: 'enqueue_work';
   items: WorkItemSpec[];
   position?: 'front' | 'back';
 }
 
-/**
- * Cancel work items by ID.
- */
 export type CancellationScope = 'queued' | 'in_progress' | 'all';
 
 export interface CancellationTarget {
@@ -68,93 +34,56 @@ export interface CancelWorkPatch {
   cancellation: CancellationTarget;
 }
 
-/**
- * Inject a message into the context window.
- */
 export interface InjectMessagePatch {
   op: 'inject_message';
   role: 'system' | 'user';
   content: string;
 }
 
-/**
- * Inject guidance (system message) into the context.
- */
 export interface InjectGuidancePatch {
   op: 'inject_guidance';
   content: string;
 }
 
-/**
- * Reset a counter to zero.
- */
 export interface ResetCounterPatch {
   op: 'reset_counter';
   counter: 'realign' | 'iteration' | 'tool_calls';
 }
 
-/**
- * Increment a counter.
- */
 export interface IncrementCounterPatch {
   op: 'increment_counter';
   counter: 'realign';
 }
 
-/**
- * Set the termination reason.
- */
 export interface SetTerminationPatch {
   op: 'set_termination';
   reason: TerminationReason;
 }
 
-/**
- * Clear the termination reason.
- */
 export interface ClearTerminationPatch {
   op: 'clear_termination';
 }
 
-/**
- * Force continuation (clear termination and continue).
- */
 export interface ForceContinuePatch {
   op: 'force_continue';
 }
 
-/**
- * Set a metadata key.
- */
 export interface SetMetadataPatch {
   op: 'set_metadata';
   key: string;
   value: unknown;
 }
 
-/**
- * Append an entry to the audit log.
- */
 export interface AppendAuditLogPatch {
   op: 'append_audit_log';
   entry: AuditLogEntry;
 }
 
-// ============================================
-// PATCH VALIDATION
-// ============================================
-
-/**
- * Validation result.
- */
 export interface ValidationResult {
   valid: boolean;
   error?: string;
 }
 
-/**
- * Validate a patch is well-formed.
- */
 export function validatePatch(patch: StatePatch): ValidationResult {
   switch (patch.op) {
     case 'enqueue_work':
@@ -178,7 +107,7 @@ export function validatePatch(patch: StatePatch): ValidationResult {
       if (!patch.workIds.length) {
         return { valid: false, error: 'cancel_work requires at least one workId' };
       }
-      if (patch.workIds.some(workId => !workId?.trim())) {
+      if (patch.workIds.some((workId) => !workId?.trim())) {
         return { valid: false, error: 'cancel_work workIds must be non-empty strings' };
       }
       if (!patch.cancellation.reason?.trim()) {
@@ -209,21 +138,15 @@ export function validatePatch(patch: StatePatch): ValidationResult {
       return { valid: true };
 
     case 'reset_counter':
-      // Counter type is validated by TypeScript at compile time
-      return { valid: true };
-
     case 'increment_counter':
-      // Counter type is validated by TypeScript at compile time
+    case 'clear_termination':
+    case 'force_continue':
       return { valid: true };
 
     case 'set_termination':
       if (!patch.reason) {
         return { valid: false, error: 'set_termination requires a reason' };
       }
-      return { valid: true };
-
-    case 'clear_termination':
-    case 'force_continue':
       return { valid: true };
 
     case 'set_metadata':
@@ -246,9 +169,6 @@ export function validatePatch(patch: StatePatch): ValidationResult {
   }
 }
 
-/**
- * Validate a batch of patches.
- */
 export function validatePatches(patches: StatePatch[]): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
   for (let i = 0; i < patches.length; i++) {
@@ -260,20 +180,10 @@ export function validatePatches(patches: StatePatch[]): { valid: boolean; errors
   return { valid: errors.length === 0, errors };
 }
 
-// ============================================
-// PATCH FACTORIES
-// ============================================
-
-/**
- * Create an enqueue_work patch.
- */
 export function enqueueWork(items: WorkItemSpec[], position: 'front' | 'back' = 'back'): EnqueueWorkPatch {
   return { op: 'enqueue_work', items, position };
 }
 
-/**
- * Create a cancel_work patch.
- */
 export function cancelWork(
   workIds: string[],
   reason: string,
@@ -289,65 +199,38 @@ export function cancelWork(
   };
 }
 
-/**
- * Create an inject_message patch.
- */
 export function injectMessage(role: 'system' | 'user', content: string): InjectMessagePatch {
   return { op: 'inject_message', role, content };
 }
 
-/**
- * Create an inject_guidance patch.
- */
 export function injectGuidance(content: string): InjectGuidancePatch {
   return { op: 'inject_guidance', content };
 }
 
-/**
- * Create a reset_counter patch.
- */
 export function resetCounter(counter: 'realign' | 'iteration' | 'tool_calls'): ResetCounterPatch {
   return { op: 'reset_counter', counter };
 }
 
-/**
- * Create an increment_counter patch.
- */
 export function incrementCounter(counter: 'realign'): IncrementCounterPatch {
   return { op: 'increment_counter', counter };
 }
 
-/**
- * Create a set_termination patch.
- */
 export function setTermination(reason: TerminationReason): SetTerminationPatch {
   return { op: 'set_termination', reason };
 }
 
-/**
- * Create a clear_termination patch.
- */
 export function clearTermination(): ClearTerminationPatch {
   return { op: 'clear_termination' };
 }
 
-/**
- * Create a force_continue patch.
- */
 export function forceContinue(): ForceContinuePatch {
   return { op: 'force_continue' };
 }
 
-/**
- * Create a set_metadata patch.
- */
 export function setMetadata(key: string, value: unknown): SetMetadataPatch {
   return { op: 'set_metadata', key, value };
 }
 
-/**
- * Create an append_audit_log patch.
- */
 export function appendAuditLog(entry: AuditLogEntry): AppendAuditLogPatch {
   return { op: 'append_audit_log', entry };
 }

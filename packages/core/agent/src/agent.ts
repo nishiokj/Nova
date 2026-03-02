@@ -26,8 +26,8 @@ import { isLLMMessageItem, isLLMFunctionCallItem, isLLMFunctionCallOutputItem } 
 import { createEvent, errorResult, successResult } from 'types';
 import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS, unwrapStructuredOutput } from 'shared';
 import { ContextWindow, buildSystemMessage } from 'context';
-import type { WorkItem } from 'work';
-import { createWorkItem } from 'work';
+import type { WorkItem } from 'types';
+import { createWorkItem } from 'types';
 import type {
   AgentConfig,
   AgentRunParams,

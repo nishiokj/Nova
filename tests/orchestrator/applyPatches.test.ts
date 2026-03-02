@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ContextWindow } from 'context';
-import { createWorkItem } from 'work';
+import { createWorkItem } from 'types';
 import { applyPatches } from 'orchestrator/hookRunner/applyPatches.js';
-import type { StatePatch } from 'protocol';
+import type { StatePatch } from 'orchestrator';
 
 describe('applyPatches cancel_work semantics', () => {
   it('removes queued work when cancellation scope is queued', () => {

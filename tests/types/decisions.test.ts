@@ -23,7 +23,7 @@ import {
   type CadenceDecision,
   type AgentErrorDecision,
   type WorkItemCompletedDecision,
-} from 'protocol/control/decisions.js';
+} from 'orchestrator';
 
 // =========================================================================
 // QualityGateDecision type guards

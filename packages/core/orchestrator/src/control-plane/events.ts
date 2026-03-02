@@ -1,25 +1,5 @@
-/**
- * Control Plane Events - Discriminated Union
- *
- * All events that flow through the control plane.
- * Each event type has its own payload structure.
- */
+import type { TerminationReason } from 'types';
 
-import type { TerminationReason } from './termination.js';
-import {
-  controlField,
-  events,
-  isObject,
-  matchEvent,
-  matchEventAll,
-  type EventOf,
-  type HandlersFor,
-  type Validator,
-} from 'prompt-protocol';
-
-/**
- * Base event interface.
- */
 export interface ControlEventBase {
   type: string;
   timestamp: number;
@@ -27,9 +7,6 @@ export interface ControlEventBase {
   workId: string;
 }
 
-/**
- * Execution metrics snapshot.
- */
 export interface ExecutionMetrics {
   toolCallsMade: number;
   llmCalls: number;
@@ -40,9 +17,6 @@ export interface ExecutionMetrics {
   iterationCount: number;
 }
 
-/**
- * Artifact produced by the agent.
- */
 export interface Artifact {
   type: 'file' | 'url' | 'data';
   path?: string;
@@ -51,17 +25,10 @@ export interface Artifact {
   description: string;
 }
 
-/**
- * Prompt option for user input.
- */
 export interface PromptOption {
   label: string;
   description?: string;
 }
-
-// ============================================
-// EVENT DEFINITIONS
-// ============================================
 
 export interface GoalReachedEvent extends ControlEventBase {
   type: 'goal_state_reached';
@@ -96,7 +63,6 @@ export interface CadenceAuditEvent extends ControlEventBase {
   toolCallsSinceLastAudit: number;
   metrics: ExecutionMetrics;
   recentActivity: string;
-  /** Optional list of active workItem IDs included in this audit. */
   workIds?: string[];
 }
 
@@ -127,13 +93,6 @@ export interface WorkItemCompletedEvent extends ControlEventBase {
   terminationReason: TerminationReason;
 }
 
-// ============================================
-// CONTROL EVENT UNION
-// ============================================
-
-/**
- * All control plane events (discriminated union).
- */
 export type ControlEvent =
   | GoalReachedEvent
   | BoundsExceededEvent
@@ -144,14 +103,8 @@ export type ControlEvent =
   | TransientErrorEvent
   | WorkItemCompletedEvent;
 
-/**
- * Extract the type string from a ControlEvent.
- */
 export type ControlEventType = ControlEvent['type'];
 
-/**
- * All event types as an array.
- */
 export const ALL_EVENT_TYPES: readonly ControlEventType[] = [
   'goal_state_reached',
   'bounds_exceeded',
@@ -163,108 +116,6 @@ export const ALL_EVENT_TYPES: readonly ControlEventType[] = [
   'work_item_completed',
 ] as const;
 
-// ============================================
-// PROMPT-PROTOCOL DEFINITIONS
-// ============================================
-
-/**
- * Control field for ControlEvent.type.
- */
-export const ControlEventTypeField = controlField('type', ALL_EVENT_TYPES);
-
-/**
- * Minimal validator for ControlEvent objects.
- */
-export const ControlEventValidator: Validator<ControlEvent> = {
-  parse(input) {
-    if (!isObject(input) || !ControlEventTypeField.is(input.type)) {
-      throw new Error('Invalid ControlEvent');
-    }
-    if (typeof input.timestamp !== 'number') throw new Error('Invalid ControlEvent.timestamp');
-    if (typeof input.sessionKey !== 'string') throw new Error('Invalid ControlEvent.sessionKey');
-    if (typeof input.workId !== 'string') throw new Error('Invalid ControlEvent.workId');
-    return input as unknown as ControlEvent;
-  },
-  safeParse(input) {
-    try {
-      return { success: true, data: this.parse(input) as ControlEvent };
-    } catch (error) {
-      return { success: false, error };
-    }
-  },
-};
-
-/**
- * Prompt-protocol EventDef for ControlEvent routing.
- */
-export const ControlEvents = events<ControlEvent>({
-  discriminant: 'type',
-  validate: ControlEventValidator,
-});
-
-/**
- * Typed event router (subset handlers allowed).
- */
-export function matchControlEvent<R>(
-  event: EventOf<typeof ControlEvents>,
-  handlers: HandlersFor<typeof ControlEvents, R>
-): R {
-  return matchEvent<typeof ControlEvents, R>(ControlEvents, event, handlers);
-}
-
-/**
- * Typed event router (all handlers required).
- */
-export function matchControlEventAll<R>(
-  event: EventOf<typeof ControlEvents>,
-  handlers: HandlersFor<typeof ControlEvents, R>
-): R {
-  return matchEventAll<typeof ControlEvents, R>(ControlEvents, event, handlers);
-}
-
-// ============================================
-// TYPE GUARDS
-// ============================================
-
-export function isGoalReached(evt: ControlEvent): evt is GoalReachedEvent {
-  return evt.type === 'goal_state_reached';
-}
-
-export function isBoundsExceeded(evt: ControlEvent): evt is BoundsExceededEvent {
-  return evt.type === 'bounds_exceeded';
-}
-
-export function isUserInputRequired(evt: ControlEvent): evt is UserInputRequiredEvent {
-  return evt.type === 'user_input_required';
-}
-
-export function isCadenceAudit(evt: ControlEvent): evt is CadenceAuditEvent {
-  return evt.type === 'cadence_audit';
-}
-
-export function isAgentError(evt: ControlEvent): evt is AgentErrorEvent {
-  return evt.type === 'agent_error';
-}
-
-export function isUserStopped(evt: ControlEvent): evt is UserStoppedEvent {
-  return evt.type === 'user_stopped';
-}
-
-export function isTransientError(evt: ControlEvent): evt is TransientErrorEvent {
-  return evt.type === 'transient_error';
-}
-
-export function isWorkItemCompleted(evt: ControlEvent): evt is WorkItemCompletedEvent {
-  return evt.type === 'work_item_completed';
-}
-
-// ============================================
-// EVENT FACTORIES
-// ============================================
-
-/**
- * Create a GoalReachedEvent.
- */
 export function createGoalReachedEvent(
   sessionKey: string,
   workId: string,
@@ -285,9 +136,6 @@ export function createGoalReachedEvent(
   };
 }
 
-/**
- * Create a BoundsExceededEvent.
- */
 export function createBoundsExceededEvent(
   sessionKey: string,
   workId: string,
@@ -310,9 +158,6 @@ export function createBoundsExceededEvent(
   };
 }
 
-/**
- * Create a UserInputRequiredEvent.
- */
 export function createUserInputRequiredEvent(
   sessionKey: string,
   workId: string,
@@ -330,9 +175,6 @@ export function createUserInputRequiredEvent(
   };
 }
 
-/**
- * Create a CadenceAuditEvent.
- */
 export function createCadenceAuditEvent(
   sessionKey: string,
   workId: string,
@@ -355,9 +197,6 @@ export function createCadenceAuditEvent(
   };
 }
 
-/**
- * Create an AgentErrorEvent.
- */
 export function createAgentErrorEvent(
   sessionKey: string,
   workId: string,
@@ -378,9 +217,6 @@ export function createAgentErrorEvent(
   };
 }
 
-/**
- * Create a WorkItemCompletedEvent.
- */
 export function createWorkItemCompletedEvent(
   sessionKey: string,
   workId: string,
@@ -402,4 +238,3 @@ export function createWorkItemCompletedEvent(
     terminationReason,
   };
 }
-

@@ -250,6 +250,9 @@ export class BusServer {
   }
 
   private handleClose(connection: ConnectionState): void {
+    // Remove connection first so hasSubscribers() reflects only active peers.
+    this.connections.delete(connection.id);
+
     // Clean up run subscriptions that this connection was the last subscriber for
     for (const channel of connection.subscriptions) {
       const runMatch = channel.match(/^run:(.+)$/);
@@ -261,7 +264,6 @@ export class BusServer {
       }
     }
 
-    this.connections.delete(connection.id);
     if (this.onDisconnect) {
       this.onDisconnect(connection.id);
     }

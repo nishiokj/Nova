@@ -4,10 +4,16 @@
  * Orchestrator-owned mutation reducer for protocol patches.
  */
 
-import type { AuditLogEntry, TerminationReason } from 'protocol';
-import { assertNever, validatePatch, type StatePatch } from 'protocol';
+import type { AuditLogEntry, StatePatch } from '../control-plane/index.js';
+import { validatePatch } from '../control-plane/index.js';
 import type { ContextWindow } from 'context';
-import { createWorkItem, cloneWorkItemWithDependencies, type WorkItem } from 'work';
+import {
+  assertNever,
+  createWorkItem,
+  cloneWorkItemWithDependencies,
+  type TerminationReason,
+  type WorkItem,
+} from 'types';
 
 // ============================================
 // APPLY RESULT

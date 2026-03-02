@@ -11,7 +11,7 @@
  * These tests verify the core state machine logic.
  */
 
-import { createWorkItem, type WorkItem, DEFAULT_WORK_BOUNDS } from 'work/work-item.js';
+import { createWorkItem, type WorkItem, DEFAULT_WORK_BOUNDS } from 'types';
 import { ContextWindow } from 'context/context-window.js';
 import {
   DEFAULT_ORCHESTRATOR_CONFIG,

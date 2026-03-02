@@ -28,8 +28,7 @@
     "runtime": "workspace:*",
     "shared": "workspace:*",
     "tools": "workspace:*",
-    "types": "workspace:*",
-    "work": "workspace:*"
+    "types": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "^1.0.0",

@@ -26,14 +26,21 @@ import type {
 } from 'agent';
 import { Agent } from 'agent';
 import type { AgentRegistry } from 'agent';
-import { createWorkItem, cloneWorkItemWithDependencies, type WorkItem } from 'work';
-import { createEvent } from 'types';
 import type {
+  WorkItem,
+  StopHookResult,
+  TerminationReason,
   LLMRequestConfig,
   MessageItem,
   RunCancellationMetadata,
   RunControlMetadata,
   RunExecutionMetadata,
+} from 'types';
+import {
+  assertNever,
+  cloneWorkItemWithDependencies,
+  createEvent,
+  createWorkItem,
 } from 'types';
 import { buildLLMRequestConfig, profiler } from 'shared';
 import {
@@ -42,7 +49,6 @@ import {
   type RuntimeControlQueue,
 } from 'runtime';
 import {
-  assertNever,
   createAgentErrorEvent,
   createBoundsExceededEvent,
   createCadenceAuditEvent,
@@ -61,10 +67,8 @@ import {
   type PromptAnswerDecision,
   type QualityGateDecision,
   type StatePatch,
-  type StopHookResult,
   type WorkItemCompletedDecision,
-  type TerminationReason,
-} from 'protocol';
+} from './control-plane/index.js';
 import { applyPatches } from './hookRunner/applyPatches.js';
 import {
   runUnifiedDecisionHooks,

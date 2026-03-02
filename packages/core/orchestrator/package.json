@@ -24,8 +24,6 @@
     "shared": "workspace:*",
     "tools": "workspace:*",
     "context": "workspace:*",
-    "work": "workspace:*",
-    "protocol": "workspace:*",
     "runtime": "workspace:*"
   },
   "devDependencies": {

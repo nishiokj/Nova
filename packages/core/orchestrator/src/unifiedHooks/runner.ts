@@ -15,7 +15,7 @@ import {
   type HookOutcome,
   type HookPolicy,
   type StatePatch,
-} from 'protocol';
+} from '../control-plane/index.js';
 import { Effect } from 'effect';
 import { isBlockableEffectEvent, type DecisionEventType, type EffectEventType } from './catalog.js';
 import type {

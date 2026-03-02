@@ -10,7 +10,7 @@ import { Effect } from 'effect';
 import type { ContextWindow } from 'context';
 import type { MessageItem } from 'types';
 import { createEvent } from 'types';
-import type { WorkItem } from 'work';
+import type { WorkItem } from 'types';
 import type { EventEmitCallback, InternalHookQueue, InternalHookContext } from './types.js';
 
 // ── Interface ────────────────────────────────────────────────────────

@@ -3,6 +3,11 @@
  */
 
 // ============================================
+// SHARED UTILS
+// ============================================
+export { assertNever } from './assert-never.js';
+
+// ============================================
 // CONTEXT (Responses API compatible)
 // ============================================
 export type {
@@ -209,6 +214,38 @@ export {
   getKnowledge,
   clearExpiredKnowledge,
 } from './session.js';
+
+// ============================================
+// WORK ITEM
+// ============================================
+export type { WorkBounds, WorkItemCriteria, WorkItem } from './work-item.js';
+
+export {
+  DEFAULT_WORK_BOUNDS,
+  createWorkItem,
+  cloneWorkItemWithDependencies,
+} from './work-item.js';
+
+// ============================================
+// TERMINATION / STOP HOOK
+// ============================================
+export type { TerminationReason, TerminationCategory } from './termination.js';
+
+export {
+  getTerminationCategory,
+  isBlockable,
+  isRetryable,
+  ALL_TERMINATION_REASONS,
+} from './termination.js';
+
+export type {
+  DeferredWorkItem,
+  ExecutionSnapshot,
+  StopHookResult,
+  StopHookUserPrompt,
+  StopHookContext,
+  StopHookHandler,
+} from './stop-hook.js';
 
 // ============================================
 // DESIGN SPEC

@@ -1,4 +1,4 @@
-import { failClosed, fireAndForget, success, type EventFor, type HookContext } from 'protocol';
+import { failClosed, fireAndForget, success, type EventFor, type HookContext } from 'orchestrator';
 import { Effect } from 'effect';
 import type { UnifiedDecisionHookRegistration, UnifiedEffectHookRegistration } from 'orchestrator/unifiedHooks/contracts.js';
 import { createSessionScopedUnifiedHookRegistry, createUnifiedHookRegistry } from 'orchestrator/unifiedHooks/registry.js';
