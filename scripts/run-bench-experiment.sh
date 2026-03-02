@@ -3,22 +3,32 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Load .env if present (provides ZAI_CODER_API_KEY, etc.)
+if [ -f "$PROJECT_ROOT/.env" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    source "$PROJECT_ROOT/.env"
+    set +a
+fi
 EXPERIMENTS_ROOT="/Users/jevinnishioka/Desktop/Experiments"
 LAB_CLI="$EXPERIMENTS_ROOT/rust/target/release/lab-cli"
 EXPERIMENT="$PROJECT_ROOT/.lab/experiments/bench_v0_glm5_vs_codex_spark.yaml"
 BENCH_IMAGE="bench-v0-workspace:latest"
 REPO_SNAPSHOT="$EXPERIMENTS_ROOT/bench/benchmark/repos/jesus/src.tar.zst"
+TASKS_DIR="$EXPERIMENTS_ROOT/bench/benchmark/tasks/v0"
 
 usage() {
     cat <<'EOF'
 Usage: run-bench-experiment.sh <command> [options]
 
 Commands:
-  build-image  Build the bench-v0 Docker workspace image
-  export       Re-export bench v0 tasks to JSONL (v2, container mode)
-  describe     Validate and show resolved experiment plan
-  run          Execute the experiment
-  scoreboard   Live scoreboard (auto-picks latest run)
+  build-image       Build the bench-v0 base Docker workspace image
+  build-task-images Build per-task images (base + injection patch + public files)
+  export            Re-export bench v0 tasks to JSONL (v2, container mode)
+  describe          Validate and show resolved experiment plan
+  run               Execute the experiment
+  scoreboard        Live scoreboard (auto-picks latest run)
 
 Options:
   --json       Machine-readable output (describe, run)
@@ -51,6 +61,78 @@ cmd_build_image() {
     echo "Building $BENCH_IMAGE ..."
     docker build -t "$BENCH_IMAGE" "$ctx"
     echo "Done: $BENCH_IMAGE"
+}
+
+cmd_build_task_images() {
+    # Verify base image exists
+    if ! docker image inspect "$BENCH_IMAGE" &>/dev/null; then
+        echo "Base image $BENCH_IMAGE not found. Run: $0 build-image"
+        exit 1
+    fi
+
+    local tasks=("$TASKS_DIR"/TASK*)
+    if [ ${#tasks[@]} -eq 0 ]; then
+        echo "No tasks found in $TASKS_DIR"
+        exit 1
+    fi
+
+    local built=0 failed=0
+    for task_dir in "${tasks[@]}"; do
+        [ -d "$task_dir" ] || continue
+        local task_id
+        task_id=$(basename "$task_dir")
+        local task_id_lower
+        task_id_lower=$(echo "$task_id" | tr '[:upper:]' '[:lower:]')
+        local tag="bench-v0-workspace-${task_id_lower}:latest"
+
+        echo "--- Building $tag ---"
+
+        # Create a Dockerfile that layers on top of the base
+        local ctx
+        ctx=$(mktemp -d)
+        trap "rm -rf '$ctx'" RETURN
+
+        # Stage injection patch if present
+        local has_patch=false
+        if [ -f "$task_dir/injection.patch" ]; then
+            cp "$task_dir/injection.patch" "$ctx/injection.patch"
+            has_patch=true
+        fi
+
+        # Stage public files if present
+        local has_public=false
+        if [ -d "$task_dir/public" ] && [ "$(ls -A "$task_dir/public")" ]; then
+            cp -r "$task_dir/public" "$ctx/public"
+            has_public=true
+        fi
+
+        # Build the per-task Dockerfile
+        {
+            echo "FROM $BENCH_IMAGE"
+            echo "WORKDIR /workspace"
+            if $has_patch; then
+                echo "COPY injection.patch /tmp/injection.patch"
+                echo "RUN git apply /tmp/injection.patch && rm /tmp/injection.patch"
+            fi
+            if $has_public; then
+                echo "COPY public/ .bench_public/"
+            fi
+            echo "RUN git add -A && git -c user.name=bench -c user.email=bench@bench commit -m 'task setup' --allow-empty"
+        } > "$ctx/Dockerfile"
+
+        if docker build -t "$tag" "$ctx" 2>&1; then
+            echo "OK: $tag"
+            built=$((built + 1))
+        else
+            echo "FAILED: $tag"
+            failed=$((failed + 1))
+        fi
+        rm -rf "$ctx"
+    done
+
+    echo ""
+    echo "Built: $built  Failed: $failed"
+    [ "$failed" -eq 0 ] || exit 1
 }
 
 cmd_export() {
@@ -118,8 +200,9 @@ cmd_scoreboard() {
 }
 
 case "${1:-help}" in
-    build-image) shift; cmd_build_image "$@" ;;
-    export)      shift; cmd_export "$@" ;;
+    build-image)       shift; cmd_build_image "$@" ;;
+    build-task-images) shift; cmd_build_task_images "$@" ;;
+    export)            shift; cmd_export "$@" ;;
     describe)    shift; cmd_describe "$@" ;;
     run)         shift; cmd_run "$@" ;;
     scoreboard)  shift; cmd_scoreboard "$@" ;;

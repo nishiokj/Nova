@@ -1,76 +1,80 @@
 <!-- nova-pr-review -->
 ## Entity Graph PR Review
 
-Compared `ca77d8cd...f2b839b6` with max depth `2`.
+Compared `c2dbbea9...4c018f33` with max depth `2`.
 
-Summary: 40 entities changed; 12 direct and 0 transitive dependents affected; 20 warnings.
+Summary: 27 entities changed; 14 direct and 5 transitive dependents affected; 29 warnings; 2 contract gaps (2 unresolved dependents).
 
 ### Counts
-- Changed entities: 40
-- Blast radius (direct): 12
-- Blast radius (transitive): 0
-- Risk signals: 42 (critical 0, warning 20)
-- Contract impact gaps: 0
-- Dead code candidates: 29
+- Changed entities: 27
+- Blast radius (direct): 14
+- Blast radius (transitive): 5
+- Risk signals: 40 (critical 0, warning 29)
+- Contract impact gaps: 2
+- Dead code candidates: 72
 
 ### Top Risks
 | Score | Entity | File | Key factor |
 |---:|---|---|---|
-| 61 | `EntityGraph.entitiesAtLines` | `packages/plugins/entity-graph/src/index.ts` | directly signature changed |
-| 61 | `EntityGraph.entityBlastRadius` | `packages/plugins/entity-graph/src/index.ts` | directly signature changed |
-| 61 | `EntityGraph.graphStats` | `packages/plugins/entity-graph/src/index.ts` | directly signature changed |
-| 61 | `EntityGraph.reviewDiff` | `packages/plugins/entity-graph/src/index.ts` | directly signature changed |
-| 61 | `EntityGraph.unusedExports` | `packages/plugins/entity-graph/src/index.ts` | directly signature changed |
-| 60 | `BlastRadiusEntry` | `packages/plugins/entity-graph/src/queries.ts` | directly signature changed |
-| 50 | `entitiesAtLines` | `packages/plugins/entity-graph/src/queries.ts` | directly signature changed |
-| 50 | `entityBlastRadius` | `packages/plugins/entity-graph/src/queries.ts` | directly signature changed |
-| 48 | `classifyChanges` | `packages/plugins/entity-graph/src/pr-review/classifier.ts` | directly entity added |
-| 48 | `parseDiff` | `packages/plugins/entity-graph/src/pr-review/diff.ts` | directly entity added |
-| 48 | `reviewDiff` | `packages/plugins/entity-graph/src/pr-review/review.ts` | directly entity added |
-| 48 | `scoreRisks` | `packages/plugins/entity-graph/src/pr-review/scorer.ts` | directly entity added |
+| 63 | `highlightCode` | `packages/apps/tui/utils/syntax.ts` | directly signature changed |
+| 63 | `isLanguageSupported` | `packages/apps/tui/utils/syntax.ts` | directly signature changed |
+| 63 | `createConfigFromFile` | `packages/infra/harness-daemon/src/harness/config_loader.ts` | directly body changed |
+| 63 | `loadConfig` | `packages/infra/harness-daemon/src/harness/config_loader.ts` | depth 1 dependent (calls edge) |
+| 61 | `BridgeClient.close` | `packages/apps/tui/bridge_client.ts` | directly signature changed |
+| 58 | `EventBus` | `packages/infra/comms-bus/src/event_bus.ts` | directly signature changed |
+| 55 | `BridgeClient` | `packages/apps/tui/bridge_client.ts` | directly signature changed |
+| 55 | `applyHighlights` | `packages/apps/tui/utils/syntax.ts` | directly signature changed |
+| 53 | `ensureParserInitStarted` | `packages/apps/tui/utils/syntax.ts` | directly signature changed |
+| 53 | `highlightTree` | `packages/apps/tui/utils/syntax.ts` | depth 1 dependent (calls edge) |
+| 53 | `loadConfigFile` | `packages/infra/harness-daemon/src/harness/config_loader.ts` | depth 1 dependent (calls edge) |
+| 53 | `translateAgentEvent` | `packages/infra/harness-daemon/src/harness/event_translator.ts` | depth 1 dependent (calls edge) |
 
 ### Changed Entities
-- `body_changed` `EntityGraph` in `packages/plugins/entity-graph/src/index.ts`
-- `signature_changed` `EntityGraph.unusedExports` in `packages/plugins/entity-graph/src/index.ts`
-- `signature_changed` `EntityGraph.entitiesAtLines` in `packages/plugins/entity-graph/src/index.ts`
-- `signature_changed` `EntityGraph.entityBlastRadius` in `packages/plugins/entity-graph/src/index.ts`
-- `signature_changed` `EntityGraph.graphStats` in `packages/plugins/entity-graph/src/index.ts`
-- `signature_changed` `EntityGraph.reviewDiff` in `packages/plugins/entity-graph/src/index.ts`
-- `entity_added` `classifyChanges` in `packages/plugins/entity-graph/src/pr-review/classifier.ts`
-- `entity_added` `syntheticFileEntity` in `packages/plugins/entity-graph/src/pr-review/classifier.ts`
-- `entity_added` `inferChangeKind` in `packages/plugins/entity-graph/src/pr-review/classifier.ts`
-- `entity_added` `parseDiff` in `packages/plugins/entity-graph/src/pr-review/diff.ts`
-- `entity_added` `parseFileDiff` in `packages/plugins/entity-graph/src/pr-review/diff.ts`
-- `entity_added` `parseHunkHeader` in `packages/plugins/entity-graph/src/pr-review/diff.ts`
-- `entity_added` `packages/plugins/entity-graph/src/pr-review/index.ts` in `packages/plugins/entity-graph/src/pr-review/index.ts`
-- `entity_added` `reviewDiff` in `packages/plugins/entity-graph/src/pr-review/review.ts`
-- `entity_added` `dedupeBlastEntries` in `packages/plugins/entity-graph/src/pr-review/review.ts`
-- `entity_added` `dedupeEntitiesById` in `packages/plugins/entity-graph/src/pr-review/review.ts`
-- `entity_added` `buildSummary` in `packages/plugins/entity-graph/src/pr-review/review.ts`
-- `entity_added` `computeImpactGaps` in `packages/plugins/entity-graph/src/pr-review/review.ts`
-- `entity_added` `scoreRisks` in `packages/plugins/entity-graph/src/pr-review/scorer.ts`
-- `entity_added` `seedSeverityByEntity` in `packages/plugins/entity-graph/src/pr-review/scorer.ts`
-- ...and 20 more
+- `entity_added` `manifest.json` in `manifest.json`
+- `signature_changed` `BridgeClient` in `packages/apps/tui/bridge_client.ts`
+- `signature_changed` `BridgeClient.rpc` in `packages/apps/tui/bridge_client.ts`
+- `signature_changed` `BridgeClient.close` in `packages/apps/tui/bridge_client.ts`
+- `signature_changed` `ParserApi` in `packages/apps/tui/utils/syntax.ts`
+- `signature_changed` `loadParserApi` in `packages/apps/tui/utils/syntax.ts`
+- `signature_changed` `ensureParserInitStarted` in `packages/apps/tui/utils/syntax.ts`
+- `signature_changed` `detectLanguage` in `packages/apps/tui/utils/syntax.ts`
+- `signature_changed` `isLanguageSupported` in `packages/apps/tui/utils/syntax.ts`
+- `signature_changed` `highlightCode` in `packages/apps/tui/utils/syntax.ts`
+- `signature_changed` `applyHighlights` in `packages/apps/tui/utils/syntax.ts`
+- `body_changed` `EventBusProtocol` in `packages/infra/comms-bus/src/event_bus.ts`
+- `signature_changed` `EventBus` in `packages/infra/comms-bus/src/event_bus.ts`
+- `body_changed` `EventBus.dispatchEvent` in `packages/infra/comms-bus/src/event_bus.ts`
+- `signature_changed` `EventBus.subscribe` in `packages/infra/comms-bus/src/event_bus.ts`
+- `body_changed` `EventBus.subscribeRun` in `packages/infra/comms-bus/src/event_bus.ts`
+- `signature_changed` `EventBus.shutdown` in `packages/infra/comms-bus/src/event_bus.ts`
+- `body_changed` `expandHome` in `packages/infra/harness-daemon/src/harness/config_loader.ts`
+- `signature_changed` `parseBooleanEnv` in `packages/infra/harness-daemon/src/harness/config_loader.ts`
+- `body_changed` `createConfigFromFile` in `packages/infra/harness-daemon/src/harness/config_loader.ts`
+- ...and 7 more
 
 ### Dead Code Candidates
-- `EntityGraph` in `packages/plugins/entity-graph/src/index.ts`
-- `EntityGraph.constructor` in `packages/plugins/entity-graph/src/index.ts`
-- `EntityGraph.initialize` in `packages/plugins/entity-graph/src/index.ts`
-- `EntityGraph.waitForScan` in `packages/plugins/entity-graph/src/index.ts`
-- `EntityGraph.getHooks` in `packages/plugins/entity-graph/src/index.ts`
-- `EntityGraph.reparse` in `packages/plugins/entity-graph/src/index.ts`
-- `classifyChanges` in `packages/plugins/entity-graph/src/pr-review/classifier.ts`
-- `parseDiff` in `packages/plugins/entity-graph/src/pr-review/diff.ts`
-- `reviewDiff` in `packages/plugins/entity-graph/src/pr-review/review.ts`
-- `scoreRisks` in `packages/plugins/entity-graph/src/pr-review/scorer.ts`
-- `FileChange` in `packages/plugins/entity-graph/src/pr-review/types.ts`
-- `Hunk` in `packages/plugins/entity-graph/src/pr-review/types.ts`
-- `ChangeKind` in `packages/plugins/entity-graph/src/pr-review/types.ts`
-- `EntityChange` in `packages/plugins/entity-graph/src/pr-review/types.ts`
-- `RiskSignal` in `packages/plugins/entity-graph/src/pr-review/types.ts`
-- `ImpactGap` in `packages/plugins/entity-graph/src/pr-review/types.ts`
-- `PRReview` in `packages/plugins/entity-graph/src/pr-review/types.ts`
-- `entitiesInFile` in `packages/plugins/entity-graph/src/queries.ts`
-- `entityById` in `packages/plugins/entity-graph/src/queries.ts`
-- `importersOfFile` in `packages/plugins/entity-graph/src/queries.ts`
-- ...and 9 more
+- `BridgeClientOptions` in `packages/apps/tui/bridge_client.ts`
+- `BridgeClient` in `packages/apps/tui/bridge_client.ts`
+- `BridgeClient.rpc` in `packages/apps/tui/bridge_client.ts`
+- `BridgeClient.constructor` in `packages/apps/tui/bridge_client.ts`
+- `isLanguageSupported` in `packages/apps/tui/utils/syntax.ts`
+- `highlightCode` in `packages/apps/tui/utils/syntax.ts`
+- `EventBus` in `packages/infra/comms-bus/src/event_bus.ts`
+- `EventBus.constructor` in `packages/infra/comms-bus/src/event_bus.ts`
+- `EventBus.subscribe` in `packages/infra/comms-bus/src/event_bus.ts`
+- `EventBus.subscribeAll` in `packages/infra/comms-bus/src/event_bus.ts`
+- `EventBus.subscribeRun` in `packages/infra/comms-bus/src/event_bus.ts`
+- `EventBus.shutdown` in `packages/infra/comms-bus/src/event_bus.ts`
+- `createEventEmitCallback` in `packages/infra/comms-bus/src/event_bus.ts`
+- `resolveRepoRoot` in `packages/infra/harness-daemon/src/harness/config_loader.ts`
+- `getAgentConfig` in `packages/infra/harness-daemon/src/harness/config_loader.ts`
+- `loadConfig` in `packages/infra/harness-daemon/src/harness/config_loader.ts`
+- `translateAgentEvent` in `packages/infra/harness-daemon/src/harness/event_translator.ts`
+- `createStatusEvent` in `packages/infra/harness-daemon/src/harness/event_translator.ts`
+- `createResponseEvent` in `packages/infra/harness-daemon/src/harness/event_translator.ts`
+- `createErrorEvent` in `packages/infra/harness-daemon/src/harness/event_translator.ts`
+- ...and 52 more
+
+### Unresolved Contract Dependents
+- `signature_changed` on `applyHighlights` in `packages/apps/tui/utils/syntax.ts` has 1/1 direct dependents not updated: `highlightTree`
+- `signature_changed` on `HarnessProviderKeyService.getApiKey` in `packages/infra/harness-daemon/src/harness/harness.ts` has 1/1 direct dependents not updated: `HarnessProviderKeyService.hasApiKey`
