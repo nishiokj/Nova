@@ -297,8 +297,16 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
     }
 
-    if (params.tools && params.tools.length > 0 && this.shouldUseQwenToolSkin(resolved.model, resolved.displayProvider)) {
-      const qwenHint = this.buildQwenToolSkinInstruction(params.tools);
+    // When using the Qwen tool skin, inject tool instructions into the system prompt
+    // and skip sending tools via the API. LM Studio's tool calling interceptor hijacks
+    // the chat template when it sees `tools` in the body, preventing the model from
+    // emitting native <tool_call> tags. The harness content parser recovers tool calls
+    // from the model's text output instead.
+    const useQwenSkin = params.tools && params.tools.length > 0
+      && this.shouldUseQwenToolSkin(resolved.model, resolved.displayProvider);
+
+    if (useQwenSkin) {
+      const qwenHint = this.buildQwenToolSkinInstruction(params.tools!);
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${qwenHint}` : qwenHint;
     }
 
@@ -322,16 +330,18 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       };
     }
 
-    if (params.tools && params.tools.length > 0) {
+    if (params.tools && params.tools.length > 0 && !useQwenSkin) {
       body.tools = this.formatTools(params.tools, {
         model: resolved.model,
         displayProvider: resolved.displayProvider,
       });
     }
-    if (params.toolChoice) {
-      body.tool_choice = params.toolChoice;
-    } else if (params.tools && params.tools.length > 0) {
-      body.tool_choice = 'auto';
+    if (!useQwenSkin) {
+      if (params.toolChoice) {
+        body.tool_choice = params.toolChoice;
+      } else if (params.tools && params.tools.length > 0) {
+        body.tool_choice = 'auto';
+      }
     }
 
     if (params.responseSchema && responseFormat !== 'none') {
@@ -536,8 +546,11 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
     }
 
-    if (params.tools && params.tools.length > 0 && this.shouldUseQwenToolSkin(resolved.model, resolved.displayProvider)) {
-      const qwenHint = this.buildQwenToolSkinInstruction(params.tools);
+    const useQwenSkin = params.tools && params.tools.length > 0
+      && this.shouldUseQwenToolSkin(resolved.model, resolved.displayProvider);
+
+    if (useQwenSkin) {
+      const qwenHint = this.buildQwenToolSkinInstruction(params.tools!);
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${qwenHint}` : qwenHint;
     }
 
@@ -573,16 +586,18 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       });
     }
 
-    if (params.tools && params.tools.length > 0) {
+    if (params.tools && params.tools.length > 0 && !useQwenSkin) {
       body.tools = this.formatTools(params.tools, {
         model: resolved.model,
         displayProvider: resolved.displayProvider,
       });
     }
-    if (params.toolChoice) {
-      body.tool_choice = params.toolChoice;
-    } else if (params.tools && params.tools.length > 0) {
-      body.tool_choice = 'auto';
+    if (!useQwenSkin) {
+      if (params.toolChoice) {
+        body.tool_choice = params.toolChoice;
+      } else if (params.tools && params.tools.length > 0) {
+        body.tool_choice = 'auto';
+      }
     }
 
     if (params.responseSchema && responseFormat !== 'none') {
