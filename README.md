@@ -15,6 +15,8 @@ Config-driven multi-agent runtime with a terminal UI, daemon, and headless execu
 bun install
 ```
 
+For local monorepo development, this installs all workspace dependencies.
+
 ### 2) Start the app
 
 ```bash
@@ -43,10 +45,40 @@ bun run start:tui              # TUI only (attach to running daemon)
 bun run start:graphd           # GraphD only
 
 bun run build                  # build packages + apps
+bun run build:plugins          # build optional plugin packages
 bun run lint                   # workspace type/lint checks
 bun test                       # test suite (vitest)
 bun run smoke:interprocess     # basic interprocess smoke test
 ```
+
+## Installation Boundary (Core vs Plugins)
+
+The distributed `nova` package is core-only by default.
+
+- Included: `packages/core/*`, `packages/infra/*`, `packages/apps/launcher`, `packages/apps/tui`
+- Excluded: `packages/plugins/*` and plugin-specific transitive dependencies
+
+Plugin-backed capabilities are opt-in and should be installed only when needed.
+
+- Memory integration: requires `memory-injector` and `agent-memory` when `memory.enabled` is true.
+- Entity graph integration: requires `entity-graph` and `postgres` when `entity_graph.enabled` is true.
+- Semantic compiler workflows: require `semantic-compiler` when those workflows are enabled.
+
+Plugin install examples (when using separately-published plugin packages):
+
+```bash
+bun add agent-memory memory-injector
+bun add entity-graph postgres
+bun add semantic-compiler
+```
+
+For this monorepo, plugin artifacts are built explicitly:
+
+```bash
+bun run build:plugins
+```
+
+When optional modules are missing, the daemon logs a clear install hint and continues without that feature.
 
 ## Headless / CI Usage
 
@@ -78,7 +110,8 @@ bun run packages/apps/launcher/index.ts run \
 
 - `bun run start:tui` expects the daemon to already be running.
 - Provider keys are managed via `/providers` in the TUI or `--provider-env` for headless runs.
-- `agent-memory` plugin requires `DATABASE_URL` when enabled.
+- `memory.enabled` is `false` by default in `config/defaults.json`; enabling it without plugin packages only disables memory features (non-fatal).
+- `agent-memory` and `entity-graph` features require their plugin packages and backing services (for example `DATABASE_URL` for plugin DB paths).
 - Ports default to `127.0.0.1:9555` for the daemon event bus; override via `EVENT_BUS_HOST`/`EVENT_BUS_PORT`.
 
 ## Deep Dives

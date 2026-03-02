@@ -56,12 +56,12 @@ ensure_cli() {
 ensure_docker() {
     if ! command -v docker >/dev/null 2>&1; then
         echo "docker CLI not found in PATH."
-        echo "Install Docker Desktop (or Docker Engine) and retry."
+        echo "Install a Docker runtime (OrbStack, Docker Engine, etc.) and retry."
         return 1
     fi
     if ! docker info >/dev/null 2>&1; then
         echo "Docker daemon is not reachable."
-        echo "Start Docker Desktop (or your Docker daemon) and retry."
+        echo "Start your Docker runtime (OrbStack, Docker Engine, etc.) and retry."
         return 1
     fi
 }

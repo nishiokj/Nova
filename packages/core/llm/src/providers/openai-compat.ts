@@ -30,6 +30,197 @@ function parseApiError(provider: string, status: number, responseText: string): 
 }
 
 // ============================================
+// THINK TAG FILTER
+// ============================================
+
+/**
+ * Strips `<think>...</think>` blocks from streaming content, separating
+ * reasoning from actual output. Handles tag boundaries that split across chunks.
+ *
+ * Models like Qwen3.5 and DeepSeek emit thinking via `<think>` tags inside
+ * `delta.content` rather than using a dedicated `reasoning_content` field.
+ * Without filtering, the think content leaks into the context window, causing
+ * the model to see its own raw output on the next turn and loop.
+ */
+class ThinkTagFilter {
+  private inThink = false;
+  private buffer = '';
+  // Track whether we've emitted any real content yet. Before the first real
+  // content, an unpaired </think> means the opening tag was in the generation
+  // prompt (Qwen3.5 template adds `<think>\n` as the prompt suffix).
+  private seenContent = false;
+
+  processChunk(chunk: string): { content: string; reasoning: string } {
+    let input = this.buffer + chunk;
+    this.buffer = '';
+    let content = '';
+    let reasoning = '';
+
+    while (input.length > 0) {
+      if (this.inThink) {
+        const idx = input.indexOf('</think>');
+        if (idx === -1) {
+          const partial = this.partialTagAt(input, '</think>');
+          if (partial >= 0) {
+            reasoning += input.slice(0, partial);
+            this.buffer = input.slice(partial);
+          } else {
+            reasoning += input;
+          }
+          break;
+        }
+        reasoning += input.slice(0, idx);
+        this.inThink = false;
+        input = input.slice(idx + 8);
+      } else {
+        const openIdx = input.indexOf('<think>');
+        const closeIdx = input.indexOf('</think>');
+
+        // Unpaired </think> before any <think> — the opening tag was in the
+        // generation prompt, so everything before it is reasoning.
+        if (closeIdx !== -1 && (openIdx === -1 || closeIdx < openIdx)) {
+          reasoning += input.slice(0, closeIdx);
+          input = input.slice(closeIdx + 8);
+          continue;
+        }
+
+        if (openIdx === -1) {
+          // Check for partial opening/closing tags at buffer boundary
+          const partialOpen = this.partialTagAt(input, '<think>');
+          const partialClose = !this.seenContent
+            ? this.partialTagAt(input, '</think>')
+            : -1;
+          const partial = partialOpen >= 0 && partialClose >= 0
+            ? Math.min(partialOpen, partialClose)
+            : partialOpen >= 0 ? partialOpen : partialClose;
+
+          if (partial >= 0) {
+            content += input.slice(0, partial);
+            this.buffer = input.slice(partial);
+          } else {
+            content += input;
+          }
+          break;
+        }
+        content += input.slice(0, openIdx);
+        this.inThink = true;
+        input = input.slice(openIdx + 7);
+      }
+    }
+
+    if (content) this.seenContent = true;
+    return { content, reasoning };
+  }
+
+  flush(): { content: string; reasoning: string } {
+    const buf = this.buffer;
+    this.buffer = '';
+    return this.inThink
+      ? { content: '', reasoning: buf }
+      : { content: buf, reasoning: '' };
+  }
+
+  private partialTagAt(input: string, tag: string): number {
+    for (let len = Math.min(tag.length - 1, input.length); len > 0; len--) {
+      if (input.endsWith(tag.slice(0, len))) {
+        return input.length - len;
+      }
+    }
+    return -1;
+  }
+}
+
+/**
+ * Strip `<think>` blocks from a complete string (non-streaming).
+ * Handles both paired `<think>...</think>` and unpaired `</think>` where
+ * the opening tag was part of the generation prompt.
+ */
+function separateThinkTags(text: string): { content: string; reasoning: string } {
+  let reasoning = '';
+  // First pass: strip paired <think>...</think> blocks
+  let cleaned = text.replace(/<think>([\s\S]*?)<\/think>/g, (_, inner) => {
+    reasoning += inner;
+    return '';
+  });
+  // Second pass: handle unpaired </think> (opening was in generation prompt)
+  const unpairedClose = cleaned.indexOf('</think>');
+  if (unpairedClose !== -1) {
+    reasoning = cleaned.slice(0, unpairedClose) + reasoning;
+    cleaned = cleaned.slice(unpairedClose + 8);
+  }
+  return { content: cleaned.trimStart(), reasoning };
+}
+
+/**
+ * Streaming filter for `<tool_call>...</tool_call>` blocks.
+ * Suppresses tool call markup from display content while preserving it
+ * for post-stream tool call parsing.
+ */
+class ToolCallTagFilter {
+  private inTag = false;
+  private buffer = '';
+
+  processChunk(chunk: string): string {
+    let input = this.buffer + chunk;
+    this.buffer = '';
+    let content = '';
+
+    while (input.length > 0) {
+      if (this.inTag) {
+        const idx = input.indexOf('</tool_call>');
+        if (idx === -1) {
+          const partial = this.partialTagAt(input, '</tool_call>');
+          if (partial >= 0) {
+            this.buffer = input.slice(partial);
+          }
+          break; // Swallow everything inside the tag
+        }
+        this.inTag = false;
+        input = input.slice(idx + 12);
+      } else {
+        const idx = input.indexOf('<tool_call>');
+        if (idx === -1) {
+          const partial = this.partialTagAt(input, '<tool_call>');
+          if (partial >= 0) {
+            content += input.slice(0, partial);
+            this.buffer = input.slice(partial);
+          } else {
+            content += input;
+          }
+          break;
+        }
+        content += input.slice(0, idx);
+        this.inTag = true;
+        input = input.slice(idx + 11);
+      }
+    }
+
+    return content;
+  }
+
+  flush(): string {
+    const buf = this.buffer;
+    this.buffer = '';
+    // If we're still inside a tag, discard it. Otherwise emit buffered content.
+    return this.inTag ? '' : buf;
+  }
+
+  private partialTagAt(input: string, tag: string): number {
+    for (let len = Math.min(tag.length - 1, input.length); len > 0; len--) {
+      if (input.endsWith(tag.slice(0, len))) {
+        return input.length - len;
+      }
+    }
+    return -1;
+  }
+}
+
+/** Strip `<tool_call>...</tool_call>` blocks from a complete string (non-streaming). */
+function stripToolCallTags(text: string): string {
+  return text.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trimStart();
+}
+
+// ============================================
 // OPENAI-COMPAT PROVIDER
 // ============================================
 
@@ -448,8 +639,11 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
 
     const choice = data.choices[0];
     const rawMessageContent = choice?.message?.content as unknown;
-    const content = this.normalizeContent(rawMessageContent);
-    const reasoningContent = choice?.message?.reasoning_content ?? undefined;
+    const rawContent = this.normalizeContent(rawMessageContent);
+    // Separate <think> blocks from content — Qwen/DeepSeek emit reasoning in content tags
+    const { content: strippedContent, reasoning: thinkReasoning } = separateThinkTags(rawContent);
+    const content = strippedContent;
+    const reasoningContent = choice?.message?.reasoning_content ?? (thinkReasoning || undefined);
 
     logger.debug('OpenAI-compat response received', {
       model: resolved.model,
@@ -483,6 +677,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     }
 
     if (toolCalls.length === 0 && content) {
+      // Parse tool calls from content before stripping tags
       toolCalls.push(...this.parseToolCallsFromContent(content));
       if (toolCalls.length > 0) {
         logger.debug('Recovered tool calls from text content', {
@@ -491,6 +686,9 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
         });
       }
     }
+
+    // Strip tool call tags from content for clean storage/display
+    const cleanContent = stripToolCallTags(content);
 
     const stopReasonMap: Record<string, StopReason> = {
       stop: 'end_turn',
@@ -511,7 +709,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     };
 
     return {
-      content,
+      content: cleanContent,
       stopReason,
       usage,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
@@ -659,7 +857,8 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
 
-    let fullContent = '';
+    let fullContent = '';           // Clean content for display/storage (no think, no tool_call tags)
+    let rawContentForParsing = '';  // Post-think content with tool_call tags preserved for fallback parsing
     let fullReasoningContent = '';
     let stopReason: StopReason = 'end_turn';
     let usage: TokenUsage = {
@@ -672,6 +871,8 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     let model = resolved.model;
     let buffer = '';
     let eventCount = 0;
+    const thinkFilter = new ThinkTagFilter();
+    const toolCallFilter = new ToolCallTagFilter();
 
     // Profile stream consumption (reading all SSE events)
     const streamAsyncId = profiler.asyncBegin('llm:stream:consume', 'http');
@@ -743,9 +944,20 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
               if (deltaContent !== undefined) {
                 const normalized = this.normalizeContent(deltaContent);
                 if (normalized) {
-                  fullContent += normalized;
-                  params.onChunk?.(normalized);
-                  yield normalized;
+                  const { content: contentPart, reasoning: reasoningPart } = thinkFilter.processChunk(normalized);
+                  if (reasoningPart) {
+                    fullReasoningContent += reasoningPart;
+                    params.onReasoningChunk?.(reasoningPart);
+                  }
+                  if (contentPart) {
+                    rawContentForParsing += contentPart;
+                    const cleanPart = toolCallFilter.processChunk(contentPart);
+                    if (cleanPart) {
+                      fullContent += cleanPart;
+                      params.onChunk?.(cleanPart);
+                      yield cleanPart;
+                    }
+                  }
                 }
               }
 
@@ -753,9 +965,20 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
               if (fullContent.length === 0 && messageContent !== undefined) {
                 const normalized = this.normalizeContent(messageContent);
                 if (normalized) {
-                  fullContent += normalized;
-                  params.onChunk?.(normalized);
-                  yield normalized;
+                  const { content: contentPart, reasoning: reasoningPart } = thinkFilter.processChunk(normalized);
+                  if (reasoningPart) {
+                    fullReasoningContent += reasoningPart;
+                    params.onReasoningChunk?.(reasoningPart);
+                  }
+                  if (contentPart) {
+                    rawContentForParsing += contentPart;
+                    const cleanPart = toolCallFilter.processChunk(contentPart);
+                    if (cleanPart) {
+                      fullContent += cleanPart;
+                      params.onChunk?.(cleanPart);
+                      yield cleanPart;
+                    }
+                  }
                 }
               }
 
@@ -798,6 +1021,28 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
           }
         }
       }
+      // Flush any remaining buffered content from both filters
+      const flushed = thinkFilter.flush();
+      if (flushed.reasoning) {
+        fullReasoningContent += flushed.reasoning;
+        params.onReasoningChunk?.(flushed.reasoning);
+      }
+      if (flushed.content) {
+        rawContentForParsing += flushed.content;
+        const cleanPart = toolCallFilter.processChunk(flushed.content);
+        if (cleanPart) {
+          fullContent += cleanPart;
+          params.onChunk?.(cleanPart);
+          yield cleanPart;
+        }
+      }
+      const toolCallFlushed = toolCallFilter.flush();
+      if (toolCallFlushed) {
+        fullContent += toolCallFlushed;
+        params.onChunk?.(toolCallFlushed);
+        yield toolCallFlushed;
+      }
+
       // End stream consumption profiling on success
       profiler.asyncEnd('llm:stream:consume', streamAsyncId, 'http', { eventCount, contentLength: fullContent.length });
     } catch (streamError) {
@@ -856,8 +1101,9 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       }
     }
 
-    if (toolCalls.length === 0 && fullContent) {
-      toolCalls.push(...this.parseToolCallsFromContent(fullContent));
+    // Parse tool calls from raw content (which still has <tool_call> tags intact)
+    if (toolCalls.length === 0 && rawContentForParsing) {
+      toolCalls.push(...this.parseToolCallsFromContent(rawContentForParsing));
       if (toolCalls.length > 0) {
         logger.debug('Recovered streamed tool calls from text content', {
           model: resolved.model,
