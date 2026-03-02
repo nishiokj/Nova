@@ -29,6 +29,7 @@ Runtime infrastructure, transport, and service wiring:
 
 Plugin modules and optional bolt-on subsystems:
 
+- `memory` (primary install surface for memory + entity graph features)
 - `agent-memory`
 - `entity-graph`
 - `memory-injector`
@@ -52,6 +53,7 @@ User-facing entrypoints and clients:
 ## Boundary Rules
 
 - Keep `core/*` free of app concerns (UI, daemon HTTP routes, dashboard state, etc.).
+- Keep core distribution lean: plugin code and plugin deps are opt-in, not bundled with core package installs.
 - `protocol` is not just hooks. It is the execution contract surface for domain state, control decisions/gates/watchers, effects, hook outcomes/policy, and protocol schemas/versioning.
 - Prefer importing by package name (`types`, `protocol`, etc.), not filesystem paths.
 - Add new user interfaces under `apps/*`; add new transport/runtime services under `infra/*`.

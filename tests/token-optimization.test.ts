@@ -13,7 +13,7 @@ import { Agent } from 'agent/agent.js';
 import type { AgentConfig } from 'agent/types.js';
 import type { LLMAdapter, LLMResponse } from 'llm/index.js';
 import type { ToolRegistry } from 'tools/registry.js';
-import { createWorkItem } from 'work/work-item.js';
+import { createWorkItem } from 'types';
 import type { ArtifactKind } from 'types/context.js';
 
 // ============================================================================

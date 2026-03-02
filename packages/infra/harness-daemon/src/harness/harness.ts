@@ -37,7 +37,6 @@ import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
 import { LogSubscriber, createLogSubscriber } from '../subscribers/log_subscriber.js';
 import { createTraceSubscriber, extractCommitSha, isGitCommitCommand, type TraceSubscriber } from '../subscribers/trace_subscriber.js';
-import { SyncClient } from 'agent-memory';
 import path from 'path';
 import fs from 'fs';
 import {
@@ -72,7 +71,6 @@ import { DefaultOrchestratorRunner, type OrchestratorRunner } from './orchestrat
 import type { PermissionedTool, PermissionRequest, PermissionResponse } from 'types';
 import { isPermissionedTool, normalizeToolName } from 'types';
 import { createSessionState, touchSession, clearSessionState, type SessionState } from './session_state.js';
-import type { EntityGraph, EntityGraphConfig } from 'entity-graph';
 import {
   createSessionScopedUnifiedHookRegistry,
   runUnifiedEffectHooksForSession,
@@ -86,10 +84,60 @@ import {
   type RuntimeCancellationMetadata,
   type RuntimeControlQueue,
 } from 'runtime';
-import { createMemoryInjector, type MemoryInjector as MemoryInjectorInstance } from 'memory-injector';
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
+
+type EntityGraphConfig = {
+  sourceRoot: string;
+  include?: string[];
+  exclude?: string[];
+  leaseDurationSec?: number;
+  startupScan?: boolean;
+  leaseWaitTimeoutMs?: number;
+};
+
+type EntityGraphHooks = {
+  preToolUse(agentId: string, toolName: string, args: Record<string, unknown>): Promise<{
+    action: 'allow' | 'block';
+    message?: string;
+  }>;
+  postToolUse(agentId: string, toolName: string, args: Record<string, unknown>): Promise<{
+    action: 'allow' | 'block';
+    message?: string;
+    context?: string;
+  }>;
+  onFilesModified(paths: string[]): Promise<void>;
+};
+
+type EntityGraphInstance = {
+  initialize(): Promise<void>;
+  getHooks(): EntityGraphHooks;
+};
+
+type TraceCreatePayload = {
+  revision: string;
+  session_key?: string;
+  tool_name: string;
+  tool_version: string;
+  trace: unknown;
+};
+
+type TraceClient = {
+  traces: {
+    create(payload: TraceCreatePayload): Promise<unknown>;
+  };
+};
+
+type MemoryPluginModule = {
+  createMemoryInjector?: (config: { baseUrl: string; timeout: number }) => MemoryInjector;
+  SyncClient?: new (baseUrl: string) => TraceClient;
+  createEntityGraph?: (options: {
+    databaseUrl: string;
+    config: EntityGraphConfig;
+    postgresOptions?: Record<string, unknown>;
+  }) => EntityGraphInstance;
+};
 
 type SessionGetResponse = { session?: GraphDSession; error?: string };
 
@@ -387,10 +435,10 @@ export class AgentHarness {
   private readonly configuredHookRuntimes = new Map<string, ConfiguredEffectHooksRunner>();
   private providerKeyService: HarnessProviderKeyService;
   private orchestratorRunner: OrchestratorRunner;
-  private entityGraph: EntityGraph | null = null;
+  private entityGraph: EntityGraphInstance | null = null;
   private memoryInjector: MemoryInjector | null = null;
   private traceSubscriber: TraceSubscriber | null = null;
-  private memoryClient: SyncClient | null = null;
+  private memoryClient: TraceClient | null = null;
   private initializedModelSelections = new Set<string>();
   private readonly pendingSessionHookTasks = new Set<Promise<void>>();
   private readonly closingSessionHooks = new Set<string>();
@@ -461,29 +509,6 @@ export class AgentHarness {
 
     this.orchestratorRunner = orchestratorRunner ?? new DefaultOrchestratorRunner();
 
-    // Initialize MemoryInjector if enabled
-    if (config.memory.enabled) {
-      this.memoryInjector = createMemoryInjector({
-        baseUrl: config.memory.baseUrl,
-        timeout: config.memory.timeoutMs,
-      });
-      this.logger.info('MemoryInjector initialized', {
-        baseUrl: config.memory.baseUrl,
-        timeoutMs: config.memory.timeoutMs,
-      });
-    }
-
-    // Initialize SyncClient for agent-memory daemon (used by TraceSubscriber)
-    const memoryDaemonUrl = process.env.MEMORY_DAEMON_URL || 'http://127.0.0.1:3001';
-    try {
-      this.memoryClient = new SyncClient(memoryDaemonUrl);
-      this.logger.info('Memory client initialized for traces', { url: memoryDaemonUrl });
-    } catch (error) {
-      this.logger.warning('Failed to initialize memory client (traces will not be persisted)', {
-        error: getErrorMessage(error),
-      });
-    }
-
     // Initialize TraceSubscriber for collecting Write/Edit tool calls and emitting on git commits
     this.traceSubscriber = createTraceSubscriber(this.eventBus, {
       repoRoot: workingDir,
@@ -522,7 +547,7 @@ export class AgentHarness {
       model: defaultAgent?.llm.model,
       agentCount: Object.keys(config.agents).length,
       graphdEnabled: this.graphd !== null,
-      memoryEnabled: this.memoryInjector !== null,
+      memoryEnabled: this.config.memory.enabled,
       traceEnabled: this.traceSubscriber !== null,
     });
   }
@@ -588,6 +613,37 @@ export class AgentHarness {
    */
   private isGraphDReady(): boolean {
     return !!(this.graphd && this.graphdStarted);
+  }
+
+  private isOptionalModuleMissing(error: unknown, moduleName: string): boolean {
+    if (!error || typeof error !== 'object') return false;
+    const code = (error as { code?: string }).code;
+    if (code !== 'ERR_MODULE_NOT_FOUND' && code !== 'MODULE_NOT_FOUND') {
+      return false;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return (
+      message.includes(`'${moduleName}'`) ||
+      message.includes(`"${moduleName}"`) ||
+      message.includes(`Cannot find package '${moduleName}'`) ||
+      message.includes(`Cannot find module '${moduleName}'`) ||
+      message.includes(moduleName)
+    );
+  }
+
+  private async importOptionalModule<T>(moduleName: string, installHint: string): Promise<T | null> {
+    try {
+      return await import(moduleName) as T;
+    } catch (error) {
+      if (this.isOptionalModuleMissing(error, moduleName)) {
+        this.logger.info('Optional plugin module not installed; feature disabled', {
+          module: moduleName,
+          installHint,
+        });
+        return null;
+      }
+      throw error;
+    }
   }
 
   /**
@@ -982,10 +1038,87 @@ export class AgentHarness {
       }
     }
 
+    const shouldInitTracePersistence = this.config.memory.enabled || !!process.env.MEMORY_DAEMON_URL;
+    const needsMemoryPlugin = this.config.memory.enabled || shouldInitTracePersistence || this.config.entityGraph.enabled;
+    const memoryModuleName = process.env.NOVA_MEMORY_MODULE ?? 'memory';
+    const memoryInstallHint = `bun add ${memoryModuleName}`;
+
+    let memoryPluginModule: MemoryPluginModule | null = null;
+    if (needsMemoryPlugin) {
+      try {
+        memoryPluginModule = await this.importOptionalModule<MemoryPluginModule>(
+          memoryModuleName,
+          memoryInstallHint
+        );
+      } catch (error) {
+        this.logger.warning('Failed to load memory plugin module', {
+          module: memoryModuleName,
+          error: getErrorMessage(error),
+        });
+      }
+    }
+
+    if (this.config.memory.enabled && !this.memoryInjector) {
+      try {
+        const createMemoryInjector = memoryPluginModule?.createMemoryInjector;
+        if (createMemoryInjector) {
+          this.memoryInjector = createMemoryInjector({
+            baseUrl: this.config.memory.baseUrl,
+            timeout: this.config.memory.timeoutMs,
+          });
+          this.logger.info('MemoryInjector initialized', {
+            baseUrl: this.config.memory.baseUrl,
+            timeoutMs: this.config.memory.timeoutMs,
+            module: memoryModuleName,
+          });
+        } else {
+          this.logger.warning('Memory integration requested but memory plugin is missing createMemoryInjector export', {
+            module: memoryModuleName,
+            installHint: memoryInstallHint,
+          });
+        }
+      } catch (error) {
+        this.logger.warning('Failed to initialize MemoryInjector', {
+          error: getErrorMessage(error),
+        });
+      }
+    }
+
+    if (shouldInitTracePersistence && !this.memoryClient) {
+      const memoryDaemonUrl = process.env.MEMORY_DAEMON_URL || 'http://127.0.0.1:3001';
+      try {
+        const SyncClient = memoryPluginModule?.SyncClient;
+        if (SyncClient) {
+          this.memoryClient = new SyncClient(memoryDaemonUrl);
+          this.logger.info('Memory client initialized for traces', {
+            url: memoryDaemonUrl,
+            module: memoryModuleName,
+          });
+        } else {
+          this.logger.info('Trace persistence disabled: memory plugin is missing SyncClient export', {
+            module: memoryModuleName,
+            installHint: memoryInstallHint,
+          });
+        }
+      } catch (error) {
+        this.logger.warning('Failed to initialize memory client (traces will not be persisted)', {
+          error: getErrorMessage(error),
+        });
+      }
+    }
+
     // Initialize EntityGraph if enabled
     if (this.config.entityGraph.enabled && !this.entityGraph) {
       try {
-        const { EntityGraph } = await import('entity-graph');
+        const createEntityGraph = memoryPluginModule?.createEntityGraph;
+        if (!createEntityGraph) {
+          this.logger.warning('EntityGraph requested but memory plugin is missing createEntityGraph export', {
+            module: memoryModuleName,
+            installHint: memoryInstallHint,
+          });
+          return true;
+        }
+
         const dbUrl = this.config.entityGraph.databaseUrl
           ?? process.env.ENTITY_GRAPH_DATABASE_URL
           ?? process.env.DATABASE_URL;
@@ -993,9 +1126,6 @@ export class AgentHarness {
         if (!dbUrl) {
           this.logger.warning('EntityGraph enabled but no database URL configured (entity_graph.database_url or DATABASE_URL env)');
         } else {
-          const postgres = (await import('postgres')).default;
-          const sql = postgres(dbUrl, { max: 5, idle_timeout: 30, connect_timeout: 10 });
-
           const entityGraphConfig: EntityGraphConfig = {
             sourceRoot: this.config.tools.workingDir,
             include: this.config.entityGraph.include,
@@ -1005,9 +1135,14 @@ export class AgentHarness {
             leaseWaitTimeoutMs: this.config.entityGraph.leaseWaitTimeoutMs,
           };
 
-          this.entityGraph = new EntityGraph(sql, entityGraphConfig);
+          this.entityGraph = createEntityGraph({
+            databaseUrl: dbUrl,
+            config: entityGraphConfig,
+          });
           await this.entityGraph.initialize();
-          this.logger.info('EntityGraph initialized (scan running in background)');
+          this.logger.info('EntityGraph initialized (scan running in background)', {
+            module: memoryModuleName,
+          });
           for (const [sessionKey, state] of this.sessions.entries()) {
             this.registerSessionUnifiedHooks(sessionKey, state.store.getWorkingDirectory());
           }

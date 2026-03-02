@@ -1,5 +1,5 @@
 import type { InternalHookEvent } from 'agent';
-import { ALL_EVENT_TYPES, type ControlEventType } from 'protocol';
+import { ALL_EVENT_TYPES, type ControlEventType } from '../control-plane/index.js';
 
 export type HookMode = 'decision' | 'effect';
 export type HookScope = 'orchestrator' | 'agent' | 'harness';
@@ -119,13 +119,6 @@ const effectCatalog: readonly UnifiedHookCatalogEntry[] = [
     allowedScopes: ['agent', 'harness'],
     stateControl: false,
     description: 'Side-effect event fired when a git commit is detected.',
-  },
-  {
-    mode: 'effect',
-    event: 'observer_agent_stopped',
-    allowedScopes: ['orchestrator', 'harness'],
-    stateControl: false,
-    description: 'Side-effect event fired when observer stops a work item.',
   },
   {
     mode: 'effect',

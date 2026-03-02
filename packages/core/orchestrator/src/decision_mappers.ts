@@ -12,10 +12,9 @@ import type {
 
   AgentErrorDecision,
   WorkItemCompletedDecision,
-  StopHookResult,
-  DeferredWorkItem,
-} from 'protocol';
-import { assertNever } from 'protocol';
+} from './control-plane/index.js';
+import type { StopHookResult, DeferredWorkItem } from 'types';
+import { assertNever } from 'types';
 
 /**
  * Helper to convert work items to deferred work format.

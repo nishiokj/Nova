@@ -38,7 +38,7 @@ import { ContextWindow } from 'context';
 import { resetProviderCircuit, type LLMAdapter, type LLMResponse } from 'llm';
 import { getOutputSchemaJson } from 'shared';
 import type { ToolRegistry } from 'tools';
-import { createWorkItem } from 'work';
+import { createWorkItem } from 'types';
 import { successResult, errorResult } from 'types';
 
 // ─── Helpers ────────────────────────────────────────────────────────
@@ -991,80 +991,6 @@ describe('Agent Mutation Tests', () => {
       const result = await runAgent(agent);
 
       expect(result.success).toBe(true);
-    });
-  });
-
-  // ================================================================
-  // Cadence check hook (observer intervention)
-  // ================================================================
-  describe('cadence check hook', () => {
-    it('injects system message on inject action', async () => {
-      // Need > 10 iterations to trigger cadence check
-      const responses: LLMResponse[] = [];
-      for (let i = 0; i < 11; i++) {
-        responses.push(createResponse({
-          action: 'continue',
-          response: `iteration ${i}`,
-          goalStateReached: false,
-          toolCalls: [{ id: `c${i}`, name: 'SleepTool', arguments: { ms: 1 } }],
-        }));
-      }
-      responses.push(createResponse({ action: 'done', response: 'final', goalStateReached: true }));
-
-      const cadenceCheck = vi.fn(async () => ({
-        action: 'inject' as const,
-        systemMessage: 'Stay focused on the task.',
-      }));
-
-      const llm = createMockLLM(responses);
-      const agent = createAgent(llm, createToolRegistry(), {
-        budget: { maxIterations: 20, maxToolCalls: 50, maxDurationMs: 30_000, llmStreamTimeoutMs: 5_000 },
-      }, {
-        hooks: { cadenceCheck },
-      });
-      const result = await runAgent(agent, {
-        workItem: createTestWorkItem({
-          bounds: { maxLlmCalls: 20, maxToolCalls: 50, maxDurationMs: 30_000 },
-        }),
-      });
-
-      expect(cadenceCheck).toHaveBeenCalled();
-      // Should not have stopped from cadence check
-      expect(result.terminationReason).not.toBe('observer_stopped');
-    });
-
-    it('stops execution on stop action', async () => {
-      const responses: LLMResponse[] = [];
-      for (let i = 0; i < 11; i++) {
-        responses.push(createResponse({
-          action: 'continue',
-          response: `iteration ${i}`,
-          goalStateReached: false,
-          toolCalls: [{ id: `c${i}`, name: 'SleepTool', arguments: { ms: 1 } }],
-        }));
-      }
-
-      const cadenceCheck = vi.fn(async () => ({
-        action: 'stop' as const,
-        reason: 'Taking too long',
-        systemMessage: 'Stopping due to excessive iterations.',
-      }));
-
-      const llm = createMockLLM(responses);
-      const agent = createAgent(llm, createToolRegistry(), {
-        budget: { maxIterations: 20, maxToolCalls: 50, maxDurationMs: 30_000, llmStreamTimeoutMs: 5_000 },
-      }, {
-        hooks: { cadenceCheck },
-      });
-      const result = await runAgent(agent, {
-        workItem: createTestWorkItem({
-          bounds: { maxLlmCalls: 20, maxToolCalls: 50, maxDurationMs: 30_000 },
-        }),
-      });
-
-      expect(result.terminationReason).toBe('observer_stopped');
-      expect(result.observerStop).toBeDefined();
-      expect(result.observerStop!.reason).toContain('Taking too long');
     });
   });
 

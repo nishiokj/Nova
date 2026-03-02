@@ -17,6 +17,9 @@ EXPERIMENT="$PROJECT_ROOT/.lab/experiments/bench_v0_glm5_vs_codex_spark.yaml"
 BENCH_IMAGE="bench-v0-workspace:latest"
 REPO_SNAPSHOT="$EXPERIMENTS_ROOT/bench/benchmark/repos/jesus/src.tar.zst"
 TASKS_DIR="$EXPERIMENTS_ROOT/bench/benchmark/tasks/v0"
+BENCH_GRADER_SRC="$PROJECT_ROOT/benchmark/grader/bench_benchmark_adapter.py"
+BENCH_GRADER_IMAGE_PATH="/opt/bench/bench_benchmark_adapter.py"
+BENCH_DOCKER_CONTEXT="${BENCH_DOCKER_CONTEXT:-orbstack}"
 
 usage() {
     cat <<'EOF'
@@ -24,7 +27,7 @@ Usage: run-bench-experiment.sh <command> [options]
 
 Commands:
   build-image       Build the bench-v0 base Docker workspace image
-  build-task-images Build per-task images (base + injection patch + public files)
+  build-task-images Build per-task images (base + injection patch + public files + grader)
   repair-artifact   Build Linux-compatible artifact copy if current one is macOS
   export            Re-export bench v0 tasks to JSONL (v2, container mode)
   preflight         Validate artifact, images, env vars, staged files before run
@@ -56,12 +59,13 @@ ensure_cli() {
 ensure_docker() {
     if ! command -v docker >/dev/null 2>&1; then
         echo "docker CLI not found in PATH."
-        echo "Install Docker Desktop (or Docker Engine) and retry."
+        echo "Install a Docker runtime (OrbStack, Docker Engine, etc.) and retry."
         return 1
     fi
-    if ! docker info >/dev/null 2>&1; then
+    if ! docker --context "$BENCH_DOCKER_CONTEXT" info >/dev/null 2>&1; then
         echo "Docker daemon is not reachable."
-        echo "Start Docker Desktop (or your Docker daemon) and retry."
+        echo "Start your Docker runtime (OrbStack, Docker Engine, etc.) and retry."
+        echo "Configured context: $BENCH_DOCKER_CONTEXT"
         return 1
     fi
 }
@@ -78,6 +82,40 @@ resolve_experiment_artifact() {
     fi
     artifact=$(cd "$(dirname "$artifact")" && echo "$(pwd)/$(basename "$artifact")")
     echo "$artifact"
+}
+
+prepare_experiment_for_task_image_grader() {
+    local source_experiment="$1"
+    local target_experiment="$2"
+    cp "$source_experiment" "$target_experiment"
+
+    sed -E "s|^([[:space:]]*-[[:space:]]*)/agentlab/deps/bench_benchmark_adapter\\.py$|\\1$BENCH_GRADER_IMAGE_PATH|" "$target_experiment" >"${target_experiment}.next"
+    mv "${target_experiment}.next" "$target_experiment"
+
+    sed -E "s|^([[:space:]]*-[[:space:]]*source_from_host:[[:space:]]*).*/bench_benchmark_adapter[^[:space:]]*\\.py$|\\1$BENCH_GRADER_SRC|" "$target_experiment" >"${target_experiment}.next"
+    mv "${target_experiment}.next" "$target_experiment"
+
+    assert_task_image_grader_wiring "$target_experiment"
+}
+
+assert_task_image_grader_wiring() {
+    local experiment_file="$1"
+    local failed=0
+
+    if ! grep -Eq "^[[:space:]]*-[[:space:]]*/opt/bench/bench_benchmark_adapter\\.py$" "$experiment_file"; then
+        echo "  [FAIL] experiment adapter command is not wired to task-image grader path: $BENCH_GRADER_IMAGE_PATH"
+        failed=1
+    fi
+    if grep -Eq "^[[:space:]]*-[[:space:]]*/agentlab/deps/bench_benchmark_adapter\\.py$" "$experiment_file"; then
+        echo "  [FAIL] experiment still references host-staged grader path: /agentlab/deps/bench_benchmark_adapter.py"
+        failed=1
+    fi
+    if ! grep -Fq "source_from_host: $BENCH_GRADER_SRC" "$experiment_file"; then
+        echo "  [FAIL] experiment does not reference tracked grader source: $BENCH_GRADER_SRC"
+        failed=1
+    fi
+
+    [ "$failed" -eq 0 ]
 }
 
 artifact_bun_file_info() {
@@ -116,7 +154,7 @@ build_linux_artifact_copy() {
     target_name=$(basename "$target_artifact")
     mkdir -p "$target_dir"
 
-    if ! docker run --rm \
+    if ! docker --context "$BENCH_DOCKER_CONTEXT" run --rm \
         -v "$source_dir:/input:ro" \
         -v "$target_dir:/output" \
         oven/bun:1-debian \
@@ -159,6 +197,131 @@ ensure_linux_artifact_copy() {
     echo "$target_artifact"
 }
 
+smoke_test_benchmark_adapter() {
+    local adapter_script="$1"
+    python3 - "$adapter_script" <<'PY'
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+ADAPTER = pathlib.Path(sys.argv[1])
+
+
+def assert_true(condition, message):
+    if not condition:
+        raise AssertionError(message)
+
+
+def run_case(*, case_name, hidden_command, public_command, outcome, expected_resolved, expected_verdict):
+    with tempfile.TemporaryDirectory(prefix="bench_adapter_smoke_") as tmp:
+        root = pathlib.Path(tmp)
+        workspace = root / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        task = {
+            "id": "TASK_SMOKE",
+            "workspace": str(workspace),
+            "benchmark": {"adapter_id": "bench_v0", "name": "bench", "split": "test"},
+            "public_command": public_command,
+            "hidden_command": hidden_command,
+        }
+        result = {"outcome": outcome, "answer": "smoke fixture"}
+
+        task_path = root / "task.json"
+        result_path = root / "result.json"
+        prediction_path = root / "prediction.json"
+        score_path = root / "score.json"
+
+        task_path.write_text(json.dumps(task), encoding="utf-8")
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "AGENTLAB_TASK_PATH": str(task_path),
+                "AGENTLAB_RESULT_PATH": str(result_path),
+                "AGENTLAB_BENCHMARK_PREDICTION_PATH": str(prediction_path),
+                "AGENTLAB_BENCHMARK_SCORE_PATH": str(score_path),
+                "AGENTLAB_RUN_ID": "run_smoke_preflight",
+                "AGENTLAB_TRIAL_ID": "trial_1",
+                "AGENTLAB_VARIANT_ID": "smoke_variant",
+                "AGENTLAB_TASK_ID": "TASK_SMOKE",
+                "AGENTLAB_REPL_IDX": "0",
+                "AGENTLAB_SCHEDULE_IDX": "0",
+                "AGENTLAB_SLOT_COMMIT_ID": "slot_sha256:smoke",
+                "AGENTLAB_ATTEMPT": "1",
+                "AGENTLAB_ROW_SEQ": "0",
+                "AGENTLAB_GRADER_TIMEOUT_SECONDS": "5",
+            }
+        )
+
+        proc = subprocess.run(
+            [sys.executable, str(ADAPTER)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"{case_name}: adapter exited {proc.returncode}: {(proc.stderr or proc.stdout).strip()}"
+            )
+
+        prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+        score = json.loads(score_path.read_text(encoding="utf-8"))
+
+        required_identity = ("schedule_idx", "slot_commit_id", "attempt", "row_seq")
+        for key in required_identity:
+            assert_true(key in prediction, f"{case_name}: prediction missing '{key}'")
+            assert_true(key in score, f"{case_name}: score missing '{key}'")
+
+        assert_true(
+            prediction.get("schema_version") == "benchmark_prediction_record_v1",
+            f"{case_name}: invalid prediction schema_version",
+        )
+        assert_true(
+            score.get("schema_version") == "benchmark_score_record_v1",
+            f"{case_name}: invalid score schema_version",
+        )
+        assert_true(score.get("primary_metric_name") == "resolved", f"{case_name}: primary metric must be resolved")
+        assert_true(float(score.get("primary_metric_value")) == expected_resolved, f"{case_name}: resolved mismatch")
+        assert_true(score.get("verdict") == expected_verdict, f"{case_name}: verdict mismatch")
+        assert_true(
+            score.get("evaluator", {}).get("command") == ["python3", "/opt/bench/bench_benchmark_adapter.py"],
+            f"{case_name}: evaluator command path must be /opt/bench/bench_benchmark_adapter.py",
+        )
+
+
+def main():
+    run_case(
+        case_name="self_report_error_but_checks_pass",
+        hidden_command="true",
+        public_command="true",
+        outcome="error",
+        expected_resolved=1.0,
+        expected_verdict="pass",
+    )
+    run_case(
+        case_name="self_report_success_but_hidden_fails",
+        hidden_command="false",
+        public_command="true",
+        outcome="success",
+        expected_resolved=0.0,
+        expected_verdict="fail",
+    )
+
+
+try:
+    main()
+except Exception as exc:
+    print(f"benchmark adapter smoke test failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 cmd_preflight() {
     local experiment_file="${1:-$EXPERIMENT}"
     local errors=0
@@ -177,6 +340,11 @@ cmd_preflight() {
     # 2. Experiment YAML
     if [ -f "$experiment_file" ]; then
         echo "  [ok] experiment YAML"
+        if assert_task_image_grader_wiring "$experiment_file"; then
+            echo "  [ok] experiment grader wiring (/opt task-image path)"
+        else
+            errors=$((errors + 1))
+        fi
     else
         echo "  [FAIL] experiment YAML not found: $experiment_file"
         errors=$((errors + 1))
@@ -234,7 +402,7 @@ cmd_preflight() {
         if ensure_docker >/dev/null; then
             local missing_images=0
             while IFS= read -r image_name; do
-                if ! docker image inspect "$image_name" &>/dev/null; then
+                if ! docker --context "$BENCH_DOCKER_CONTEXT" image inspect "$image_name" &>/dev/null; then
                     echo "  [FAIL] Docker image missing: $image_name"
                     missing_images=$((missing_images + 1))
                 fi
@@ -248,13 +416,35 @@ for line in open('$dataset_abs'):
 
             if [ "$missing_images" -eq 0 ]; then
                 echo "  [ok] all task Docker images present"
+
+                local missing_graders=0
+                while IFS= read -r image_name; do
+                    [ -n "$image_name" ] || continue
+                    if ! docker --context "$BENCH_DOCKER_CONTEXT" run --rm --entrypoint /bin/sh "$image_name" -lc "test -x '$BENCH_GRADER_IMAGE_PATH'" >/dev/null 2>&1; then
+                        echo "  [FAIL] task image missing embedded grader: $image_name ($BENCH_GRADER_IMAGE_PATH)"
+                        missing_graders=$((missing_graders + 1))
+                    fi
+                done < <(python3 -c "
+import json, sys
+for line in open('$dataset_abs'):
+    row = json.loads(line)
+    img = row.get('task', {}).get('image', '')
+    if img: print(img)
+" 2>/dev/null | sort -u)
+
+                if [ "$missing_graders" -eq 0 ]; then
+                    echo "  [ok] all task Docker images include benchmark grader: $BENCH_GRADER_IMAGE_PATH"
+                else
+                    echo "  [FAIL] $missing_graders task image(s) missing embedded benchmark grader — run: $0 build-task-images"
+                    errors=$((errors + missing_graders))
+                fi
             else
                 echo "  [FAIL] $missing_images task image(s) missing — run: $0 build-task-images"
                 errors=$((errors + missing_images))
             fi
         else
             echo "  [FAIL] docker daemon unavailable; cannot verify task images"
-            echo "         start Docker and re-run preflight"
+            echo "         start your Docker runtime and re-run preflight"
             errors=$((errors + 1))
         fi
     fi
@@ -280,6 +470,10 @@ for line in open('$dataset_abs'):
     while IFS= read -r staged_file; do
         staged_file=$(echo "$staged_file" | xargs)
         [ -n "$staged_file" ] || continue
+        if [[ "$staged_file" == *bench_benchmark_adapter_standalone.py || "$staged_file" == *bench_benchmark_adapter.py ]]; then
+            echo "  [ok] benchmark adapter source tracked in repo: $BENCH_GRADER_SRC"
+            continue
+        fi
         local required
         required=$(grep -A2 "$staged_file" "$experiment_file" | grep 'required:' | awk '{print $2}')
         if [ -f "$staged_file" ]; then
@@ -308,6 +502,19 @@ for line in open('$dataset_abs'):
             errors=$((errors + 1))
         fi
     done < <(grep -E '^\s+- /' "$experiment_file" 2>/dev/null || true)
+
+    # 9. Benchmark adapter smoke test (schema identity + score source behavior)
+    if [ -f "$BENCH_GRADER_SRC" ]; then
+        if smoke_test_benchmark_adapter "$BENCH_GRADER_SRC"; then
+            echo "  [ok] benchmark adapter smoke test"
+        else
+            echo "  [FAIL] benchmark adapter smoke test failed: $BENCH_GRADER_SRC"
+            errors=$((errors + 1))
+        fi
+    else
+        echo "  [FAIL] tracked benchmark adapter missing: $BENCH_GRADER_SRC"
+        errors=$((errors + 1))
+    fi
 
     echo ""
     if [ "$errors" -eq 0 ]; then
@@ -363,7 +570,7 @@ cmd_build_image() {
     cp "$REPO_SNAPSHOT" "$ctx/src.tar.zst"
 
     echo "Building $BENCH_IMAGE ..."
-    docker build -t "$BENCH_IMAGE" "$ctx"
+    docker --context "$BENCH_DOCKER_CONTEXT" build -t "$BENCH_IMAGE" "$ctx"
     echo "Done: $BENCH_IMAGE"
 }
 
@@ -371,7 +578,7 @@ cmd_build_task_images() {
     ensure_docker || exit 1
 
     # Verify base image exists
-    if ! docker image inspect "$BENCH_IMAGE" &>/dev/null; then
+    if ! docker --context "$BENCH_DOCKER_CONTEXT" image inspect "$BENCH_IMAGE" &>/dev/null; then
         echo "Base image $BENCH_IMAGE not found. Run: $0 build-image"
         exit 1
     fi
@@ -381,6 +588,10 @@ cmd_build_task_images() {
     shopt -u nullglob
     if [ ${#tasks[@]} -eq 0 ]; then
         echo "No tasks found in $TASKS_DIR"
+        exit 1
+    fi
+    if [ ! -f "$BENCH_GRADER_SRC" ]; then
+        echo "Tracked benchmark grader not found: $BENCH_GRADER_SRC"
         exit 1
     fi
 
@@ -413,11 +624,13 @@ cmd_build_task_images() {
             cp -r "$task_dir/public" "$ctx/public"
             has_public=true
         fi
+        cp "$BENCH_GRADER_SRC" "$ctx/bench_benchmark_adapter.py"
 
         # Build the per-task Dockerfile
         {
             echo "FROM $BENCH_IMAGE"
             echo "WORKDIR /workspace"
+            echo "RUN mkdir -p /opt/bench"
             if $has_patch; then
                 echo "COPY injection.patch /tmp/injection.patch"
                 echo "RUN git apply /tmp/injection.patch && rm /tmp/injection.patch"
@@ -425,10 +638,12 @@ cmd_build_task_images() {
             if $has_public; then
                 echo "COPY public/ .bench_public/"
             fi
+            echo "COPY bench_benchmark_adapter.py $BENCH_GRADER_IMAGE_PATH"
+            echo "RUN chmod +x $BENCH_GRADER_IMAGE_PATH"
             echo "RUN git add -A && git -c user.name=bench -c user.email=bench@bench commit -m 'task setup' --allow-empty"
         } > "$ctx/Dockerfile"
 
-        if docker build -t "$tag" "$ctx" 2>&1; then
+        if docker --context "$BENCH_DOCKER_CONTEXT" build -t "$tag" "$ctx" 2>&1; then
             echo "OK: $tag"
             built=$((built + 1))
         else
@@ -456,7 +671,20 @@ cmd_export() {
 cmd_describe() {
     ensure_cli
     cd "$PROJECT_ROOT"
-    "$LAB_CLI" describe "$EXPERIMENT" "$@"
+    local tmp_experiment
+    tmp_experiment=$(mktemp "${EXPERIMENT%.yaml}.tmp_XXXXXX.yaml")
+    trap "rm -f '$tmp_experiment'" RETURN
+    prepare_experiment_for_task_image_grader "$EXPERIMENT" "$tmp_experiment"
+    DOCKER_CONTEXT="$BENCH_DOCKER_CONTEXT" "$LAB_CLI" describe "$tmp_experiment" "$@"
+}
+
+cmd_preflight_entry() {
+    local experiment_file="${1:-$EXPERIMENT}"
+    local tmp_experiment
+    tmp_experiment=$(mktemp "${EXPERIMENT%.yaml}.tmp_preflight_XXXXXX.yaml")
+    trap "rm -f '$tmp_experiment'" RETURN
+    prepare_experiment_for_task_image_grader "$experiment_file" "$tmp_experiment"
+    cmd_preflight "$tmp_experiment"
 }
 
 cmd_run() {
@@ -497,56 +725,40 @@ cmd_run() {
     local run_experiment="$EXPERIMENT"
     local tmp_experiment=""
     local artifact
-    artifact=$(resolve_experiment_artifact "$EXPERIMENT" || true)
+    tmp_experiment=$(mktemp "${EXPERIMENT%.yaml}.tmp_XXXXXX.yaml")
+    cp "$EXPERIMENT" "$tmp_experiment"
+    run_experiment="$tmp_experiment"
+    prepare_experiment_for_task_image_grader "$EXPERIMENT" "$run_experiment"
+    artifact=$(resolve_experiment_artifact "$run_experiment" || true)
 
     if [ -n "$artifact" ] && [ -f "$artifact" ] && artifact_needs_linux_repack "$artifact"; then
         local linux_artifact
         linux_artifact=$(ensure_linux_artifact_copy "$artifact")
-        tmp_experiment=$(mktemp "${EXPERIMENT%.yaml}.tmp_XXXXXX.yaml")
-        cp "$EXPERIMENT" "$tmp_experiment"
         sed -E "s|^    artifact: .*|    artifact: $linux_artifact|" "$tmp_experiment" >"${tmp_experiment}.next"
         mv "${tmp_experiment}.next" "$tmp_experiment"
-        run_experiment="$tmp_experiment"
     fi
 
     if [ -n "$limit" ]; then
-        if [ -z "$tmp_experiment" ]; then
-            tmp_experiment=$(mktemp "${EXPERIMENT%.yaml}.tmp_XXXXXX.yaml")
-            cp "$EXPERIMENT" "$tmp_experiment"
-            run_experiment="$tmp_experiment"
-        fi
         sed -E "s/^  limit: [0-9]+$/  limit: $limit/" "$run_experiment" >"${run_experiment}.next"
         mv "${run_experiment}.next" "$run_experiment"
     fi
 
     if [ -n "$max_concurrency" ]; then
-        if [ -z "$tmp_experiment" ]; then
-            tmp_experiment=$(mktemp "${EXPERIMENT%.yaml}.tmp_XXXXXX.yaml")
-            cp "$EXPERIMENT" "$tmp_experiment"
-            run_experiment="$tmp_experiment"
-        fi
         sed -E "s/^  max_concurrency: [0-9]+$/  max_concurrency: $max_concurrency/" "$run_experiment" >"${run_experiment}.next"
         mv "${run_experiment}.next" "$run_experiment"
     fi
 
     if [ -n "$timeout_ms" ]; then
-        if [ -z "$tmp_experiment" ]; then
-            tmp_experiment=$(mktemp "${EXPERIMENT%.yaml}.tmp_XXXXXX.yaml")
-            cp "$EXPERIMENT" "$tmp_experiment"
-            run_experiment="$tmp_experiment"
-        fi
         sed -E "s/^    timeout_ms: [0-9]+$/    timeout_ms: $timeout_ms/" "$run_experiment" >"${run_experiment}.next"
         mv "${run_experiment}.next" "$run_experiment"
     fi
 
-    if [ -n "$tmp_experiment" ]; then
-        trap "rm -f '$tmp_experiment'" EXIT
-    fi
+    trap "rm -f '$tmp_experiment'" EXIT
 
     cmd_preflight "$run_experiment" || exit 1
     echo ""
     cd "$PROJECT_ROOT"
-    "$LAB_CLI" run "$run_experiment" "${passthrough[@]+"${passthrough[@]}"}"
+    DOCKER_CONTEXT="$BENCH_DOCKER_CONTEXT" "$LAB_CLI" run "$run_experiment" "${passthrough[@]+"${passthrough[@]}"}"
 }
 
 cmd_scoreboard() {
@@ -594,7 +806,7 @@ cmd_scoreboard() {
 
     if $native; then
         ensure_cli
-        "$LAB_CLI" scoreboard "$run_id" --interval-seconds "$interval"
+        DOCKER_CONTEXT="$BENCH_DOCKER_CONTEXT" "$LAB_CLI" scoreboard "$run_id" --interval-seconds "$interval"
         return 0
     fi
 
@@ -731,7 +943,7 @@ case "${1:-help}" in
     build-task-images) shift; cmd_build_task_images "$@" ;;
     repair-artifact)   shift; cmd_repair_artifact "$@" ;;
     export)            shift; cmd_export "$@" ;;
-    preflight)         shift; cmd_preflight "$@" ;;
+    preflight)         shift; cmd_preflight_entry "$@" ;;
     describe)    shift; cmd_describe "$@" ;;
     run)         shift; cmd_run "$@" ;;
     scoreboard)  shift; cmd_scoreboard "$@" ;;

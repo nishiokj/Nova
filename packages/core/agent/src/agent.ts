@@ -26,8 +26,8 @@ import { isLLMMessageItem, isLLMFunctionCallItem, isLLMFunctionCallOutputItem } 
 import { createEvent, errorResult, successResult } from 'types';
 import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS, unwrapStructuredOutput } from 'shared';
 import { ContextWindow, buildSystemMessage } from 'context';
-import type { WorkItem } from 'work';
-import { createWorkItem } from 'work';
+import type { WorkItem } from 'types';
+import { createWorkItem } from 'types';
 import type {
   AgentConfig,
   AgentRunParams,
@@ -47,11 +47,6 @@ import type { AgentRegistry } from './agent-registry.js';
 import { truncateToolOutput, isRefusal } from './constants.js';
 import { DEFAULT_AGENT_BUDGET } from './types.js';
 
-/**
- * Cadence check interval: every N LLM iterations, invoke the observer hook.
- * For a 50-iteration budget this gives 5 check-ins; for 20 iterations, 2.
- */
-const CADENCE_CHECK_INTERVAL = 10;
 const MAX_SCHEMA_REMINDER_RETRIES = 3;
 
 type AgentAction = 'done' | 'continue';
@@ -912,32 +907,6 @@ export class Agent {
         if (this.hooks?.shouldStop?.()) {
           result.terminationReason = 'user_stopped';
           break;
-        }
-
-        // Cadence check: observer intervention point (every N LLM calls)
-        const cadenceCheck = this.hooks?.cadenceCheck;
-        if (cadenceCheck && iteration > 0 && iteration % CADENCE_CHECK_INTERVAL === 0) {
-          const cadenceResult = yield* Effect.tryPromise({
-            try: () => cadenceCheck({
-              llmCallsMade: metrics.llmCallsMade,
-              toolCallsMade: metrics.toolCallsMade,
-              durationMs: Date.now() - startTime,
-            }),
-            catch: (error) => error instanceof Error ? error : new Error(String(error)),
-          });
-          if (cadenceResult.action === 'inject' && cadenceResult.systemMessage) {
-            localContext.addMessage('system', cadenceResult.systemMessage, workItem.workId);
-          } else if (cadenceResult.action === 'stop') {
-            if (cadenceResult.systemMessage) {
-              localContext.addMessage('system', cadenceResult.systemMessage, workItem.workId);
-            }
-            const stopReason = cadenceResult.reason ?? cadenceResult.systemMessage ?? 'Observer requested stop.';
-            result.observerStop = {
-              reason: stopReason,
-            };
-            result.terminationReason = cadenceResult.terminationReason ?? 'observer_stopped';
-            break;
-          }
         }
 
         // 1. Pre-checks: bounds and context management

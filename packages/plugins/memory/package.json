@@ -1,0 +1,36 @@
+{
+  "name": "memory",
+  "version": "0.1.0",
+  "description": "Unified memory plugin that bundles agent-memory, entity-graph, and memory-injector",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/**",
+    "package.json",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "prepack": "bun run build"
+  },
+  "dependencies": {
+    "agent-memory": "workspace:*",
+    "entity-graph": "workspace:*",
+    "memory-injector": "workspace:*",
+    "postgres": "^3.4.8"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.0.0",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.3"
+  }
+}

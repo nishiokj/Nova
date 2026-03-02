@@ -4,8 +4,8 @@
  * Encapsulates the logic for checking iteration, duration, and tool call limits.
  */
 
-import type { TerminationReason } from 'protocol';
-import { assertNever } from 'protocol';
+import type { TerminationReason } from 'types';
+import { assertNever } from 'types';
 
 /**
  * Execution limits configuration.

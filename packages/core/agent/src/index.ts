@@ -18,8 +18,6 @@ export type {
   UserPromptInfo,
   EventEmitCallback,
   AgentHooks,
-  AgentCadenceMetrics,
-  AgentCadenceResult,
   ToolHookResult,
   AgentRuntimeConfig,
   InternalHookEvent,

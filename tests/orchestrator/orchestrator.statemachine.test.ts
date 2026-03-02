@@ -48,8 +48,8 @@ import type {
   BoundsDecision,
   PromptAnswerDecision,
   WorkItemSpec,
-} from 'protocol';
-import { success } from 'protocol';
+} from 'orchestrator';
+import { success } from 'orchestrator';
 import {
   Orchestrator,
   type OrchestratorRuntime,

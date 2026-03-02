@@ -5,7 +5,7 @@ import { ContextWindow } from 'context';
 import { resetProviderCircuit, type LLMAdapter, type LLMResponse } from 'llm';
 import { getOutputSchemaJson } from 'shared';
 import type { ToolRegistry } from 'tools';
-import { createWorkItem } from 'work';
+import { createWorkItem } from 'types';
 import { successResult } from 'types';
 
 function createResponse(params: {

@@ -15,7 +15,6 @@
     "chalk": "^5.3.0",
     "comms-bus": "workspace:*",
     "diff": "^7.0.0",
-    "entity-graph": "workspace:*",
     "harness-client": "workspace:*",
     "ink": "^4.4.1",
     "llm": "workspace:*",
@@ -25,7 +24,6 @@
     "shared": "workspace:*",
     "string-width": "^8.1.0",
     "strip-ansi": "^7.1.2",
-    "web-tree-sitter": "0.25.3",
     "types": "workspace:*",
     "wrap-ansi": "^9.0.2",
     "yoga-wasm-web": "^0.3.3"

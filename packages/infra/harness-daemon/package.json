@@ -17,23 +17,18 @@
   },
   "dependencies": {
     "agent": "workspace:*",
-    "agent-memory": "workspace:*",
     "comms-bus": "workspace:*",
     "context": "workspace:*",
     "effect": "^3.19.18",
     "harness-client": "workspace:*",
-    "entity-graph": "workspace:*",
     "graphd": "workspace:*",
     "llm": "workspace:*",
-    "memory-injector": "workspace:*",
     "minimatch": "^10.1.1",
     "orchestrator": "workspace:*",
-    "postgres": "^3.4.5",
     "runtime": "workspace:*",
     "shared": "workspace:*",
     "tools": "workspace:*",
-    "types": "workspace:*",
-    "work": "workspace:*"
+    "types": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "^1.0.0",

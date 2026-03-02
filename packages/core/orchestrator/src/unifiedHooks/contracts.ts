@@ -8,7 +8,7 @@ import type {
   HookIdempotency,
   HookOutcome,
   HookPolicy,
-} from 'protocol';
+} from '../control-plane/index.js';
 import type { ToolResult } from 'types';
 import type {
   DecisionEventType,

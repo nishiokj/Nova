@@ -1,4 +1,4 @@
-import type { WorkItem } from 'work';
+import type { WorkItem } from 'types';
 import type {
   AgentEvent,
   StructuredOutputSchema,
@@ -11,9 +11,9 @@ import type {
 import type { ContextWindow } from 'context';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
-import type { TerminationReason } from 'protocol';
+import type { TerminationReason } from 'types';
 
-// Re-export stop hook types from protocol (moved there to avoid circular deps)
+// Re-export stop hook types from shared types (to avoid orchestrator/agent coupling)
 export type {
   DeferredWorkItem,
   ExecutionSnapshot,
@@ -21,7 +21,7 @@ export type {
   StopHookContext,
   StopHookUserPrompt,
   StopHookHandler,
-} from 'protocol';
+} from 'types';
 
 /**
  * Agent type identifier - any string, defined via config.
@@ -173,7 +173,7 @@ export interface AgentResultBase {
   artifacts?: ArtifactItem[];
   /** Agent's execution context - contains tool calls, outputs, reasoning from this run */
   localContext: ContextWindow;
-  /** Optional observer stop metadata when cadence intervention terminates a work item/session. */
+  /** Optional stop metadata when an external hook terminates a work item/session. */
   observerStop?: {
     reason: string;
   };
@@ -282,25 +282,6 @@ export interface ToolHookResult {
  * Hooks for tool execution lifecycle.
  * These are optional callbacks that can block or modify tool execution.
  */
-/**
- * Metrics passed to cadence check hook for informed intervention decisions.
- */
-export interface AgentCadenceMetrics {
-  llmCallsMade: number;
-  toolCallsMade: number;
-  durationMs: number;
-}
-
-/**
- * Result from cadence check hook - observer's steering directive.
- */
-export interface AgentCadenceResult {
-  action: 'continue' | 'inject' | 'stop';
-  systemMessage?: string;
-  terminationReason?: Extract<TerminationReason, 'observer_stopped' | 'observer_work_item_stopped'>;
-  reason?: string;
-}
-
 export interface AgentHooks {
   /**
    * Called before a tool is executed.
@@ -326,12 +307,6 @@ export interface AgentHooks {
    * Returns true if agent should stop immediately (e.g., user typed "stop").
    */
   shouldStop?: () => boolean;
-
-  /**
-   * Called every N iterations inside the agent loop for observer intervention.
-   * Gives the observer a synchronization point to steer or stop the agent mid-run.
-   */
-  cadenceCheck?: (metrics: AgentCadenceMetrics) => Promise<AgentCadenceResult>;
 }
 
 // ============================================
@@ -351,7 +326,7 @@ export type InternalHookEvent =
       domain?: string;
       dependencies?: string[];
       targetPaths?: string[];
-      /** Semantic state attached during observer split/create (to be written to semantic.json) */
+      /** Semantic state attached during hook-driven split/create (to be written to semantic.json) */
       semantic?: unknown;
     }
   | {
@@ -460,14 +435,6 @@ export type InternalHookEvent =
       message?: string;
       /** Branch name if detectable */
       branch?: string;
-    }
-  | {
-      /** Fired when observer stops a specific work item during cadence checks. */
-      type: 'observer_agent_stopped';
-      sessionKey: string;
-      workId: string;
-      reason: string;
-      agentType: string;
     }
 ;
 

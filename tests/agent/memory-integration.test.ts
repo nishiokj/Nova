@@ -6,7 +6,7 @@
  */
 
 import { ContextWindow } from 'context';
-import { createWorkItem, type WorkItem } from 'work';
+import { createWorkItem, type WorkItem } from 'types';
 
 // Test buildMemoryQuery behavior by simulating the function
 // (We can't easily import a private method, so we replicate the logic)

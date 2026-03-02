@@ -1,8 +1,8 @@
 /**
- * Harness daemon entrypoint for JSONL/TCP bridge.
+ * Harness daemon entrypoint for WebSocket bridge.
  *
  * Supports:
- * - TCP/JSONL bus for client connections (TUI, external integrations via harness-client)
+ * - WebSocket bus for client connections (TUI, external integrations via harness-client)
  */
 
 import { pathToFileURL } from 'url';

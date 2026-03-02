@@ -16,8 +16,6 @@ import type {
   UserPromptInfo,
   AgentHooks,
   AgentResult,
-  AgentCadenceMetrics,
-  AgentCadenceResult,
   InternalHookEvent,
   InternalHookContext,
   InternalHookQueue,
@@ -26,14 +24,21 @@ import type {
 } from 'agent';
 import { Agent } from 'agent';
 import type { AgentRegistry } from 'agent';
-import { createWorkItem, cloneWorkItemWithDependencies, type WorkItem } from 'work';
-import { createEvent } from 'types';
 import type {
+  WorkItem,
+  StopHookResult,
+  TerminationReason,
   LLMRequestConfig,
   MessageItem,
   RunCancellationMetadata,
   RunControlMetadata,
   RunExecutionMetadata,
+} from 'types';
+import {
+  assertNever,
+  cloneWorkItemWithDependencies,
+  createEvent,
+  createWorkItem,
 } from 'types';
 import { buildLLMRequestConfig, profiler } from 'shared';
 import {
@@ -42,10 +47,8 @@ import {
   type RuntimeControlQueue,
 } from 'runtime';
 import {
-  assertNever,
   createAgentErrorEvent,
   createBoundsExceededEvent,
-  createCadenceAuditEvent,
   createGoalReachedEvent,
   createWorkItemCompletedEvent,
   createUserInputRequiredEvent,
@@ -54,17 +57,14 @@ import {
   type AgentErrorDecision,
   type BoundsDecision,
 
-  type ControlEvent,
   type EventFor,
   type ExecutionMetrics,
   type HookContext,
   type PromptAnswerDecision,
   type QualityGateDecision,
   type StatePatch,
-  type StopHookResult,
   type WorkItemCompletedDecision,
-  type TerminationReason,
-} from 'protocol';
+} from './control-plane/index.js';
 import { applyPatches } from './hookRunner/applyPatches.js';
 import {
   runUnifiedDecisionHooks,
@@ -113,8 +113,6 @@ export interface OrchestratorConfig {
   compactMaxFileCount: number;
   /** Max chars per tool output during compaction */
   compactTruncateTo: number;
-  /** Minimum iteration gap between observer evaluations (default 5) */
-  minObserverIterationGap: number;
   /** Maximum realign attempts before forcing termination (default 3) */
   maxRealigns: number;
   /**
@@ -128,7 +126,7 @@ export interface OrchestratorConfig {
  * Per-execution runtime hooks and callbacks.
  */
 /**
- * State passed to the onIteration callback for observer evaluation.
+ * State passed to the onIteration callback.
  */
 export interface IterationState {
   iteration: number;
@@ -185,7 +183,6 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   compactResetPercent: 0.45,
   compactMaxFileCount: 20,
   compactTruncateTo: 5000,
-  minObserverIterationGap: 5,
   maxRealigns: 3,
 };
 
@@ -266,6 +263,8 @@ interface CallStopHookParams {
   totalToolCalls?: number;
   controlEventType?: 'goal_state_reached' | 'work_item_completed';
 }
+
+type StopHookControlEvent = EventFor<StopHookDecisionEventType>;
 
 type ControlHookExecutionResult<D> =
   | (UnifiedDecisionExecutionResult<D> & { status: 'decision' | 'no_decision' | 'no_hooks' })
@@ -1101,7 +1100,7 @@ export class Orchestrator {
         }
         let agent: Agent | null = null;
         try {
-          agent = this.createAgent(item.agent, context, item.workId, item.objective, runtime);
+          agent = this.createAgent(item.agent, context);
         } catch (err) {
           const errorMessage = err instanceof Error ? err.message : String(err);
           const errorResult = this.createErrorResult(errorMessage, context);
@@ -1543,10 +1542,7 @@ export class Orchestrator {
 
   private createAgent(
     agentType: string,
-    context: ContextWindow,
-    workId: string,
-    objective: string,
-    runtime?: OrchestratorRuntime
+    context: ContextWindow
   ): Agent | null {
     // NO FALLBACK: If the requested agent type doesn't exist, fail explicitly
     if (!this.agentRegistry?.has(agentType)) return null;
@@ -1554,123 +1550,6 @@ export class Orchestrator {
 
     // Build LLM config from model selection (source of truth) + agent's llmParams
     const llmConfig = this.buildLlmConfig(config.llmParams, agentType);
-
-    // Wire cadence check: invokes control hooks at tool-call thresholds for real oversight.
-    // Fires every 60 tool calls OR every 5 minutes, whichever comes first.
-    // This gives the observer real intervention power during execution.
-    let lastCadenceToolCalls = 0;
-    let lastCadenceTimeMs = Date.now();
-    const CADENCE_TOOL_THRESHOLD = 60;  // Every 60 tool calls
-    const CADENCE_TIME_THRESHOLD_MS = 300_000;  // Every 5 minutes
-
-    const cadenceCheck = async (metrics: AgentCadenceMetrics): Promise<AgentCadenceResult> => {
-      const toolCallsSinceLast = metrics.toolCallsMade - lastCadenceToolCalls;
-      const timeSinceLast = Date.now() - lastCadenceTimeMs;
-      const shouldInvokeObserver = runtime?.hookRegistry && (
-        toolCallsSinceLast >= CADENCE_TOOL_THRESHOLD ||
-        timeSinceLast >= CADENCE_TIME_THRESHOLD_MS
-      );
-
-      if (shouldInvokeObserver && runtime?.hookRegistry) {
-        lastCadenceToolCalls = metrics.toolCallsMade;
-        lastCadenceTimeMs = Date.now();
-
-        try {
-          const executionMetrics: ExecutionMetrics = {
-            toolCallsMade: metrics.toolCallsMade,
-            llmCalls: metrics.llmCallsMade,
-            contextPercentUsed: context.metrics.percentageUsed,
-            durationMs: metrics.durationMs,
-            filesRead: [],
-            filesModified: [],
-            iterationCount: metrics.llmCallsMade,
-          };
-          const hookContext = this.buildHookContext({
-            context,
-            workId,
-            agentType,
-            iteration: metrics.llmCallsMade,
-            metrics: executionMetrics,
-            objective,
-            filesModified: [],
-          });
-          const event = createCadenceAuditEvent(
-            context.sessionKey,
-            workId,
-            metrics.durationMs,
-            toolCallsSinceLast,
-            executionMetrics,
-            'cadence_check'
-          );
-          const hookResult = await Effect.runPromise(this.runControlHooks<'cadence_audit'>(event, hookContext, context, runtime));
-          switch (hookResult.status) {
-            case 'decision': {
-              const decision = hookResult.decision;
-              switch (decision.action) {
-                case 'continue':
-                  break;
-                case 'inject_guidance':
-                  return { action: 'inject', systemMessage: decision.message };
-                case 'realign':
-                  return { action: 'stop', systemMessage: decision.guidance };
-                case 'split':
-                  return { action: 'stop', systemMessage: 'Cadence audit requested split.' };
-                case 'stop_work_item':
-                  return {
-                    action: 'stop',
-                    systemMessage: decision.reason,
-                    terminationReason: 'observer_work_item_stopped',
-                    reason: decision.reason,
-                  };
-                case 'stop':
-                  return {
-                    action: 'stop',
-                    systemMessage: decision.reason,
-                    terminationReason: 'observer_stopped',
-                    reason: decision.reason,
-                  };
-                default:
-                  assertNever(decision);
-              }
-              break;
-            }
-            case 'no_decision':
-              this.log('warning', 'Cadence audit hooks produced no decision', {
-                eventType: event.type,
-                failures: hookResult.failures.length,
-                hasCriticalFailure: hookResult.hasCriticalFailure,
-              });
-              break;
-            case 'no_hooks':
-            case 'no_registry':
-              break;
-            default:
-              assertNever(hookResult);
-          }
-        } catch (err) {
-          // Don't crash on observer failure - log and continue
-          this.log('warning', 'Cadence check observer invocation failed', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-
-      // Metric-based guardrail: if duration exceeds 5 minutes, inject a refocus nudge
-      if (metrics.durationMs > 300_000) {
-        return {
-          action: 'inject',
-          systemMessage: `[System] You have been running for ${Math.round(metrics.durationMs / 60_000)} minutes with ${metrics.toolCallsMade} tool calls. Stay focused on the current objective. If you are stuck, wrap up with what you have.`,
-        };
-      }
-
-      return { action: 'continue' };
-    };
-
-    // Merge hooks: cadence check for observer oversight.
-    const mergedHooks: AgentHooks = {
-      ...this.hooks,
-      cadenceCheck,
-    };
 
     return new Agent(config, {
       llm: this.llm,
@@ -1680,7 +1559,7 @@ export class Orchestrator {
       sessionKey: context.sessionKey,
       agentRegistry: this.agentRegistry,
       llmConfig,
-      hooks: mergedHooks,
+      hooks: this.hooks,
       internalHookQueue: this.hookQueue,
       getModelSelection: this.getModelSelection,
       memoryInjector: this.config.memoryInjector,
@@ -1750,8 +1629,6 @@ export class Orchestrator {
 
     const cancellationReasons = new Set<TerminationReason>([
       'user_stopped',
-      'observer_stopped',
-      'observer_work_item_stopped',
     ]);
 
     if (partial.terminationReason && cancellationReasons.has(partial.terminationReason)) {
@@ -2000,7 +1877,7 @@ export class Orchestrator {
     userPrompt?: UserPromptInfo;
     agentResult?: AgentResult;
     controlEventType?: 'goal_state_reached' | 'work_item_completed';
-  }): ControlEvent | null {
+  }): StopHookControlEvent | null {
     const { terminationReason, context, workId, response, metrics, userPrompt, agentResult, controlEventType } = params;
 
     switch (terminationReason) {
@@ -2092,17 +1969,8 @@ export class Orchestrator {
           undefined
         );
       }
-      case 'cadence_audit':
-      case 'user_stopped':
-      case 'observer_stopped':
-      case 'observer_work_item_stopped':
-      case 'rate_limit':
-      case 'circuit_open':
-      case 'timeout':
-      case 'refusal':
-        return null;
       default:
-        return assertNever(terminationReason);
+        return null;
     }
   }
 
@@ -2225,10 +2093,6 @@ export class Orchestrator {
             runtime,
             mapper: mapWorkItemDecisionToStopResult,
           });
-        case 'cadence_audit':
-        case 'user_stopped':
-        case 'transient_error':
-          return Effect.succeed(null);
         default:
           return assertNever(event);
       }
@@ -2313,14 +2177,14 @@ export class Orchestrator {
       promptPreview: reason.slice(0, 100),
     });
 
-    // For user_input_required: the observer answered the question.
+    // For user_input_required: a hook answered the question.
     // Inject the answer as a USER message (simulating user response),
     // not as a new goal. This preserves the conversational flow.
     if (terminationReason === 'user_input_required') {
       if (stopResult.systemMessage) {
         context.addMessage('system', stopResult.systemMessage);
       }
-      // The observer's answer goes as a user message (like a human would respond)
+      // Hook-provided answer goes as a user message (like a human would respond)
       context.addMessage('user', reason);
       // Continue with a generic goal - the answer is now in context
       const newItem = this.createWorkItem('Continue with the provided answer', agentType);
@@ -2345,7 +2209,7 @@ export class Orchestrator {
   /**
    * Enqueue deferred work items from a hook result.
    * These are fire-and-forget work items that don't block the current decision.
-   * When bounds are specified by the observer, they override agent registry defaults.
+   * Hook-specified bounds override agent registry defaults.
    */
   private enqueueDeferredWork(stopResult: StopHookResult): void {
     const deferredWork = stopResult.deferredWork;
@@ -2490,16 +2354,6 @@ export class Orchestrator {
           logMeta: { workId },
           fallbackResponse: 'Execution stopped by user.',
         });
-      }
-
-      // --- Observer stopped (mid-agent cadence check) ---
-      if (result.terminationReason === 'observer_stopped') {
-        return this.handleObserverStopped(params);
-      }
-
-      // --- Observer stopped work item only ---
-      if (result.terminationReason === 'observer_work_item_stopped') {
-        return this.handleObserverWorkItemStopped(params);
       }
 
       // --- Continuable errors: no_action, invalid_action ---
@@ -2682,55 +2536,6 @@ export class Orchestrator {
         shouldContinue: false,
       };
     });
-  }
-
-  /**
-   * Handle observer_stopped - unique: no stopHook, success=!!response.
-   */
-  private handleObserverStopped(params: CheckTerminationParams): TerminationCheckResult {
-    const { result, workId, iteration, totalLlmCalls, totalToolCalls, now, startTime, context } = params;
-
-    this.log('info', 'Observer stopped execution via cadence check', { workId });
-    this.mergeAgentResultContext(context, workId, result);
-
-    return {
-      terminal: this.createResult({
-        success: !!result.response,
-        response: result.response || 'Execution stopped by observer.',
-        terminationReason: 'observer_stopped',
-        metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
-      }),
-      shouldContinue: false,
-    };
-  }
-
-  /**
-   * Handle observer_work_item_stopped - unique: hookQueue enqueue, no stopHook, returns continue.
-   */
-  private handleObserverWorkItemStopped(params: CheckTerminationParams): TerminationCheckResult {
-    const { result, workId, item, context } = params;
-
-    const reason = result.observerStop?.reason ?? result.response ?? 'Observer stopped this work item.';
-    this.log('info', 'Observer stopped work item', { workId, reason: reason.slice(0, 160) });
-    this.mergeAgentResultContext(context, workId, result);
-
-    this.hookQueue.enqueue({
-      type: 'observer_agent_stopped',
-      sessionKey: context.sessionKey,
-      workId,
-      reason,
-      agentType: item.agent,
-    }, {
-      workId,
-      agentType: item.agent,
-      sessionKey: context.sessionKey,
-      requestId: this.requestId,
-      objective: item.objective,
-    });
-
-    this.completedWork.set(workId, result);
-
-    return { terminal: null, shouldContinue: true };
   }
 
   /**

@@ -84,7 +84,6 @@ const EFFECT_EVENT_TYPES = new Set<EffectEventType>([
   'agent_completed',
   'memory_injected',
   'git_commit',
-  'observer_agent_stopped',
   'pre_tool_use',
   'post_tool_use',
   'post_git_commit',

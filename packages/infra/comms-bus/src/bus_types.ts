@@ -1,5 +1,5 @@
 /**
- * Bus protocol types for JSONL transport.
+ * Bus protocol types for WebSocket transport.
  */
 
 export type BusClientMessage =

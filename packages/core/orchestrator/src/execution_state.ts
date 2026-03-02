@@ -5,7 +5,7 @@
  * for cleaner parameter passing and state management.
  */
 
-import type { WorkItem } from 'work';
+import type { WorkItem } from 'types';
 import type { Agent, AgentResult } from 'agent';
 import type { RunControlMetadata } from 'types';
 

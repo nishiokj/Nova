@@ -901,7 +901,7 @@ export function createMemoryInjector(config: MemoryInjectorConfig): MemoryInject
           const initial = semanticData as unknown as { meta: { objective: string; workId: string } };
           sections.push(`## WorkItem Context (${initial.meta.workId})\n`);
           sections.push(`**Objective**: ${initial.meta.objective}\n`);
-          sections.push('*Note: This workItem has not yet been audited. Full semantic context will be available after the first cadence audit.*\n');
+          sections.push('*Note: This workItem has not yet been audited. Full semantic context will be available after the first review pass.*\n');
           hasSemantic = true;
         } else if (semanticData._state === 'failed') {
           // Failed state - note the failure

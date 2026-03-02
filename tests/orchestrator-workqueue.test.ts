@@ -11,7 +11,7 @@
  * These tests verify the core state machine logic.
  */
 
-import { createWorkItem, type WorkItem, DEFAULT_WORK_BOUNDS } from 'work/work-item.js';
+import { createWorkItem, type WorkItem, DEFAULT_WORK_BOUNDS } from 'types';
 import { ContextWindow } from 'context/context-window.js';
 import {
   DEFAULT_ORCHESTRATOR_CONFIG,
@@ -264,11 +264,11 @@ describe('Work Queue Patterns', () => {
 describe('Orchestrator Configuration', () => {
   describe('DEFAULT_ORCHESTRATOR_CONFIG', () => {
     it('has sensible max iterations', () => {
-      expect(DEFAULT_ORCHESTRATOR_CONFIG.maxIterations).toBe(50);
+      expect(DEFAULT_ORCHESTRATOR_CONFIG.maxIterations).toBe(70);
     });
 
     it('has sensible max tool calls', () => {
-      expect(DEFAULT_ORCHESTRATOR_CONFIG.maxToolCalls).toBe(200);
+      expect(DEFAULT_ORCHESTRATOR_CONFIG.maxToolCalls).toBe(250);
     });
 
     it('has sensible max duration', () => {
@@ -294,6 +294,12 @@ describe('Orchestrator Configuration', () => {
         maxIterations: 5,
         maxToolCalls: 20,
         maxDurationMs: 60_000,
+        hookTimeoutMs: 2_000,
+        compactTriggerPercent: 0.6,
+        compactResetPercent: 0.5,
+        compactMaxFileCount: 10,
+        compactTruncateTo: 1_000,
+        maxRealigns: 2,
       };
 
       const merged = { ...defaults, ...full };

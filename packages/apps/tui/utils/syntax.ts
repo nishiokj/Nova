@@ -1,33 +1,50 @@
 /**
  * Syntax Highlighting using Tree-sitter
  *
- * Leverages entity-graph's Tree-sitter parsers for code syntax highlighting
- * in the TUI. Provides ANSI-colored output for code blocks.
+ * Leverages parser APIs from the optional memory plugin for syntax
+ * highlighting in the TUI. Provides ANSI-colored output for code blocks.
  *
  * Uses the TUI theme system for consistent, themeable syntax highlighting.
  */
 
-import type { Node, Tree } from 'web-tree-sitter'
-import type { SupportedLanguage } from 'entity-graph'
 import { Chalk } from 'chalk'
 import { getColors, type ThemeColors, getCurrentThemeName } from '../theme.js'
+
+type SupportedLanguage = 'typescript' | 'tsx' | 'javascript' | 'jsx'
+
+type SyntaxNode = {
+  type: string
+  text: string
+  startIndex: number
+  endIndex: number
+  childCount: number
+  child(index: number): SyntaxNode | null
+  hasError: boolean
+}
+
+type SyntaxTree = {
+  rootNode: SyntaxNode
+}
 
 type ParserApi = {
   initParser: () => Promise<void>
   isParserInitialized: () => boolean
   languageForFile: (filePath: string) => SupportedLanguage | null
-  createParser: (language: SupportedLanguage) => { parse: (source: string) => Tree | null }
+  createParser: (language: SupportedLanguage) => { parse: (source: string) => SyntaxTree | null }
 }
 
 let parserApi: ParserApi | null = null
 let parserApiPromise: Promise<ParserApi | null> | null = null
 const syntaxHighlightingDisabled = process.env.NOVA_TUI_DISABLE_SYNTAX_HIGHLIGHT === '1'
+const memoryModuleName = process.env.NOVA_MEMORY_MODULE ?? 'memory'
+// Backward compatibility: explicit entity-graph override wins if present.
+const parserModuleName = process.env.NOVA_ENTITY_GRAPH_MODULE ?? memoryModuleName
 
 function loadParserApi(): Promise<ParserApi | null> {
   if (parserApi) return Promise.resolve(parserApi)
   if (parserApiPromise) return parserApiPromise
 
-  parserApiPromise = import('entity-graph')
+  parserApiPromise = import(parserModuleName)
     .then(async (mod) => {
       const api: ParserApi = {
         initParser: mod.initParser,
@@ -364,7 +381,7 @@ export function highlightCode(code: string | null, lang: string | undefined): st
  *
  * Collects all highlightable nodes and applies colors to build the output.
  */
-function highlightTree(tree: Tree, source: string): string {
+function highlightTree(tree: SyntaxTree, source: string): string {
   const root = tree.rootNode
 
   // Check for parse errors (still try to highlight what we can)
@@ -375,7 +392,7 @@ function highlightTree(tree: Tree, source: string): string {
   const highlights: Array<{ start: number; end: number; color: (text: string) => string }> = []
 
   // Walk the tree and collect nodes that have color mappings
-  const walk = (node: Node) => {
+  const walk = (node: SyntaxNode) => {
     const color = getColorForNode(node.type)
     if (color && node.text.length > 0) {
       highlights.push({
