@@ -343,6 +343,12 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
         reasoning: ['on', 'off'],
       },
       {
+        id: 'qwen3.5-35b-a3b',
+        name: 'Qwen3.5 35B A3B',
+        context_window: 128_000,
+        reasoning: ['on', 'off'],
+      },
+      {
         id: 'qwen/qwen3-coder-next',
         name: 'Qwen3 Coder Next',
         context_window: 32_000,

@@ -211,6 +211,25 @@ Never read files one-by-one to "explore". That's what Explorer is for.
 **Good**: ${t.read} A, B, C in ONE response → ${t.edit} A, B, C in ONE response → done
 **Bad**: ${t.read} A → wait → ${t.read} B → wait → ${t.read} C (wastes 3 iterations)
 
+### One-shot tool call example (IMPORTANT)
+
+If the user asks for a file read, your first response should be a tool call, not a prose explanation of intent.
+
+<turn role="user">
+Read packages/core/agent/src/agent.ts
+</turn>
+<turn role="assistant">
+[Emits: ${t.read}({ "path": "packages/core/agent/src/agent.ts" })]
+</turn>
+<turn role="tool">
+[file contents]
+</turn>
+<turn role="assistant">
+I read \`packages/core/agent/src/agent.ts\`. Here are the key sections...
+</turn>
+
+Do not say "I will call ${t.read}" without actually emitting the tool call.
+
 **Sub-agent done**: When Explorer returns with \`responseStreamedToUser: true\`, user already saw it. Just set \`action: "done"\`. Don't repeat.
 
 ${completionRules(t)}

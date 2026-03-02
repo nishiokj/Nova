@@ -52,6 +52,7 @@ import { DEFAULT_AGENT_BUDGET } from './types.js';
  * For a 50-iteration budget this gives 5 check-ins; for 20 iterations, 2.
  */
 const CADENCE_CHECK_INTERVAL = 10;
+const MAX_SCHEMA_REMINDER_RETRIES = 3;
 
 type AgentAction = 'done' | 'continue';
 
@@ -361,7 +362,7 @@ export class Agent {
   ): Effect.Effect<{
     messages: Array<Record<string, unknown>>;
     tools: ToolDefinition[] | undefined;
-    toolChoice: 'none' | 'auto' | undefined;
+    toolChoice: 'none' | 'auto' | 'required' | undefined;
   }> {
     return Effect.gen(this, function* () {
       const { system, taskContext } = this.buildSystemPromptComponents(workItem, cwd);
@@ -882,6 +883,8 @@ export class Agent {
       );
 
       const localReadFiles = new Set(globalContext.getReadFilesArray());
+      let consecutiveNoActionNoToolResponses = 0;
+      let forceRequiredToolChoice = false;
 
       // Auto-read target files
       if (workItem.targetPaths && workItem.targetPaths.length > 0) {
@@ -958,6 +961,11 @@ export class Agent {
       );
 
 
+      const effectiveToolChoice =
+        forceRequiredToolChoice && toolChoiceForThisCall !== 'none' && !!toolsForThisCall?.length
+          ? 'required' as const
+          : toolChoiceForThisCall;
+
       const llmStartTime = Date.now();
       const hasStructuredOutput = !!this.config.outputSchema;
 
@@ -973,7 +981,7 @@ export class Agent {
       const { response } = yield* this.streamWithResilience({
         messages: messages as unknown as Message[],
         tools: toolsForThisCall,
-        toolChoice: toolChoiceForThisCall,
+        toolChoice: effectiveToolChoice,
         responseSchema: this.config.outputSchema,
         onChunk: (chunk) => {
           if (jsonExtractor) {
@@ -1022,6 +1030,10 @@ export class Agent {
 
       const content = (response.content ?? '') as string;
       const toolCalls = response.toolCalls ?? [];
+      if (toolCalls.length > 0) {
+        consecutiveNoActionNoToolResponses = 0;
+        forceRequiredToolChoice = false;
+      }
 
       const reasoningContent = response.reasoningContent || (streamedReasoningContent ? streamedReasoningContent : undefined);
 
@@ -1121,10 +1133,14 @@ export class Agent {
       switch (resolved) {
         case 'done':
         case 'user_input':
+          consecutiveNoActionNoToolResponses = 0;
+          forceRequiredToolChoice = false;
           this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
           return;
 
         case 'continue':
+          consecutiveNoActionNoToolResponses = 0;
+          forceRequiredToolChoice = false;
           this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
           continue;
 
@@ -1148,12 +1164,32 @@ export class Agent {
 
           // Tool calls made = progress, allow implicit continue
           if (toolCalls.length > 0) {
+            consecutiveNoActionNoToolResponses = 0;
+            forceRequiredToolChoice = false;
             this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
             continue;
           }
 
           // No tool calls AND no action = inject schema reminder for structured output agents
           if (this.config.outputSchema) {
+            consecutiveNoActionNoToolResponses++;
+            const isFinalIteration = iteration === maxIterations - 1;
+            const preview = responseCandidate.trim().slice(0, 1000);
+
+            if (isFinalIteration || consecutiveNoActionNoToolResponses >= MAX_SCHEMA_REMINDER_RETRIES) {
+              result.terminationReason = 'no_action';
+              result.error = preview
+                ? `LLM produced no tool calls or valid action after ${consecutiveNoActionNoToolResponses} retries. Last response preview: ${preview}`
+                : `LLM produced empty output with no tool calls or valid action after ${consecutiveNoActionNoToolResponses} retries.`;
+              this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
+              return;
+            }
+
+            if (toolChoiceForThisCall !== 'none' && toolsForThisCall && toolsForThisCall.length > 0) {
+              forceRequiredToolChoice = true;
+              localContext.addMessage('user', this.buildRequiredToolCallReminder(toolsForThisCall), workItem.workId);
+            }
+
             const schemaReminder = this.buildSchemaReminder(this.resolveOutputSchemaId());
             localContext.addMessage('user', schemaReminder, workItem.workId);
             this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
@@ -2379,6 +2415,17 @@ export class Agent {
     }
 
     return `[SCHEMA REMINDER] You must set action, goalStateReached, and awaitingUserInput every turn. action is loop control ("done"|"continue"). goalStateReached is objective completion (true only when objective is complete). awaitingUserInput is blocking state (true only when you need user input). Valid combos: continue/false/false; done/true/false; done/false/true.`;
+  }
+
+  private buildRequiredToolCallReminder(tools: ToolDefinition[]): string {
+    const toolNames = tools
+      .map((tool) => tool.name)
+      .filter((name) => typeof name === 'string' && name.trim().length > 0)
+      .slice(0, 12);
+
+    const available = toolNames.length > 0 ? toolNames.join(', ') : 'available tools';
+
+    return `[TOOL CALL REQUIRED] Emit at least one actual tool call in your next assistant message. Do not only describe intended actions. If the task is to read a file, call Read with {"path":"..."} immediately. Available tools: ${available}.`;
   }
 
   private parseBoolean(value: unknown, fallback: boolean): boolean {

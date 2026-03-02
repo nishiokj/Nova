@@ -85,19 +85,30 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     );
   }
 
-  formatTools(tools: ToolDefinition[]): Record<string, unknown>[] {
-    return tools.map((t) => ({
-      type: 'function',
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: {
-          type: 'object',
-          properties: t.parameters.properties,
-          required: t.parameters.required,
+  formatTools(
+    tools: ToolDefinition[],
+    options?: { model?: string; displayProvider?: string }
+  ): Record<string, unknown>[] {
+    const useQwenSkin = this.shouldUseQwenToolSkin(options?.model, options?.displayProvider);
+
+    return tools.map((t) => {
+      const qwenHint = useQwenSkin
+        ? `\nQwen tool call syntax: <function=${t.name}>{\"arg\":\"value\"}</function>`
+        : '';
+
+      return {
+        type: 'function',
+        function: {
+          name: t.name,
+          description: `${t.description}${qwenHint}`,
+          parameters: {
+            type: 'object',
+            properties: t.parameters.properties,
+            required: t.parameters.required,
+          },
         },
-      },
-    }));
+      };
+    });
   }
 
   formatMessages(messages: any[], systemPrompt?: string): Array<Record<string, unknown>> {
@@ -286,6 +297,11 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
     }
 
+    if (params.tools && params.tools.length > 0 && this.shouldUseQwenToolSkin(resolved.model, resolved.displayProvider)) {
+      const qwenHint = this.buildQwenToolSkinInstruction(params.tools);
+      systemPrompt = systemPrompt ? `${systemPrompt}\n\n${qwenHint}` : qwenHint;
+    }
+
     const body: Record<string, unknown> = {
       model: resolved.model,
       messages: this.formatMessages(params.messages, systemPrompt),
@@ -307,7 +323,10 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     }
 
     if (params.tools && params.tools.length > 0) {
-      body.tools = this.formatTools(params.tools);
+      body.tools = this.formatTools(params.tools, {
+        model: resolved.model,
+        displayProvider: resolved.displayProvider,
+      });
     }
     if (params.toolChoice) {
       body.tool_choice = params.toolChoice;
@@ -418,7 +437,8 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     };
 
     const choice = data.choices[0];
-    const content = this.normalizeContent(choice?.message?.content);
+    const rawMessageContent = choice?.message?.content as unknown;
+    const content = this.normalizeContent(rawMessageContent);
     const reasoningContent = choice?.message?.reasoning_content ?? undefined;
 
     logger.debug('OpenAI-compat response received', {
@@ -448,14 +468,31 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       }
     }
 
+    if (toolCalls.length === 0) {
+      toolCalls.push(...this.parseToolCallsFromMessageContent(rawMessageContent));
+    }
+
+    if (toolCalls.length === 0 && content) {
+      toolCalls.push(...this.parseToolCallsFromContent(content));
+      if (toolCalls.length > 0) {
+        logger.debug('Recovered tool calls from text content', {
+          model: resolved.model,
+          recoveredCount: toolCalls.length,
+        });
+      }
+    }
+
     const stopReasonMap: Record<string, StopReason> = {
       stop: 'end_turn',
       length: 'max_tokens',
       tool_calls: 'tool_use',
       content_filter: 'end_turn',
     };
-    const stopReason: StopReason =
+    let stopReason: StopReason =
       stopReasonMap[choice?.finish_reason ?? 'stop'] ?? 'end_turn';
+    if (toolCalls.length > 0 && stopReason === 'end_turn') {
+      stopReason = 'tool_use';
+    }
 
     const usage: TokenUsage = {
       promptTokens: data.usage?.prompt_tokens ?? 0,
@@ -499,6 +536,11 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${schemaHint}` : schemaHint;
     }
 
+    if (params.tools && params.tools.length > 0 && this.shouldUseQwenToolSkin(resolved.model, resolved.displayProvider)) {
+      const qwenHint = this.buildQwenToolSkinInstruction(params.tools);
+      systemPrompt = systemPrompt ? `${systemPrompt}\n\n${qwenHint}` : qwenHint;
+    }
+
     // Profile message formatting
     profiler.begin('llm:format:messages', 'llm');
     const formattedMessages = this.formatMessages(params.messages, systemPrompt);
@@ -532,7 +574,10 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     }
 
     if (params.tools && params.tools.length > 0) {
-      body.tools = this.formatTools(params.tools);
+      body.tools = this.formatTools(params.tools, {
+        model: resolved.model,
+        displayProvider: resolved.displayProvider,
+      });
     }
     if (params.toolChoice) {
       body.tool_choice = params.toolChoice;
@@ -796,6 +841,20 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       }
     }
 
+    if (toolCalls.length === 0 && fullContent) {
+      toolCalls.push(...this.parseToolCallsFromContent(fullContent));
+      if (toolCalls.length > 0) {
+        logger.debug('Recovered streamed tool calls from text content', {
+          model: resolved.model,
+          recoveredCount: toolCalls.length,
+        });
+      }
+    }
+
+    if (toolCalls.length > 0 && stopReason === 'end_turn') {
+      stopReason = 'tool_use';
+    }
+
     return {
       content: fullContent,
       stopReason,
@@ -810,6 +869,287 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
   // ============================================
   // HELPERS
   // ============================================
+
+  private shouldUseQwenToolSkin(model?: string, displayProvider?: string): boolean {
+    const modelLower = (model ?? '').toLowerCase();
+    const providerLower = (displayProvider ?? '').toLowerCase();
+    if (!modelLower.includes('qwen')) return false;
+    return providerLower.includes('lmstudio') || providerLower.includes('vllm') || providerLower.includes('openai-compat');
+  }
+
+  private buildQwenToolSkinInstruction(tools: ToolDefinition[]): string {
+    const exampleTool = tools.find((t) => t && typeof t.name === 'string' && t.name.length > 0);
+    const toolName = exampleTool?.name ?? 'Read';
+    const argName = exampleTool?.parameters?.required?.[0]
+      ?? Object.keys(exampleTool?.parameters?.properties ?? {})[0]
+      ?? 'path';
+    const argValue = argName.toLowerCase().includes('path')
+      ? 'packages/core/agent/src/agent.ts'
+      : 'value';
+
+    return [
+      'Qwen tool-calling skin:',
+      'When you need a tool, emit a tool-call block directly.',
+      'Use this exact shape:',
+      '<tool_call>',
+      `<function=${toolName}>{\"${argName}\":\"${argValue}\"}</function>`,
+      '</tool_call>',
+      'Do not output only prose about calling tools.',
+    ].join('\n');
+  }
+
+  private parseToolCallsFromMessageContent(content: unknown): ToolCall[] {
+    if (!content) return [];
+
+    if (typeof content === 'string') {
+      return this.parseToolCallsFromContent(content);
+    }
+
+    if (!Array.isArray(content)) return [];
+
+    const calls: ToolCall[] = [];
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      const record = block as Record<string, unknown>;
+      const type = typeof record.type === 'string' ? record.type : '';
+
+      if (type === 'tool_call' || type === 'function_call') {
+        const name = typeof record.name === 'string'
+          ? record.name
+          : (record.function && typeof record.function === 'object' && typeof (record.function as Record<string, unknown>).name === 'string'
+            ? ((record.function as Record<string, unknown>).name as string)
+            : '');
+        if (!name) continue;
+
+        const callId = typeof record.id === 'string' ? record.id : `parsed_structured_tool_call_${calls.length}`;
+        const argsRaw = record.arguments
+          ?? (record.function && typeof record.function === 'object' ? (record.function as Record<string, unknown>).arguments : undefined)
+          ?? record.input;
+        const args = this.normalizeToolArguments(argsRaw);
+        this.pushUniqueToolCall(calls, { id: callId, name, arguments: args });
+        continue;
+      }
+
+      if (typeof record.text === 'string') {
+        for (const call of this.parseToolCallsFromContent(record.text)) {
+          this.pushUniqueToolCall(calls, call);
+        }
+        continue;
+      }
+
+      if (typeof record.content === 'string') {
+        for (const call of this.parseToolCallsFromContent(record.content)) {
+          this.pushUniqueToolCall(calls, call);
+        }
+      }
+    }
+
+    return calls;
+  }
+
+  private parseToolCallsFromContent(content: string): ToolCall[] {
+    if (!content || content.trim().length === 0) return [];
+
+    const calls: ToolCall[] = [];
+    const tagRegex = /<(tool_call|function_call)>\s*([\s\S]*?)\s*<\/\1>/gi;
+    let match: RegExpExecArray | null;
+    let index = 0;
+
+    while ((match = tagRegex.exec(content)) !== null) {
+      const bodyCalls = this.parseJsonToolCallsFromBody(match[2]);
+      if (bodyCalls.length > 0) {
+        for (const bodyCall of bodyCalls) {
+          this.pushUniqueToolCall(calls, {
+            id: `parsed_tool_call_${index++}`,
+            name: bodyCall.name,
+            arguments: bodyCall.arguments,
+          });
+        }
+        continue;
+      }
+
+      const parsed = this.parseTextToolCallBody(match[2]);
+      if (!parsed) continue;
+      this.pushUniqueToolCall(calls, {
+        id: `parsed_tool_call_${index++}`,
+        name: parsed.name,
+        arguments: parsed.arguments,
+      });
+    }
+
+    for (const fnCall of this.parseFunctionTagToolCalls(content)) {
+      this.pushUniqueToolCall(calls, {
+        id: `parsed_tool_call_${index++}`,
+        name: fnCall.name,
+        arguments: fnCall.arguments,
+      });
+    }
+
+    return calls;
+  }
+
+  private parseJsonToolCallsFromBody(body: string): Array<{ name: string; arguments: Record<string, unknown> }> {
+    const trimmed = this.stripMarkdownFence(body.trim());
+    if (!trimmed) return [];
+
+    const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+    const single = this.tryParseJsonObject(trimmed);
+    if (single) {
+      const parsed = this.parseJsonToolCall(single);
+      if (parsed) calls.push(parsed);
+      return calls;
+    }
+
+    const lines = trimmed
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    for (const line of lines) {
+      const parsedLine = this.tryParseJsonObject(line);
+      if (!parsedLine) continue;
+      const parsed = this.parseJsonToolCall(parsedLine);
+      if (parsed) calls.push(parsed);
+    }
+
+    return calls;
+  }
+
+  private parseFunctionTagToolCalls(content: string): Array<{ name: string; arguments: Record<string, unknown> }> {
+    const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+    const fnRegex = /<function=([A-Za-z0-9_.\-\/]+)>\s*([\s\S]*?)\s*<\/function>/gi;
+    let match: RegExpExecArray | null;
+
+    while ((match = fnRegex.exec(content)) !== null) {
+      const name = (match[1] ?? '').trim();
+      if (!name) continue;
+      const args = this.normalizeToolArguments(match[2]);
+      calls.push({ name, arguments: args });
+    }
+
+    return calls;
+  }
+
+  private parseTextToolCallBody(body: string): { name: string; arguments: Record<string, unknown> } | null {
+    const trimmed = this.stripMarkdownFence(body.trim());
+    if (!trimmed) return null;
+
+    const asJson = this.tryParseJsonObject(trimmed);
+    if (asJson) {
+      const fromJson = this.parseJsonToolCall(asJson);
+      if (fromJson) return fromJson;
+    }
+
+    const firstArgIndex = trimmed.search(/<arg_key>/i);
+    const name = (firstArgIndex >= 0 ? trimmed.slice(0, firstArgIndex) : '').trim();
+    if (!name) return null;
+
+    const args: Record<string, unknown> = {};
+    const argRegex = /<arg_key>\s*([\s\S]*?)\s*<\/arg_key>\s*<arg_value>\s*([\s\S]*?)\s*<\/arg_value>/gi;
+    let foundArg = false;
+    let argMatch: RegExpExecArray | null;
+    while ((argMatch = argRegex.exec(trimmed)) !== null) {
+      const key = argMatch[1]?.trim();
+      if (!key) continue;
+      args[key] = this.parseLooseValue(argMatch[2] ?? '');
+      foundArg = true;
+    }
+
+    return foundArg ? { name, arguments: args } : { name, arguments: {} };
+  }
+
+  private parseJsonToolCall(candidate: Record<string, unknown>): { name: string; arguments: Record<string, unknown> } | null {
+    const directName = typeof candidate.name === 'string' ? candidate.name.trim() : '';
+    if (directName) {
+      return {
+        name: directName,
+        arguments: this.normalizeToolArguments(candidate.arguments ?? candidate.input ?? candidate.args),
+      };
+    }
+
+    const directTool = typeof candidate.tool === 'string' ? candidate.tool.trim() : '';
+    if (directTool) {
+      return {
+        name: directTool,
+        arguments: this.normalizeToolArguments(candidate.arguments ?? candidate.input ?? candidate.args),
+      };
+    }
+
+    const fn = candidate.function;
+    if (fn && typeof fn === 'object') {
+      const fnRecord = fn as Record<string, unknown>;
+      const functionName = typeof fnRecord.name === 'string' ? fnRecord.name.trim() : '';
+      if (!functionName) return null;
+      return {
+        name: functionName,
+        arguments: this.normalizeToolArguments(fnRecord.arguments ?? fnRecord.input ?? fnRecord.args),
+      };
+    }
+
+    if (typeof fn === 'string' && fn.trim().length > 0) {
+      return {
+        name: fn.trim(),
+        arguments: this.normalizeToolArguments(candidate.arguments ?? candidate.input ?? candidate.params),
+      };
+    }
+
+    return null;
+  }
+
+  private pushUniqueToolCall(calls: ToolCall[], call: ToolCall): void {
+    const serializedArgs = JSON.stringify(call.arguments ?? {});
+    const exists = calls.some(
+      (candidate) =>
+        candidate.name === call.name &&
+        JSON.stringify(candidate.arguments ?? {}) === serializedArgs
+    );
+    if (!exists) {
+      calls.push(call);
+    }
+  }
+
+  private normalizeToolArguments(raw: unknown): Record<string, unknown> {
+    if (!raw) return {};
+    if (typeof raw === 'string') {
+      const parsed = this.tryParseJsonObject(this.stripMarkdownFence(raw.trim()));
+      return parsed ?? {};
+    }
+    if (typeof raw === 'object' && !Array.isArray(raw)) {
+      return raw as Record<string, unknown>;
+    }
+    return {};
+  }
+
+  private parseLooseValue(raw: string): unknown {
+    const trimmed = this.stripMarkdownFence(raw.trim());
+    if (!trimmed) return '';
+    if (trimmed === 'true') return true;
+    if (trimmed === 'false') return false;
+    if (trimmed === 'null') return null;
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      const asNum = Number(trimmed);
+      if (!Number.isNaN(asNum)) return asNum;
+    }
+    const parsed = this.tryParseJsonObject(trimmed);
+    if (parsed) return parsed;
+    return trimmed;
+  }
+
+  private stripMarkdownFence(value: string): string {
+    if (!value.startsWith('```')) return value;
+    const withoutStart = value.replace(/^```[a-zA-Z0-9_-]*\s*/, '');
+    return withoutStart.replace(/\s*```$/, '');
+  }
+
+  private tryParseJsonObject(value: string): Record<string, unknown> | null {
+    try {
+      const parsed = JSON.parse(value);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      return parsed as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
 
   private normalizeContent(content: unknown): string {
     if (typeof content === 'string') return content;
