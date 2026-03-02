@@ -195,6 +195,69 @@ def _resolve_workspace(task_payload: Any) -> str:
     return "/workspace"
 
 
+def _resolve_image_hidden_command(task_payload: Any) -> str:
+    hidden_root = Path(os.environ.get("BENCH_HIDDEN_ROOT", "/opt/bench/hidden"))
+    workspace = _resolve_workspace(task_payload)
+    candidates = [
+        (hidden_root / "runner.py", hidden_root / "cases.jsonl"),
+        (hidden_root / _task_id(task_payload) / "runner.py", hidden_root / _task_id(task_payload) / "cases.jsonl"),
+    ]
+    for runner_path, cases_path in candidates:
+        if runner_path.exists() and cases_path.exists():
+            return f"python3 {runner_path} {workspace} {cases_path}"
+    return ""
+
+
+def _summarize_case_payload(payload: Any) -> dict[str, Any] | None:
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        return None
+
+    total = 0
+    passed = 0
+    for row in payload:
+        if not isinstance(row, dict) or "passed" not in row:
+            continue
+        total += 1
+        if bool(row.get("passed")):
+            passed += 1
+    if total == 0:
+        return None
+    return {
+        "cases_total": float(total),
+        "cases_passed": float(passed),
+        "all_passed": passed == total,
+    }
+
+
+def _extract_case_stats(stdout: str) -> dict[str, Any] | None:
+    stripped = stdout.strip()
+    if not stripped:
+        return None
+
+    # Common format: a single JSON array/object payload.
+    try:
+        decoded = json.loads(stripped)
+        summary = _summarize_case_payload(decoded)
+        if summary is not None:
+            return summary
+    except Exception:
+        pass
+
+    # Fallback: one JSON object per line.
+    decoded_rows: list[Any] = []
+    for line in stdout.splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        try:
+            decoded_rows.append(json.loads(candidate))
+        except Exception:
+            continue
+    return _summarize_case_payload(decoded_rows)
+
+
 def _run_command(command: str, cwd: Path, timeout_seconds: int) -> dict[str, Any]:
     started = time.monotonic()
     try:
@@ -213,6 +276,7 @@ def _run_command(command: str, cwd: Path, timeout_seconds: int) -> dict[str, Any
             "duration_ms": int((time.monotonic() - started) * 1000),
             "stdout_tail": _truncate_log((completed.stdout or "").strip()),
             "stderr_tail": _truncate_log((completed.stderr or "").strip()),
+            "case_stats": _extract_case_stats(completed.stdout or ""),
         }
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
@@ -224,6 +288,7 @@ def _run_command(command: str, cwd: Path, timeout_seconds: int) -> dict[str, Any
             "duration_ms": int((time.monotonic() - started) * 1000),
             "stdout_tail": _truncate_log(stdout.strip()),
             "stderr_tail": _truncate_log(stderr.strip()),
+            "case_stats": None,
         }
     except Exception as exc:  # pragma: no cover
         return {
@@ -233,6 +298,7 @@ def _run_command(command: str, cwd: Path, timeout_seconds: int) -> dict[str, Any
             "duration_ms": int((time.monotonic() - started) * 1000),
             "stdout_tail": "",
             "stderr_tail": str(exc),
+            "case_stats": None,
         }
 
 
@@ -244,17 +310,22 @@ def _score_workspace(task_payload: Any) -> dict[str, Any]:
         if isinstance(task_payload, dict) and isinstance(task_payload.get("public_command"), str)
         else ""
     )
-    hidden_command = (
+    payload_hidden_command = (
         task_payload.get("hidden_command", "").strip()
         if isinstance(task_payload, dict) and isinstance(task_payload.get("hidden_command"), str)
         else ""
     )
+    image_hidden_command = _resolve_image_hidden_command(task_payload)
+    hidden_command = image_hidden_command
+    hidden_command_source = "image_hidden_bundle" if image_hidden_command else "missing"
 
     diagnostics: dict[str, Any] = {
         "workspace": str(workspace_path),
         "timeout_seconds": timeout_seconds,
         "public_command": public_command or None,
         "hidden_command": hidden_command or None,
+        "hidden_command_source": hidden_command_source,
+        "payload_hidden_command_present": bool(payload_hidden_command),
     }
 
     if not workspace_path.exists():
@@ -290,10 +361,17 @@ def _score_workspace(task_payload: Any) -> dict[str, Any]:
     public_passed = 1.0 if (public_command and public_pass) else 0.0
 
     hidden_total = 1.0 if hidden_command else 0.0
-    hidden_pass = (
-        hidden_result is not None and not hidden_result["timed_out"] and hidden_result["exit_code"] == 0
-    ) if hidden_command else False
-    hidden_passed = 1.0 if hidden_pass else 0.0
+    hidden_passed = 0.0
+    hidden_pass = False
+    if hidden_command and hidden_result is not None and not hidden_result["timed_out"]:
+        hidden_case_stats = hidden_result.get("case_stats")
+        if isinstance(hidden_case_stats, dict):
+            hidden_total = float(hidden_case_stats.get("cases_total", 0.0))
+            hidden_passed = float(hidden_case_stats.get("cases_passed", 0.0))
+            hidden_pass = bool(hidden_case_stats.get("all_passed", False)) and hidden_result["exit_code"] == 0
+        else:
+            hidden_pass = hidden_result["exit_code"] == 0
+            hidden_passed = 1.0 if hidden_pass else 0.0
 
     if not hidden_command:
         return {
@@ -306,11 +384,11 @@ def _score_workspace(task_payload: Any) -> dict[str, Any]:
                 "public_cases_total": public_total,
                 "public_cases_passed": public_passed,
             },
-            "failure_label": "hidden_command_missing",
+            "failure_label": "hidden_bundle_missing",
             "diagnostics": diagnostics,
             "error": {
-                "error_type": "hidden_command_missing",
-                "message": "task payload is missing hidden_command",
+                "error_type": "hidden_bundle_missing",
+                "message": "hidden bundle is missing from image (expected runner.py + cases.jsonl)",
             },
         }
 

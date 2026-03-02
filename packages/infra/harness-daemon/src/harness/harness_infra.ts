@@ -102,70 +102,72 @@ export function createToolRegistry(config: FullHarnessConfig, workingDir: string
     toolRegistry.register(toolOptions);
   }
 
-  const skillsDir = config.skills.directory
-    ? path.resolve(workingDir, config.skills.directory)
-    : path.resolve(workingDir, '.agent/skills');
+  if (config.skills.enabled) {
+    const skillsDir = config.skills.directory
+      ? path.resolve(workingDir, config.skills.directory)
+      : path.resolve(workingDir, '.agent/skills');
 
-  toolRegistry.register({
-    name: 'Skill',
-    description: 'Load and execute a skill by name. Use skill="list" to see available skills. Skills provide specialized instructions for complex tasks like code review, design, etc.',
-    parameters: {
-      type: 'object',
-      properties: {
-        skill: {
-          type: 'string',
-          description: 'Skill name to execute (e.g., "design-fork"), or "list" to see available skills',
+    toolRegistry.register({
+      name: 'Skill',
+      description: 'Load and execute a skill by name. Use skill="list" to see available skills. Skills provide specialized instructions for complex tasks like code review, design, etc.',
+      parameters: {
+        type: 'object',
+        properties: {
+          skill: {
+            type: 'string',
+            description: 'Skill name to execute (e.g., "design-fork"), or "list" to see available skills',
+          },
+          args: {
+            type: 'string',
+            description: 'Optional arguments to pass to the skill',
+          },
         },
-        args: {
-          type: 'string',
-          description: 'Optional arguments to pass to the skill',
-        },
+        required: ['skill'],
       },
       required: ['skill'],
-    },
-    required: ['skill'],
-    executor: (args) => Effect.sync(() => {
-      const skillName = String(args.skill ?? '').trim();
-      if (!skillName) {
-        return errorResult('Skill', 'Skill name is required', 0);
-      }
-
-      if (skillName === 'list') {
-        const skills = loadSkillDefinitions(skillsDir);
-        if (skills.length === 0) {
-          return successResult('Skill', 'No skills available. Add skills to .agent/skills/<name>/SKILL.md', 0);
+      executor: (args) => Effect.sync(() => {
+        const skillName = String(args.skill ?? '').trim();
+        if (!skillName) {
+          return errorResult('Skill', 'Skill name is required', 0);
         }
-        const list = skills
-          .filter(s => s.enabled)
-          .map(s => `- **${s.name}**: ${s.description}`)
-          .join('\n');
-        return successResult('Skill', `Available skills:\n\n${list}`, 0);
-      }
 
-      const skill = getSkillDefinition(skillsDir, skillName);
-      if (!skill) {
-        const available = loadSkillDefinitions(skillsDir)
-          .filter(s => s.enabled)
-          .map(s => s.name);
-        return errorResult('Skill', `Skill '${skillName}' not found. Available: ${available.join(', ') || 'none'}`, 0);
-      }
+        if (skillName === 'list') {
+          const skills = loadSkillDefinitions(skillsDir);
+          if (skills.length === 0) {
+            return successResult('Skill', 'No skills available. Add skills to .agent/skills/<name>/SKILL.md', 0);
+          }
+          const list = skills
+            .filter(s => s.enabled)
+            .map(s => `- **${s.name}**: ${s.description}`)
+            .join('\n');
+          return successResult('Skill', `Available skills:\n\n${list}`, 0);
+        }
 
-      if (!skill.enabled) {
-        return errorResult('Skill', `Skill '${skillName}' is disabled`, 0);
-      }
+        const skill = getSkillDefinition(skillsDir, skillName);
+        if (!skill) {
+          const available = loadSkillDefinitions(skillsDir)
+            .filter(s => s.enabled)
+            .map(s => s.name);
+          return errorResult('Skill', `Skill '${skillName}' not found. Available: ${available.join(', ') || 'none'}`, 0);
+        }
 
-      const skillArgs = typeof args.args === 'string' ? args.args.trim() : '';
-      const instructions = skillArgs
-        ? `${skill.instructions}\n\n## Arguments\n${skillArgs}`
-        : skill.instructions;
+        if (!skill.enabled) {
+          return errorResult('Skill', `Skill '${skillName}' is disabled`, 0);
+        }
 
-      return successResult('Skill', instructions, 0);
-    }),
-    enabled: true,
-    readOnly: true,
-    parallelizable: false,
-    costHint: 'low',
-  });
+        const skillArgs = typeof args.args === 'string' ? args.args.trim() : '';
+        const instructions = skillArgs
+          ? `${skill.instructions}\n\n## Arguments\n${skillArgs}`
+          : skill.instructions;
+
+        return successResult('Skill', instructions, 0);
+      }),
+      enabled: true,
+      readOnly: true,
+      parallelizable: false,
+      costHint: 'low',
+    });
+  }
 
   return toolRegistry;
 }

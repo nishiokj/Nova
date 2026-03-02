@@ -252,10 +252,12 @@ function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentC
     'Bash',
     'WebFetch',
     'WebSearch',
-    'Skill',
     'PromptUser',
     'ExpandConversation',
   ]);
+  if (config.skills.enabled) {
+    builtinTools.add('Skill');
+  }
   const registeredAgentTypes = new Set(agentConfigs.map(c => c.type));
   for (const agentConf of agentConfigs) {
     // Filter out self-references to prevent recursive agent calls
@@ -1038,13 +1040,15 @@ export class AgentHarness {
       }
     }
 
-    const shouldInitTracePersistence = this.config.memory.enabled || !!process.env.MEMORY_DAEMON_URL;
-    const needsMemoryPlugin = this.config.memory.enabled || shouldInitTracePersistence || this.config.entityGraph.enabled;
+    const shouldInitMemoryInjector = this.config.memory.enabled;
+    const shouldInitTracePersistence = shouldInitMemoryInjector || !!process.env.MEMORY_DAEMON_URL;
+    const shouldInitEntityGraph = this.config.entityGraph.enabled;
+    const shouldLoadMemoryPlugin = shouldInitTracePersistence || shouldInitEntityGraph;
     const memoryModuleName = process.env.NOVA_MEMORY_MODULE ?? 'memory';
     const memoryInstallHint = `bun add ${memoryModuleName}`;
 
     let memoryPluginModule: MemoryPluginModule | null = null;
-    if (needsMemoryPlugin) {
+    if (shouldLoadMemoryPlugin) {
       try {
         memoryPluginModule = await this.importOptionalModule<MemoryPluginModule>(
           memoryModuleName,
@@ -1058,59 +1062,80 @@ export class AgentHarness {
       }
     }
 
-    if (this.config.memory.enabled && !this.memoryInjector) {
-      try {
-        const createMemoryInjector = memoryPluginModule?.createMemoryInjector;
-        if (createMemoryInjector) {
-          this.memoryInjector = createMemoryInjector({
-            baseUrl: this.config.memory.baseUrl,
-            timeout: this.config.memory.timeoutMs,
-          });
-          this.logger.info('MemoryInjector initialized', {
-            baseUrl: this.config.memory.baseUrl,
-            timeoutMs: this.config.memory.timeoutMs,
-            module: memoryModuleName,
-          });
-        } else {
-          this.logger.warning('Memory integration requested but memory plugin is missing createMemoryInjector export', {
-            module: memoryModuleName,
-            installHint: memoryInstallHint,
+    if (shouldInitMemoryInjector && !this.memoryInjector) {
+      if (!memoryPluginModule) {
+        this.logger.warning('Memory integration requested but memory plugin module is unavailable', {
+          module: memoryModuleName,
+          installHint: memoryInstallHint,
+        });
+      } else {
+        try {
+          const createMemoryInjector = memoryPluginModule.createMemoryInjector;
+          if (createMemoryInjector) {
+            this.memoryInjector = createMemoryInjector({
+              baseUrl: this.config.memory.baseUrl,
+              timeout: this.config.memory.timeoutMs,
+            });
+            this.logger.info('MemoryInjector initialized', {
+              baseUrl: this.config.memory.baseUrl,
+              timeoutMs: this.config.memory.timeoutMs,
+              module: memoryModuleName,
+            });
+          } else {
+            this.logger.warning('Memory integration requested but memory plugin is missing createMemoryInjector export', {
+              module: memoryModuleName,
+              installHint: memoryInstallHint,
+            });
+          }
+        } catch (error) {
+          this.logger.warning('Failed to initialize MemoryInjector', {
+            error: getErrorMessage(error),
           });
         }
-      } catch (error) {
-        this.logger.warning('Failed to initialize MemoryInjector', {
-          error: getErrorMessage(error),
-        });
       }
     }
 
     if (shouldInitTracePersistence && !this.memoryClient) {
-      const memoryDaemonUrl = process.env.MEMORY_DAEMON_URL || 'http://127.0.0.1:3001';
-      try {
-        const SyncClient = memoryPluginModule?.SyncClient;
-        if (SyncClient) {
-          this.memoryClient = new SyncClient(memoryDaemonUrl);
-          this.logger.info('Memory client initialized for traces', {
-            url: memoryDaemonUrl,
-            module: memoryModuleName,
-          });
-        } else {
-          this.logger.info('Trace persistence disabled: memory plugin is missing SyncClient export', {
-            module: memoryModuleName,
-            installHint: memoryInstallHint,
+      if (!memoryPluginModule) {
+        this.logger.info('Trace persistence disabled: memory plugin module is unavailable', {
+          module: memoryModuleName,
+          installHint: memoryInstallHint,
+        });
+      } else {
+        const memoryDaemonUrl = process.env.MEMORY_DAEMON_URL || this.config.memory.baseUrl;
+        try {
+          const SyncClient = memoryPluginModule.SyncClient;
+          if (SyncClient) {
+            this.memoryClient = new SyncClient(memoryDaemonUrl);
+            this.logger.info('Memory client initialized for traces', {
+              url: memoryDaemonUrl,
+              module: memoryModuleName,
+            });
+          } else {
+            this.logger.info('Trace persistence disabled: memory plugin is missing SyncClient export', {
+              module: memoryModuleName,
+              installHint: memoryInstallHint,
+            });
+          }
+        } catch (error) {
+          this.logger.warning('Failed to initialize memory client (traces will not be persisted)', {
+            error: getErrorMessage(error),
           });
         }
-      } catch (error) {
-        this.logger.warning('Failed to initialize memory client (traces will not be persisted)', {
-          error: getErrorMessage(error),
-        });
       }
     }
 
     // Initialize EntityGraph if enabled
-    if (this.config.entityGraph.enabled && !this.entityGraph) {
+    if (shouldInitEntityGraph && !this.entityGraph) {
+      if (!memoryPluginModule) {
+        this.logger.warning('EntityGraph requested but memory plugin module is unavailable', {
+          module: memoryModuleName,
+          installHint: memoryInstallHint,
+        });
+        return true;
+      }
       try {
-        const createEntityGraph = memoryPluginModule?.createEntityGraph;
+        const createEntityGraph = memoryPluginModule.createEntityGraph;
         if (!createEntityGraph) {
           this.logger.warning('EntityGraph requested but memory plugin is missing createEntityGraph export', {
             module: memoryModuleName,
