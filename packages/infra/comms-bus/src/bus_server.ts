@@ -5,6 +5,7 @@
  * the need for intermediate event forwarding layers.
  */
 
+import http from 'http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { profiler } from 'shared';
 import type { BusClientMessage, BusServerMessage, BusMessage } from './bus_types.js';
@@ -44,7 +45,8 @@ interface ConnectionState {
 const GLOBAL_EVENTS_CHANNEL = 'events:all';
 
 export class BusServer {
-  private server: WebSocketServer | null = null;
+  private httpServer: http.Server | null = null;
+  private wss: WebSocketServer | null = null;
   private nextId = 1;
   private connections = new Map<string, ConnectionState>();
   private readonly host: string;
@@ -143,24 +145,31 @@ export class BusServer {
   }
 
   async start(): Promise<{ host: string; port: number }> {
-    if (this.server) {
+    if (this.wss) {
       return this.getAddress();
     }
 
-    this.server = new WebSocketServer({ host: this.host, port: this.port });
+    this.httpServer = http.createServer();
+    this.wss = new WebSocketServer({ noServer: true });
 
-    await new Promise<void>((resolve, reject) => {
-      this.server!.once('error', reject);
-      this.server!.once('listening', () => resolve());
+    this.httpServer.on('upgrade', (req, socket, head) => {
+      this.wss!.handleUpgrade(req, socket, head, (ws) => {
+        this.wss!.emit('connection', ws);
+      });
     });
 
-    this.server.on('connection', (ws) => this.handleConnection(ws));
+    await new Promise<void>((resolve, reject) => {
+      this.httpServer!.once('error', reject);
+      this.httpServer!.listen(this.port, this.host, () => resolve());
+    });
+
+    this.wss.on('connection', (ws) => this.handleConnection(ws));
 
     return this.getAddress();
   }
 
   async stop(): Promise<void> {
-    if (!this.server) return;
+    if (!this.wss) return;
 
     // Clean up all EventBus subscriptions
     for (const unsubscribe of this.runSubscriptions.values()) {
@@ -174,10 +183,16 @@ export class BusServer {
     }
     this.connections.clear();
 
-    await new Promise<void>((resolve) => {
-      this.server!.close(() => resolve());
-    });
-    this.server = null;
+    this.wss.close();
+    this.wss = null;
+
+    if (this.httpServer) {
+      this.httpServer.closeAllConnections();
+      await new Promise<void>((resolve) => {
+        this.httpServer!.close(() => resolve());
+      });
+      this.httpServer = null;
+    }
   }
 
   publish(channel: string, payload: unknown): void {
@@ -195,11 +210,11 @@ export class BusServer {
   }
 
   getAddress(): { host: string; port: number } {
-    if (!this.server) {
+    if (!this.httpServer) {
       return { host: this.host, port: this.port };
     }
 
-    const address = this.server.address();
+    const address = this.httpServer.address();
     if (!address || typeof address === 'string') {
       return { host: this.host, port: this.port };
     }

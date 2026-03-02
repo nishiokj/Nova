@@ -60,15 +60,14 @@ The distributed `nova` package is core-only by default.
 
 Plugin-backed capabilities are opt-in and should be installed only when needed.
 
-- Memory integration: requires `memory-injector` and `agent-memory` when `memory.enabled` is true.
-- Entity graph integration: requires `entity-graph` and `postgres` when `entity_graph.enabled` is true.
+- Memory + entity graph integration: requires `memory` when `memory.enabled` and/or `entity_graph.enabled` are enabled.
 - Semantic compiler workflows: require `semantic-compiler` when those workflows are enabled.
+- The `memory` plugin bundles and wires `agent-memory`, `memory-injector`, `entity-graph`, and `postgres`.
 
-Plugin install examples (when using separately-published plugin packages):
+Plugin install examples:
 
 ```bash
-bun add agent-memory memory-injector
-bun add entity-graph postgres
+bun add memory
 bun add semantic-compiler
 ```
 
@@ -101,7 +100,7 @@ bun run packages/apps/launcher/index.ts run \
 - `packages/core`: runtime primitives, orchestrator, tools, agent core
 - `packages/infra`: daemon, GraphD, event bus, harness client
 - `packages/apps`: launcher, TUI, dashboard apps
-- `packages/plugins`: optional subsystems (memory, entity graph, semantic compiler)
+- `packages/plugins`: optional subsystems (`memory` bundle, semantic compiler, and internal plugin modules)
 - `config`: default runtime/app config
 - `docs`: architecture, specs, runbooks, setup notes
 - `tests`: integration and unit tests
@@ -110,8 +109,9 @@ bun run packages/apps/launcher/index.ts run \
 
 - `bun run start:tui` expects the daemon to already be running.
 - Provider keys are managed via `/providers` in the TUI or `--provider-env` for headless runs.
-- `memory.enabled` is `false` by default in `config/defaults.json`; enabling it without plugin packages only disables memory features (non-fatal).
-- `agent-memory` and `entity-graph` features require their plugin packages and backing services (for example `DATABASE_URL` for plugin DB paths).
+- `memory.enabled` is `false` by default in `config/defaults.json`; enabling it without the `memory` plugin only disables memory features (non-fatal).
+- Entity graph requires `entity_graph.database_url` (or `ENTITY_GRAPH_DATABASE_URL` / `DATABASE_URL`) when `entity_graph.enabled` is true.
+- Memory retrieval and trace persistence require the memory daemon URL (`memory.base_url` / `MEMORY_DAEMON_URL`) and its backing database/service.
 - Ports default to `127.0.0.1:9555` for the daemon event bus; override via `EVENT_BUS_HOST`/`EVENT_BUS_PORT`.
 
 ## Deep Dives

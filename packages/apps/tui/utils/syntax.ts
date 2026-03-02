@@ -1,8 +1,8 @@
 /**
  * Syntax Highlighting using Tree-sitter
  *
- * Leverages entity-graph's Tree-sitter parsers for code syntax highlighting
- * in the TUI. Provides ANSI-colored output for code blocks.
+ * Leverages parser APIs from the optional memory plugin for syntax
+ * highlighting in the TUI. Provides ANSI-colored output for code blocks.
  *
  * Uses the TUI theme system for consistent, themeable syntax highlighting.
  */
@@ -36,13 +36,15 @@ type ParserApi = {
 let parserApi: ParserApi | null = null
 let parserApiPromise: Promise<ParserApi | null> | null = null
 const syntaxHighlightingDisabled = process.env.NOVA_TUI_DISABLE_SYNTAX_HIGHLIGHT === '1'
-const entityGraphModuleName = process.env.NOVA_ENTITY_GRAPH_MODULE ?? ['entity', 'graph'].join('-')
+const memoryModuleName = process.env.NOVA_MEMORY_MODULE ?? 'memory'
+// Backward compatibility: explicit entity-graph override wins if present.
+const parserModuleName = process.env.NOVA_ENTITY_GRAPH_MODULE ?? memoryModuleName
 
 function loadParserApi(): Promise<ParserApi | null> {
   if (parserApi) return Promise.resolve(parserApi)
   if (parserApiPromise) return parserApiPromise
 
-  parserApiPromise = import(entityGraphModuleName)
+  parserApiPromise = import(parserModuleName)
     .then(async (mod) => {
       const api: ParserApi = {
         initParser: mod.initParser,

@@ -29,6 +29,7 @@ Runtime infrastructure, transport, and service wiring:
 
 Plugin modules and optional bolt-on subsystems:
 
+- `memory` (primary install surface for memory + entity graph features)
 - `agent-memory`
 - `entity-graph`
 - `memory-injector`
