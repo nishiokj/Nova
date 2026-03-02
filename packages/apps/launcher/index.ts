@@ -62,9 +62,10 @@ const getHarnessCliPath = () => {
 
 const getTuiPath = () => {
   const root = getProjectRoot();
-  // Always use source - bun bundler corrupts UTF-8 box-drawing characters
   const srcPath = path.join(root, 'packages', 'apps', 'tui', 'index.tsx');
-  return srcPath;
+  const distPath = path.join(root, 'packages', 'apps', 'tui', 'dist', 'index.js');
+  // Prefer source in workspace development, fallback to dist when running from packaged artifacts.
+  return existsSync(srcPath) ? srcPath : distPath;
 };
 
 const PROJECT_CONFIG_NAME = path.join('config', 'harness_config.json');
