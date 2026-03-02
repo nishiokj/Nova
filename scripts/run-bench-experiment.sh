@@ -35,7 +35,12 @@ Commands:
 Options:
   --json       Machine-readable output (describe, run)
   --limit N    Override task limit for run
+  --max-concurrency N Override design.max_concurrency for run
+  --timeout-ms N Override runtime.policy.timeout_ms for run
   --run-id ID  Explicit run ID for scoreboard
+  --interval N Refresh interval for scoreboard (default 2s)
+  --once       Print one scoreboard snapshot and exit
+  --native     Use lab-cli's built-in scoreboard renderer
 EOF
     exit 0
 }
@@ -45,6 +50,19 @@ ensure_cli() {
         echo "lab-cli not found at $LAB_CLI"
         echo "Build: cd $EXPERIMENTS_ROOT/rust && cargo build -p lab-cli --release"
         exit 1
+    fi
+}
+
+ensure_docker() {
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "docker CLI not found in PATH."
+        echo "Install Docker Desktop (or Docker Engine) and retry."
+        return 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        echo "Docker daemon is not reachable."
+        echo "Start Docker Desktop (or your Docker daemon) and retry."
+        return 1
     fi
 }
 
@@ -102,7 +120,7 @@ build_linux_artifact_copy() {
         -v "$source_dir:/input:ro" \
         -v "$target_dir:/output" \
         oven/bun:1-debian \
-        /bin/sh -lc "set -euo pipefail
+        /bin/sh -lc "set -eu
 work=\$(mktemp -d)
 tar --warning=no-unknown-keyword -xzf \"/input/$source_name\" -C \"\$work\"
 cp /usr/local/bin/bun \"\$work/bin/bun\"
@@ -133,6 +151,7 @@ ensure_linux_artifact_copy() {
     fi
 
     if $rebuild; then
+        ensure_docker || return 1
         echo "Building Linux-compatible artifact copy: $target_artifact" >&2
         build_linux_artifact_copy "$source_artifact" "$target_artifact" >&2
     fi
@@ -143,6 +162,7 @@ ensure_linux_artifact_copy() {
 cmd_preflight() {
     local experiment_file="${1:-$EXPERIMENT}"
     local errors=0
+    local dataset_abs=""
 
     echo "=== Preflight checks ==="
 
@@ -194,7 +214,6 @@ cmd_preflight() {
     local dataset_path
     dataset_path=$(grep '^\s*path:' "$experiment_file" 2>/dev/null | head -1 | sed 's/.*path:\s*//' | xargs)
     if [ -n "$dataset_path" ]; then
-        local dataset_abs
         if [[ "$dataset_path" != /* ]]; then
             dataset_abs="$(dirname "$experiment_file")/$dataset_path"
         else
@@ -212,13 +231,14 @@ cmd_preflight() {
 
     # 5. Per-task Docker images (check every image referenced in JSONL)
     if [ -f "$dataset_abs" ]; then
-        local missing_images=0
-        while IFS= read -r image_name; do
-            if ! docker image inspect "$image_name" &>/dev/null; then
-                echo "  [FAIL] Docker image missing: $image_name"
-                missing_images=$((missing_images + 1))
-            fi
-        done < <(python3 -c "
+        if ensure_docker >/dev/null; then
+            local missing_images=0
+            while IFS= read -r image_name; do
+                if ! docker image inspect "$image_name" &>/dev/null; then
+                    echo "  [FAIL] Docker image missing: $image_name"
+                    missing_images=$((missing_images + 1))
+                fi
+            done < <(python3 -c "
 import json, sys
 for line in open('$dataset_abs'):
     row = json.loads(line)
@@ -226,11 +246,16 @@ for line in open('$dataset_abs'):
     if img: print(img)
 " 2>/dev/null | sort -u)
 
-        if [ "$missing_images" -eq 0 ]; then
-            echo "  [ok] all task Docker images present"
+            if [ "$missing_images" -eq 0 ]; then
+                echo "  [ok] all task Docker images present"
+            else
+                echo "  [FAIL] $missing_images task image(s) missing — run: $0 build-task-images"
+                errors=$((errors + missing_images))
+            fi
         else
-            echo "  [FAIL] $missing_images task image(s) missing — run: $0 build-task-images"
-            errors=$((errors + missing_images))
+            echo "  [FAIL] docker daemon unavailable; cannot verify task images"
+            echo "         start Docker and re-run preflight"
+            errors=$((errors + 1))
         fi
     fi
 
@@ -238,6 +263,7 @@ for line in open('$dataset_abs'):
     local missing_env=0
     while IFS= read -r var; do
         var=$(echo "$var" | xargs | sed 's/^- //')
+        [ -n "$var" ] || continue
         if [ -z "${!var:-}" ]; then
             echo "  [FAIL] env var not set: $var"
             missing_env=$((missing_env + 1))
@@ -253,6 +279,7 @@ for line in open('$dataset_abs'):
     # 7. File staging sources
     while IFS= read -r staged_file; do
         staged_file=$(echo "$staged_file" | xargs)
+        [ -n "$staged_file" ] || continue
         local required
         required=$(grep -A2 "$staged_file" "$experiment_file" | grep 'required:' | awk '{print $2}')
         if [ -f "$staged_file" ]; then
@@ -270,6 +297,10 @@ for line in open('$dataset_abs'):
         script=$(echo "$script" | xargs | sed 's/^- //')
         [[ "$script" == /* ]] || continue
         [[ "$script" == *.py || "$script" == *.sh ]] || continue
+        if [[ "$script" == /agentlab/* || "$script" == /opt/* || "$script" == /workspace/* ]]; then
+            echo "  [ok] adapter script (container path): $script"
+            continue
+        fi
         if [ -f "$script" ]; then
             echo "  [ok] adapter script: $script"
         else
@@ -318,6 +349,8 @@ cmd_repair_artifact() {
 }
 
 cmd_build_image() {
+    ensure_docker || exit 1
+
     if [ ! -f "$REPO_SNAPSHOT" ]; then
         echo "Repo snapshot not found: $REPO_SNAPSHOT"
         exit 1
@@ -335,13 +368,17 @@ cmd_build_image() {
 }
 
 cmd_build_task_images() {
+    ensure_docker || exit 1
+
     # Verify base image exists
     if ! docker image inspect "$BENCH_IMAGE" &>/dev/null; then
         echo "Base image $BENCH_IMAGE not found. Run: $0 build-image"
         exit 1
     fi
 
+    shopt -s nullglob
     local tasks=("$TASKS_DIR"/TASK*)
+    shopt -u nullglob
     if [ ${#tasks[@]} -eq 0 ]; then
         echo "No tasks found in $TASKS_DIR"
         exit 1
@@ -424,10 +461,35 @@ cmd_describe() {
 
 cmd_run() {
     local limit=""
+    local max_concurrency=""
+    local timeout_ms=""
     local passthrough=()
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --limit) limit="$2"; shift 2 ;;
+            --limit)
+                if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                    echo "--limit requires a value"
+                    exit 1
+                fi
+                limit="$2"
+                shift 2
+                ;;
+            --max-concurrency)
+                if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                    echo "--max-concurrency requires a value"
+                    exit 1
+                fi
+                max_concurrency="$2"
+                shift 2
+                ;;
+            --timeout-ms)
+                if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                    echo "--timeout-ms requires a value"
+                    exit 1
+                fi
+                timeout_ms="$2"
+                shift 2
+                ;;
             *) passthrough+=("$1"); shift ;;
         esac
     done
@@ -457,6 +519,26 @@ cmd_run() {
         mv "${run_experiment}.next" "$run_experiment"
     fi
 
+    if [ -n "$max_concurrency" ]; then
+        if [ -z "$tmp_experiment" ]; then
+            tmp_experiment=$(mktemp "${EXPERIMENT%.yaml}.tmp_XXXXXX.yaml")
+            cp "$EXPERIMENT" "$tmp_experiment"
+            run_experiment="$tmp_experiment"
+        fi
+        sed -E "s/^  max_concurrency: [0-9]+$/  max_concurrency: $max_concurrency/" "$run_experiment" >"${run_experiment}.next"
+        mv "${run_experiment}.next" "$run_experiment"
+    fi
+
+    if [ -n "$timeout_ms" ]; then
+        if [ -z "$tmp_experiment" ]; then
+            tmp_experiment=$(mktemp "${EXPERIMENT%.yaml}.tmp_XXXXXX.yaml")
+            cp "$EXPERIMENT" "$tmp_experiment"
+            run_experiment="$tmp_experiment"
+        fi
+        sed -E "s/^    timeout_ms: [0-9]+$/    timeout_ms: $timeout_ms/" "$run_experiment" >"${run_experiment}.next"
+        mv "${run_experiment}.next" "$run_experiment"
+    fi
+
     if [ -n "$tmp_experiment" ]; then
         trap "rm -f '$tmp_experiment'" EXIT
     fi
@@ -468,14 +550,35 @@ cmd_run() {
 }
 
 cmd_scoreboard() {
-    ensure_cli
     cd "$PROJECT_ROOT"
 
-    local run_id="" interval=2
+    local run_id="" interval=2 once=false native=false
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --run-id) run_id="$2"; shift 2 ;;
-            --interval) interval="$2"; shift 2 ;;
+            --run-id)
+                if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                    echo "--run-id requires a value"
+                    exit 1
+                fi
+                run_id="$2"
+                shift 2
+                ;;
+            --interval)
+                if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                    echo "--interval requires a value"
+                    exit 1
+                fi
+                interval="$2"
+                shift 2
+                ;;
+            --once)
+                once=true
+                shift
+                ;;
+            --native)
+                native=true
+                shift
+                ;;
             *) echo "Unknown: $1"; exit 1 ;;
         esac
     done
@@ -489,7 +592,138 @@ cmd_scoreboard() {
         echo "Using latest run: $run_id"
     fi
 
-    "$LAB_CLI" scoreboard "$run_id" --interval-seconds "$interval"
+    if $native; then
+        ensure_cli
+        "$LAB_CLI" scoreboard "$run_id" --interval-seconds "$interval"
+        return 0
+    fi
+
+    local run_dir="$PROJECT_ROOT/.lab/runs/$run_id"
+    if [ ! -d "$run_dir" ]; then
+        echo "Run directory not found: $run_dir"
+        exit 1
+    fi
+
+    while true; do
+        local now status updated active_count total_slots completed_slots next_idx
+        now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        status=$(jq -r '.status // "unknown"' "$run_dir/runtime/run_control.json" 2>/dev/null || echo "unknown")
+        updated=$(jq -r '.updated_at // "unknown"' "$run_dir/runtime/run_control.json" 2>/dev/null || echo "unknown")
+        active_count=$(jq -r '(.active_trials | length) // 0' "$run_dir/runtime/run_control.json" 2>/dev/null || echo "0")
+        total_slots=$(jq -r '.total_slots // 0' "$run_dir/runtime/schedule_progress.json" 2>/dev/null || echo "0")
+        completed_slots=$(jq -r '(.completed_slots | length) // 0' "$run_dir/runtime/schedule_progress.json" 2>/dev/null || echo "0")
+        next_idx=$(jq -r '.next_schedule_index // 0' "$run_dir/runtime/schedule_progress.json" 2>/dev/null || echo "0")
+
+        echo "=== Bench Scoreboard ==="
+        echo "snapshot_utc: $now"
+        echo "run_id: $run_id"
+        echo "status: $status"
+        echo "updated_at: $updated"
+        echo "progress: committed=$completed_slots / total=$total_slots (next_schedule_idx=$next_idx)"
+        echo "active_trials: $active_count"
+        if [ "$active_count" -gt 0 ]; then
+            local stuck_with_result
+            stuck_with_result=$(jq -r '.active_trials | keys[]?' "$run_dir/runtime/run_control.json" 2>/dev/null                 | while IFS= read -r tid; do
+                    [ -n "$tid" ] || continue
+                    if [ -f "$run_dir/trials/$tid/result.json" ] || [ -f "$run_dir/trials/$tid/out/result.json" ]; then
+                        echo "$tid"
+                    fi
+                  done | wc -l | xargs)
+            if [ "$stuck_with_result" -gt 0 ]; then
+                echo "active_trials_with_result_files: $stuck_with_result (possible local-worker finalization issue)"
+            fi
+        fi
+
+        echo ""
+        echo "Variant Summary:"
+        if [ -s "$run_dir/facts/trials.jsonl" ]; then
+            jq -r '.variant_id + "\t" + (.outcome // "unknown")' "$run_dir/facts/trials.jsonl" 2>/dev/null \
+                | awk -F'\t' '
+                    {
+                        v=$1; o=$2;
+                        total[v] += 1;
+                        if (o == "success") success[v] += 1;
+                        if (o == "error" || o == "failed" || o == "aborted") failed[v] += 1;
+                    }
+                    END {
+                        if (length(total) == 0) {
+                            print "  (no committed trial rows yet)";
+                        } else {
+                            for (v in total) {
+                                s = success[v] + 0;
+                                f = failed[v] + 0;
+                                printf "  %s: total=%d success=%d failed=%d\n", v, total[v], s, f;
+                            }
+                        }
+                    }'
+        else
+            echo "  (no committed trial rows yet)"
+        fi
+
+        echo ""
+        echo "Recent Trial Errors:"
+        local found_error=false
+        local trial_meta trial_dir trial_state_file result_file status_outcome result_outcome variant task msg
+        while IFS= read -r trial_meta; do
+            [ -n "$trial_meta" ] || continue
+            trial_dir="$(dirname "$trial_meta")"
+            trial_state_file="$trial_dir/trial_state.json"
+            result_file="$trial_dir/result.json"
+            [ -f "$result_file" ] || result_file="$trial_dir/out/result.json"
+
+            status_outcome="unknown"
+            if [ -f "$trial_state_file" ]; then
+                status_outcome=$(jq -r '.status // "unknown"' "$trial_state_file" 2>/dev/null || echo "unknown")
+            fi
+
+            result_outcome=""
+            if [ -f "$result_file" ]; then
+                result_outcome=$(jq -r '.outcome // ""' "$result_file" 2>/dev/null || echo "")
+            fi
+
+            # Surface errors even when trial_state is stale "running" but result.json already says error.
+            if [ "$status_outcome" != "failed" ] && [ "$result_outcome" != "error" ] && [ "$result_outcome" != "failed" ] && [ "$result_outcome" != "aborted" ]; then
+                continue
+            fi
+
+            variant=$(jq -r '.ids.variant_id // "unknown_variant"' "$trial_meta" 2>/dev/null || echo "unknown_variant")
+            task=$(jq -r '.ids.task_id // "unknown_task"' "$trial_meta" 2>/dev/null || echo "unknown_task")
+
+            if [ -f "$result_file" ]; then
+                msg=$(jq -r '.error.message // .message // empty' "$result_file" 2>/dev/null || true)
+            else
+                msg=""
+            fi
+
+            if [ -z "$msg" ]; then
+                local stderr_file
+                stderr_file="$trial_dir/harness_stderr.log"
+                if [ -f "$stderr_file" ]; then
+                    msg=$(tail -n 40 "$stderr_file" | rg -m1 'Fatal error|error:|Exception|Traceback|Codex API error|No configuration file found' -N || true)
+                fi
+            fi
+
+            if [ -z "$msg" ]; then
+                msg="no explicit error message found"
+            fi
+
+            echo "  $(basename "$trial_dir"): variant=$variant task=$task status=$status_outcome result=$result_outcome -> $msg"
+            found_error=true
+        done < <(ls -1 "$run_dir"/trials/trial_*/trial_metadata.json 2>/dev/null | sort -V | tail -n 12)
+
+        if ! $found_error; then
+            echo "  (no trial errors detected yet)"
+        fi
+
+        if $once || [[ "$status" == "completed" || "$status" == "failed" || "$status" == "preflight_failed" ]]; then
+            break
+        fi
+
+        echo ""
+        echo "refreshing in ${interval}s (Ctrl-C to stop)"
+        sleep "$interval"
+        echo ""
+    done
 }
 
 case "${1:-help}" in
