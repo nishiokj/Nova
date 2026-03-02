@@ -2,7 +2,7 @@
 
 ## Overview
 
-The harness-daemon is a **dumb agent execution engine** that exposes a TCP/JSONL interface. It knows nothing about HTTP, webhooks, or specific integrations like Telegram. External systems connect via `harness-client`.
+The harness-daemon is a **dumb agent execution engine** that exposes a WebSocket interface. It knows nothing about HTTP, webhooks, or specific integrations like Telegram. External systems connect via `harness-client`.
 
 ## Architecture Diagram
 
@@ -20,7 +20,7 @@ The harness-daemon is a **dumb agent execution engine** that exposes a TCP/JSONL
 │  │   Creates + Starts:                                                  │   │
 │  │   ┌──────────────┐   ┌────────────────┐   ┌──────────────────┐      │   │
 │  │   │ AgentHarness │   │ BusServer      │   │ BridgeGateway    │      │   │
-│  │   │              │   │ (TCP:9555)     │   │                  │      │   │
+│  │   │              │   │ (WS:9555)      │   │                  │      │   │
 │  │   └──────┬───────┘   └───────┬────────┘   └────────┬─────────┘      │   │
 │  │          │                   │                     │                │   │
 │  └──────────┼───────────────────┼─────────────────────┼────────────────┘   │
@@ -29,7 +29,7 @@ The harness-daemon is a **dumb agent execution engine** that exposes a TCP/JSONL
 │  ┌──────────────────┐   ┌─────────────────┐   ┌─────────────────────────┐  │
 │  │ AgentHarness     │   │ BusServer       │   │ BridgeGateway           │  │
 │  │                  │   │                 │   │                         │  │
-│  │ • Orchestrator   │   │ • TCP/JSONL     │   │ Commands:               │  │
+│  │ • Orchestrator   │   │ • WebSocket     │   │ Commands:               │  │
 │  │ • Agent          │◄──┤ • Pub/Sub       │◄──┤ • init                  │  │
 │  │ • ToolRegistry   │   │ • Channels      │   │ • send_text             │  │
 │  │ • ContextWindow  │   │                 │   │ • user_prompt_response  │  │
@@ -46,7 +46,7 @@ The harness-daemon is a **dumb agent execution engine** that exposes a TCP/JSONL
 │                                  │                                         │
 └──────────────────────────────────┼─────────────────────────────────────────┘
                                    │
-                                   │ TCP:9555 (JSONL)
+                                   │ WS:9555
                                    │
                     ┌──────────────┴──────────────┐
                     │                             │
@@ -63,7 +63,7 @@ The harness-daemon is a **dumb agent execution engine** that exposes a TCP/JSONL
 ### HarnessDaemon (`daemon.ts`)
 Entry point that creates and orchestrates:
 - `AgentHarness` - the agent execution engine
-- `BusServer` - TCP/JSONL pub/sub server
+- `BusServer` - WebSocket pub/sub server
 - `BridgeGateway` - command router
 
 ### AgentHarness (`harness.ts`)
@@ -78,7 +78,7 @@ The actual agent execution engine:
 - `PermissionChecker` - tool permission validation
 
 ### BusServer (`comms-bus` package)
-TCP/JSONL server on port 9555:
+WebSocket server on port 9555:
 - Accepts client connections
 - Pub/sub channel system (`session:*`, `run:*`, `bridge:cmd`)
 - Forwards commands to BridgeGateway
@@ -101,7 +101,7 @@ Routes commands from the bus to the harness:
 
 ## Protocol
 
-All communication uses JSONL over TCP. Clients send commands, subscribe to channels, and receive events.
+All communication uses framed JSON messages over WebSocket. Clients send commands, subscribe to channels, and receive events.
 
 ### Example Flow
 
@@ -139,7 +139,7 @@ Telegram Webhook
 │                  │
 │ • HttpServer     │  ◄── receives webhooks
 │ • TelegramConnector  ◄── formats messages
-│ • HarnessClient ─┼──► TCP:9555 ──► harness-daemon
+│ • HarnessClient ─┼──► WS:9555 ──► harness-daemon
 │                  │
 └──────────────────┘
 ```

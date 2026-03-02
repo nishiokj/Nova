@@ -68,7 +68,7 @@ function continueResult(overrides: Record<string, unknown> = {}): AgentResult {
     filesRead: [],
     invalidatedPaths: [],
     toolErrors: [],
-    terminationReason: 'cadence_audit', // falls through all terminal checks
+    terminationReason: 'user_input_required', // falls through terminal checks when needsUserInput=false
     needsUserInput: false,
     isRefusal: false,
     localContext: new ContextWindow('local', 10_000),
@@ -332,7 +332,7 @@ describe('Orchestrator', () => {
     it('goal via structuredOutput.goalStateReached', async () => {
       spySequence({
         ...continueResult(),
-        terminationReason: 'cadence_audit', // NOT via terminationReason
+        terminationReason: 'user_input_required', // NOT via terminationReason
         structuredOutput: { goalStateReached: true },
       } as unknown as AgentResult);
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
@@ -413,7 +413,7 @@ describe('Orchestrator', () => {
       spySequence(continueResult({
         success: false,
         error: 'Generic failure',
-        terminationReason: 'cadence_audit', // not a specific check
+        terminationReason: 'user_input_required', // not a specific check
         structuredOutput: { action: 'done' },
       }));
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
@@ -428,7 +428,7 @@ describe('Orchestrator', () => {
         if (call === 1) return Effect.succeed(continueResult({
           success: false,
           error: 'Recoverable',
-          terminationReason: 'cadence_audit',
+          terminationReason: 'user_input_required',
           structuredOutput: { action: 'continue' },
         }));
         return Effect.succeed(goalResult());
@@ -438,14 +438,6 @@ describe('Orchestrator', () => {
       expect(r.terminationReason).toBe('goal_state_reached');
     });
 
-    it('observer_stopped terminates', async () => {
-      spySequence(continueResult({
-        terminationReason: 'observer_stopped',
-        response: 'Observer says stop',
-      }));
-      const r = await run(createOrch(), new ContextWindow('t', 200_000));
-      expect(r.terminationReason).toBe('observer_stopped');
-    });
   });
 
   // ── Metrics ────────────────────────────────────────────────
@@ -600,22 +592,6 @@ describe('Orchestrator', () => {
   // ── Work queue ─────────────────────────────────────────────
 
   describe('work queue', () => {
-    it('observer_work_item_stopped stores result and exits via completedWork fallback', async () => {
-      // observer_work_item_stopped: merges context, enqueues hook event, stores in completedWork,
-      // removes from inProgress. Loop eventually exits. Post-loop fallback uses completedWork.
-      spy(() => Effect.succeed(continueResult({
-        terminationReason: 'observer_work_item_stopped',
-        observerStop: { reason: 'stopped' },
-      })));
-      const r = await run(createOrch(), new ContextWindow('t', 200_000));
-      // Post-loop path uses initialResult.success from the stored result.
-      // continueResult has success:true, so the post-loop result inherits that.
-      expect(r.success).toBe(true);
-      // terminationReason is mapped from the stored result (observer_work_item_stopped
-      // doesn't exist in the TerminationReason enum, so fallback to 'agent_error')
-      expect(r.terminationReason).toBeDefined();
-    });
-
     it('work queue exhausted without goal → agent_error fallback', async () => {
       // When the main item errors out and no goal was ever reached,
       // the post-loop fallback creates an agent_error.
@@ -857,7 +833,6 @@ describe('Orchestrator', () => {
         compactResetPercent: 0.45,
         compactMaxFileCount: 20,
         compactTruncateTo: 5000,
-        minObserverIterationGap: 5,
         maxRealigns: 3,
       });
     });

@@ -15,8 +15,7 @@ export type TerminationReason =
   | 'no_action'
   | 'refusal'
   | 'observer_stopped'
-  | 'observer_work_item_stopped'
-  | 'cadence_audit';
+  | 'observer_work_item_stopped';
 
 export type TerminationCategory =
   | 'success'
@@ -48,7 +47,6 @@ export function getTerminationCategory(reason: TerminationReason): TerminationCa
       return 'agent_error';
     case 'observer_stopped':
     case 'observer_work_item_stopped':
-    case 'cadence_audit':
       return 'observer';
     default:
       return assertNever(reason, `Unknown termination reason: ${reason}`);
@@ -63,7 +61,6 @@ export function isBlockable(reason: TerminationReason): boolean {
     case 'max_duration_exceeded':
     case 'user_input_required':
     case 'agent_error':
-    case 'cadence_audit':
       return true;
     case 'user_stopped':
     case 'rate_limit':
@@ -98,7 +95,6 @@ export function isRetryable(reason: TerminationReason): boolean {
     case 'refusal':
     case 'observer_stopped':
     case 'observer_work_item_stopped':
-    case 'cadence_audit':
       return false;
     default:
       return assertNever(reason);
@@ -121,5 +117,4 @@ export const ALL_TERMINATION_REASONS: readonly TerminationReason[] = [
   'refusal',
   'observer_stopped',
   'observer_work_item_stopped',
-  'cadence_audit',
 ] as const;

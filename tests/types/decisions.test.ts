@@ -10,9 +10,6 @@ import {
   isBoundsRealign,
   isBoundsSplit,
   isPromptAnswer,
-  isCadenceContinue,
-  isCadenceStop,
-  isCadenceStopWorkItem,
   isErrorRetry,
   isWorkItemAccepted,
   serializeDecision,
@@ -20,7 +17,6 @@ import {
   type QualityGateDecision,
   type BoundsDecision,
   type PromptAnswerDecision,
-  type CadenceDecision,
   type AgentErrorDecision,
   type WorkItemCompletedDecision,
 } from 'orchestrator';
@@ -100,38 +96,6 @@ describe('PromptAnswerDecision guards', () => {
   it('isPromptAnswer rejects defer', () => {
     const d: PromptAnswerDecision = { action: 'defer', to: 'user' };
     expect(isPromptAnswer(d)).toBe(false);
-  });
-});
-
-// =========================================================================
-// CadenceDecision
-// =========================================================================
-
-describe('CadenceDecision guards', () => {
-  it('isCadenceContinue identifies continue', () => {
-    const d: CadenceDecision = { action: 'continue' };
-    expect(isCadenceContinue(d)).toBe(true);
-    expect(isCadenceStop(d)).toBe(false);
-    expect(isCadenceStopWorkItem(d)).toBe(false);
-  });
-
-  it('isCadenceStop identifies stop', () => {
-    const d: CadenceDecision = { action: 'stop', reason: 'stuck' };
-    expect(isCadenceStop(d)).toBe(true);
-    expect(isCadenceContinue(d)).toBe(false);
-  });
-
-  it('isCadenceStopWorkItem identifies stop_work_item', () => {
-    const d: CadenceDecision = { action: 'stop_work_item', reason: 'no progress' };
-    expect(isCadenceStopWorkItem(d)).toBe(true);
-    expect(isCadenceStop(d)).toBe(false);
-  });
-
-  it('no guard matches inject_guidance', () => {
-    const d: CadenceDecision = { action: 'inject_guidance', message: 'try another approach' };
-    expect(isCadenceContinue(d)).toBe(false);
-    expect(isCadenceStop(d)).toBe(false);
-    expect(isCadenceStopWorkItem(d)).toBe(false);
   });
 });
 
@@ -264,23 +228,6 @@ describe('summarizeDecision', () => {
   it('summarizes defer', () => {
     const summary = summarizeDecision({ action: 'defer', to: 'user' } as PromptAnswerDecision);
     expect(summary).toBe('Deferring to user');
-  });
-
-  // CadenceDecision variants
-  it('summarizes continue', () => {
-    expect(summarizeDecision({ action: 'continue' } as CadenceDecision)).toBe('Continuing');
-  });
-
-  it('summarizes inject_guidance', () => {
-    expect(summarizeDecision({ action: 'inject_guidance', message: 'refocus' } as CadenceDecision)).toBe('Injecting guidance');
-  });
-
-  it('summarizes stop', () => {
-    expect(summarizeDecision({ action: 'stop', reason: 'stuck' } as CadenceDecision)).toBe('Stopping: stuck');
-  });
-
-  it('summarizes stop_work_item', () => {
-    expect(summarizeDecision({ action: 'stop_work_item', reason: 'no progress' } as CadenceDecision)).toBe('Stopping work item: no progress');
   });
 
   // AgentErrorDecision variants

@@ -82,7 +82,6 @@ export const DEFAULT_POLICIES: Record<string, HookPolicy> = {
   quality_gate: failClosed(),
   bounds_exceeded: retryThenDegrade(2, 1000, 'default'),
   prompt_answer: escalate('user'),
-  cadence_audit: fireAndForget(),
   agent_error: retryThenAbort(1, 500),
   handoff_approval: failClosed(),
   work_item_completed: retryThenDegrade(1, 500, 'default'),

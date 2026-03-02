@@ -36,28 +36,6 @@ export function isPromptAnswer(d: PromptAnswerDecision): d is { action: 'answer'
   return d.action === 'answer';
 }
 
-export type CadenceDecision =
-  | { action: 'continue' }
-  | { action: 'inject_guidance'; message: string }
-  | { action: 'realign'; guidance: string; newWork?: WorkItemSpec }
-  | { action: 'split'; workItems: WorkItemSpec[] }
-  | { action: 'stop'; reason: string }
-  | { action: 'stop_work_item'; reason: string };
-
-export function isCadenceContinue(d: CadenceDecision): d is { action: 'continue' } {
-  return d.action === 'continue';
-}
-
-export function isCadenceStop(d: CadenceDecision): d is { action: 'stop'; reason: string } {
-  return d.action === 'stop';
-}
-
-export function isCadenceStopWorkItem(
-  d: CadenceDecision
-): d is { action: 'stop_work_item'; reason: string } {
-  return d.action === 'stop_work_item';
-}
-
 export type AgentErrorDecision =
   | { action: 'retry'; guidance: string }
   | { action: 'abort'; reason: string }
@@ -81,7 +59,6 @@ export type AnyDecision =
   | QualityGateDecision
   | BoundsDecision
   | PromptAnswerDecision
-  | CadenceDecision
   | AgentErrorDecision
   | WorkItemCompletedDecision;
 
@@ -107,10 +84,6 @@ export function summarizeDecision(decision: AnyDecision): string {
       case 'answer': return `Answering with confidence ${(decision as PromptAnswerDecision & { action: 'answer' }).confidence}`;
       case 'escalate': return `Escalating to ${(decision as { to: string }).to}`;
       case 'defer': return `Deferring to ${(decision as { to: string }).to}`;
-      case 'continue': return 'Continuing';
-      case 'inject_guidance': return 'Injecting guidance';
-      case 'stop': return `Stopping: ${(decision as { reason: string }).reason}`;
-      case 'stop_work_item': return `Stopping work item: ${(decision as { reason: string }).reason}`;
       case 'retry': return 'Retrying with guidance';
       case 'accept': return 'Work item accepted';
     }

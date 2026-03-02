@@ -3,7 +3,6 @@ import type {
   QualityGateDecision,
   BoundsDecision,
   PromptAnswerDecision,
-  CadenceDecision,
   AgentErrorDecision,
   WorkItemCompletedDecision,
 } from './decisions.js';
@@ -14,7 +13,6 @@ export interface EventDecisionMap {
   goal_state_reached: QualityGateDecision;
   bounds_exceeded: BoundsDecision;
   user_input_required: PromptAnswerDecision;
-  cadence_audit: CadenceDecision;
   agent_error: AgentErrorDecision;
   work_item_completed: WorkItemCompletedDecision;
   user_stopped: never;
@@ -42,7 +40,6 @@ export function requiresDecision(eventType: ControlEventType): eventType is Deci
     case 'goal_state_reached':
     case 'bounds_exceeded':
     case 'user_input_required':
-    case 'cadence_audit':
     case 'agent_error':
     case 'work_item_completed':
       return true;

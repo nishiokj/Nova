@@ -1,5 +1,5 @@
 /**
- * HarnessClient - Shared TCP JSONL client for the harness bridge bus.
+ * HarnessClient - Shared WebSocket client for the harness bridge bus.
  *
  * Provides the common bus communication layer used by TUI, Telegram, and other clients.
  */

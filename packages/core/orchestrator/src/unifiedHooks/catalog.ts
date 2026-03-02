@@ -122,13 +122,6 @@ const effectCatalog: readonly UnifiedHookCatalogEntry[] = [
   },
   {
     mode: 'effect',
-    event: 'observer_agent_stopped',
-    allowedScopes: ['orchestrator', 'harness'],
-    stateControl: false,
-    description: 'Side-effect event fired when observer stops a work item.',
-  },
-  {
-    mode: 'effect',
     event: 'pre_tool_use',
     allowedScopes: ['agent', 'harness'],
     stateControl: false,

@@ -92,3 +92,6 @@ harness_manifest.json
 
 .venv_duckdb
 .venv*
+
+.config/*
+scripts/*

@@ -11,7 +11,6 @@ export const WATCHER_TRIGGER_VALUES = [
   'goal_state_reached',
   'work_item_completed',
   'scope_collision',
-  'cadence_audit',
   'handoff_approval',
 ] as const;
 
@@ -43,7 +42,6 @@ export const VALID_WATCHER_ACTIONS_BY_TRIGGER = {
   agent_error: ['realign', 'allow'],
   goal_state_reached: ['quality_gate', 'split', 'create_work_item'],
   work_item_completed: ['quality_gate', 'split', 'create_work_item'],
-  cadence_audit: ['allow', 'realign', 'split', 'create_work_item', 'stop_work_item'],
   session_init: [],
   scope_collision: ['allow', 'realign'],
   handoff_approval: ['allow', 'realign'],

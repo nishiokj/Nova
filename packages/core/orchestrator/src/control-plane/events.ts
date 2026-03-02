@@ -57,15 +57,6 @@ export interface UserInputRequiredEvent extends ControlEventBase {
   };
 }
 
-export interface CadenceAuditEvent extends ControlEventBase {
-  type: 'cadence_audit';
-  elapsedMs: number;
-  toolCallsSinceLastAudit: number;
-  metrics: ExecutionMetrics;
-  recentActivity: string;
-  workIds?: string[];
-}
-
 export interface AgentErrorEvent extends ControlEventBase {
   type: 'agent_error';
   errorType: 'exception' | 'invalid_action' | 'no_action';
@@ -97,7 +88,6 @@ export type ControlEvent =
   | GoalReachedEvent
   | BoundsExceededEvent
   | UserInputRequiredEvent
-  | CadenceAuditEvent
   | AgentErrorEvent
   | UserStoppedEvent
   | TransientErrorEvent
@@ -109,7 +99,6 @@ export const ALL_EVENT_TYPES: readonly ControlEventType[] = [
   'goal_state_reached',
   'bounds_exceeded',
   'user_input_required',
-  'cadence_audit',
   'agent_error',
   'user_stopped',
   'transient_error',
@@ -172,28 +161,6 @@ export function createUserInputRequiredEvent(
     sessionKey,
     workId,
     prompt: { question, options, context, multiSelect },
-  };
-}
-
-export function createCadenceAuditEvent(
-  sessionKey: string,
-  workId: string,
-  elapsedMs: number,
-  toolCallsSinceLastAudit: number,
-  metrics: ExecutionMetrics,
-  recentActivity: string,
-  workIds?: string[]
-): CadenceAuditEvent {
-  return {
-    type: 'cadence_audit',
-    timestamp: Date.now(),
-    sessionKey,
-    workId,
-    elapsedMs,
-    toolCallsSinceLastAudit,
-    metrics,
-    recentActivity,
-    ...(workIds && workIds.length > 0 ? { workIds } : {}),
   };
 }
 

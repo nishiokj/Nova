@@ -18,6 +18,8 @@ export {
   type BusServerOptions,
   type BusPublishHandler,
   type EventTranslator,
+  type BackpressureOptions,
+  type BackpressureStats,
 } from './bus_server.js';
 
 export {
