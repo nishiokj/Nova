@@ -254,7 +254,7 @@ for line in open('$dataset_abs'):
             fi
         else
             echo "  [FAIL] docker daemon unavailable; cannot verify task images"
-            echo "         start Docker and re-run preflight"
+            echo "         start your Docker runtime and re-run preflight"
             errors=$((errors + 1))
         fi
     fi

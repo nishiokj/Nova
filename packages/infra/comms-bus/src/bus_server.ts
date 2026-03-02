@@ -1,11 +1,11 @@
 /**
- * JSONL-over-TCP bus server for bridge communication.
+ * WebSocket bus server for bridge communication.
  *
  * Supports direct EventBus subscription for run channels, eliminating
  * the need for intermediate event forwarding layers.
  */
 
-import net, { type Socket, type Server } from 'net';
+import { WebSocketServer, type WebSocket } from 'ws';
 import { profiler } from 'shared';
 import type { BusClientMessage, BusServerMessage, BusMessage } from './bus_types.js';
 import type { EventBusProtocol } from './event_bus.js';
@@ -31,21 +31,20 @@ export interface BusServerOptions {
   onDisconnect?: (connectionId: string) => void;
   /** Optional EventBus for direct subscription to run events */
   eventBus?: EventBusProtocol;
-  /** Optional translator for EventBus events before sending over TCP */
+  /** Optional translator for EventBus events before sending to clients */
   eventTranslator?: EventTranslator;
 }
 
 interface ConnectionState {
   id: string;
-  socket: Socket;
-  buffer: string;
+  ws: WebSocket;
   subscriptions: Set<string>;
 }
 
 const GLOBAL_EVENTS_CHANNEL = 'events:all';
 
 export class BusServer {
-  private server: Server | null = null;
+  private server: WebSocketServer | null = null;
   private nextId = 1;
   private connections = new Map<string, ConnectionState>();
   private readonly host: string;
@@ -73,14 +72,13 @@ export class BusServer {
   }
 
   /**
-   * Subscribe to a run's events from EventBus and forward to TCP channel.
+   * Subscribe to a run's events from EventBus and forward to WebSocket channel.
    * Called when a client subscribes to a run:* channel.
    */
   private subscribeToRun(runId: string, channel: string): void {
     if (!this.eventBus || this.runSubscriptions.has(runId)) return;
 
     const unsubscribe = this.eventBus.subscribeRun(runId, (event) => {
-      // Translate event if translator provided, otherwise pass through
       const wireEvent = this.eventTranslator ? this.eventTranslator(event) : event;
       if (wireEvent !== null) {
         this.publish(channel, wireEvent);
@@ -149,12 +147,14 @@ export class BusServer {
       return this.getAddress();
     }
 
-    this.server = net.createServer((socket) => this.handleConnection(socket));
+    this.server = new WebSocketServer({ host: this.host, port: this.port });
 
     await new Promise<void>((resolve, reject) => {
       this.server!.once('error', reject);
-      this.server!.listen(this.port, this.host, () => resolve());
+      this.server!.once('listening', () => resolve());
     });
+
+    this.server.on('connection', (ws) => this.handleConnection(ws));
 
     return this.getAddress();
   }
@@ -170,7 +170,7 @@ export class BusServer {
     this.unsubscribeFromAllEvents();
 
     for (const connection of this.connections.values()) {
-      connection.socket.destroy();
+      connection.ws.terminate();
     }
     this.connections.clear();
 
@@ -214,12 +214,11 @@ export class BusServer {
     return this.connections.size;
   }
 
-  private handleConnection(socket: Socket): void {
+  private handleConnection(ws: WebSocket): void {
     const connectionId = `conn_${this.nextId++}`;
     const connection: ConnectionState = {
       id: connectionId,
-      socket,
-      buffer: '',
+      ws,
       subscriptions: new Set(),
     };
     this.connections.set(connectionId, connection);
@@ -228,12 +227,9 @@ export class BusServer {
       this.onConnect(connectionId);
     }
 
-    socket.setNoDelay(true);  // Disable Nagle algorithm for low-latency streaming
-    socket.setKeepAlive(true, 30000);  // Enable TCP keepalive, probe every 30s to detect dead connections
-    socket.setEncoding('utf8');
-    socket.on('data', (chunk: string) => this.handleData(connection, chunk));
-    socket.on('close', () => this.handleClose(connection));
-    socket.on('error', () => {
+    ws.on('message', (data: Buffer | string) => this.handleMessage(connection, String(data)));
+    ws.on('close', () => this.handleClose(connection));
+    ws.on('error', () => {
       // Connection errors are handled via close event.
     });
   }
@@ -256,27 +252,11 @@ export class BusServer {
     }
   }
 
-  private handleData(connection: ConnectionState, chunk: string): void {
-    profiler.begin('bus.server.handleData', 'bus');
-    connection.buffer += chunk;
-    let newlineIndex = connection.buffer.indexOf('\n');
-
-    while (newlineIndex >= 0) {
-      const line = connection.buffer.slice(0, newlineIndex).trim();
-      connection.buffer = connection.buffer.slice(newlineIndex + 1);
-      if (line.length > 0) {
-        this.handleLine(connection, line);
-      }
-      newlineIndex = connection.buffer.indexOf('\n');
-    }
-    profiler.end('bus.server.handleData', 'bus');
-  }
-
-  private handleLine(connection: ConnectionState, line: string): void {
+  private handleMessage(connection: ConnectionState, data: string): void {
     profiler.begin('bus.server.parse', 'bus');
     let message: BusMessage;
     try {
-      message = JSON.parse(line) as BusMessage;
+      message = JSON.parse(data) as BusMessage;
     } catch (error) {
       profiler.end('bus.server.parse', 'bus');
       this.sendError(connection, 'invalid_json', String(error));
@@ -364,7 +344,7 @@ export class BusServer {
       const serialized = JSON.stringify(message);
       profiler.end('bus.server.serialize', 'bus');
       profiler.begin('bus.server.write', 'bus');
-      connection.socket.write(`${serialized}\n`);
+      connection.ws.send(serialized);
       profiler.end('bus.server.write', 'bus');
     } catch {
       profiler.end('bus.server.serialize', 'bus');

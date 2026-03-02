@@ -32,7 +32,7 @@ jobs:
             --target=bun-linux-x64 \
             --minify \
             --define "process.env.NOVA_VERSION='\"ci-test\"'" \
-            ./packages/launcher/standalone.ts \
+            ./packages/apps/launcher/standalone.ts \
             --outfile ./nova-test
           ./nova-test --version
 
@@ -60,26 +60,26 @@ jobs:
       matrix:
         include:
           - name: graphd
-            build_cmd: bun run --cwd packages/graphd build
-            verify_cmd: bun run --cwd packages/graphd lint
+            build_cmd: bun run --cwd packages/infra/graphd build
+            verify_cmd: bun run --cwd packages/infra/graphd lint
           - name: harness-daemon
-            build_cmd: bun run --cwd packages/harness-daemon build
-            verify_cmd: bun run --cwd packages/harness-daemon lint
-          - name: control-plane
-            build_cmd: bun run --cwd packages/control-plane build
-            verify_cmd: bun run --cwd packages/control-plane lint
+            build_cmd: bun run --cwd packages/infra/harness-daemon build
+            verify_cmd: bun run --cwd packages/infra/harness-daemon lint
           - name: agent-memory
-            build_cmd: bun run --cwd packages/agent-memory build
-            verify_cmd: bun run --cwd packages/agent-memory lint
+            build_cmd: bun run --cwd packages/plugins/agent-memory build
+            verify_cmd: bun run --cwd packages/plugins/agent-memory lint
           - name: launcher
-            build_cmd: bun run --cwd packages/launcher build
-            verify_cmd: bun run --cwd packages/launcher build
+            build_cmd: bun run --cwd packages/apps/launcher build
+            verify_cmd: bun run --cwd packages/apps/launcher build
           - name: tui
-            build_cmd: bun run --cwd packages/tui build
-            verify_cmd: bun run --cwd packages/tui build
-          - name: dashboard-control
-            build_cmd: bun run --cwd packages/dashboard-control build
-            verify_cmd: bun run --cwd packages/dashboard-control build
+            build_cmd: bun run --cwd packages/apps/tui build
+            verify_cmd: bun run --cwd packages/apps/tui build
+          - name: dashboard
+            build_cmd: bun run --cwd packages/apps/dashboard build
+            verify_cmd: bun run --cwd packages/apps/dashboard lint
+          - name: dashboard-compact
+            build_cmd: bun run --cwd packages/apps/dashboard-compact build
+            verify_cmd: bun run --cwd packages/apps/dashboard-compact typecheck
     steps:
       - uses: actions/checkout@v4
 
@@ -169,7 +169,7 @@ jobs:
               echo "$matches"
               count=$((count + $(echo "$matches" | wc -l)))
             fi
-          done < <(find packages/*/src -name '*.ts' ! -name '*.test.ts' ! -name '*.d.ts' -type f)
+          done < <(find packages/*/*/src packages/*/*/*/src -name '*.ts' ! -name '*.test.ts' ! -name '*.d.ts' -type f 2>/dev/null)
           echo ""
           echo "Total: $count explicit any annotations"
           if [ "$count" -gt 0 ]; then
@@ -188,7 +188,7 @@ jobs:
               echo "$matches"
               count=$((count + $(echo "$matches" | wc -l)))
             fi
-          done < <(find packages/*/src -name '*.ts' ! -name '*.test.ts' ! -name '*.d.ts' -type f)
+          done < <(find packages/*/*/src packages/*/*/*/src -name '*.ts' ! -name '*.test.ts' ! -name '*.d.ts' -type f 2>/dev/null)
           echo ""
           echo "Total: $count type assertions"
           if [ "$count" -gt 0 ]; then
@@ -207,7 +207,7 @@ jobs:
               echo "$matches"
               count=$((count + $(echo "$matches" | wc -l)))
             fi
-          done < <(find packages/*/src -name '*.ts' ! -name '*.test.ts' -type f)
+          done < <(find packages/*/*/src packages/*/*/*/src -name '*.ts' ! -name '*.test.ts' -type f 2>/dev/null)
           echo ""
           echo "Total: $count type suppressions"
           if [ "$count" -gt 0 ]; then
@@ -226,7 +226,7 @@ jobs:
               echo "$matches"
               count=$((count + $(echo "$matches" | wc -l)))
             fi
-          done < <(find packages/*/src -name '*.ts' ! -name '*.test.ts' -type f)
+          done < <(find packages/*/*/src packages/*/*/*/src -name '*.ts' ! -name '*.test.ts' -type f 2>/dev/null)
           echo ""
           echo "Total: $count console.log calls"
           if [ "$count" -gt 0 ]; then
@@ -245,7 +245,7 @@ jobs:
               echo "$matches"
               count=$((count + $(echo "$matches" | wc -l)))
             fi
-          done < <(find packages/*/src -name '*.ts' -type f)
+          done < <(find packages/*/*/src packages/*/*/*/src -name '*.ts' -type f 2>/dev/null)
           echo ""
           echo "Total: $count markers"
           if [ "$count" -gt 0 ]; then

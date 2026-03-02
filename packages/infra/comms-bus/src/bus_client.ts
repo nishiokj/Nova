@@ -1,8 +1,8 @@
 /**
- * JSONL-over-TCP bus client for bridge communication.
+ * WebSocket bus client for bridge communication.
  */
 
-import net from 'net';
+import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import { profiler } from 'shared';
 import type { BusClientMessage, BusServerMessage, BusMessage } from './bus_types.js';
@@ -15,8 +15,7 @@ export interface BusClientOptions {
 export class BusClient extends EventEmitter {
   private readonly host: string;
   private readonly port: number;
-  private socket: net.Socket | null = null;
-  private buffer = '';
+  private ws: WebSocket | null = null;
   private connected = false;
   private subscriptions = new Set<string>();
 
@@ -28,19 +27,19 @@ export class BusClient extends EventEmitter {
 
   async connect(): Promise<void> {
     if (this.connected) return;
-    this.socket = new net.Socket();
+
+    const url = `ws://${this.host}:${this.port}`;
+    this.ws = new WebSocket(url);
 
     await new Promise<void>((resolve, reject) => {
-      this.socket!.once('error', reject);
-      this.socket!.connect(this.port, this.host, () => resolve());
+      this.ws!.once('error', reject);
+      this.ws!.once('open', () => resolve());
     });
 
     this.connected = true;
-    this.socket.setNoDelay(true);  // Disable Nagle algorithm for low-latency streaming
-    this.socket.setEncoding('utf8');
-    this.socket.on('data', (chunk: string) => this.handleData(chunk));
-    this.socket.on('close', () => this.handleClose());
-    this.socket.on('error', (error) => {
+    this.ws.on('message', (data: WebSocket.RawData) => this.handleMessage(String(data)));
+    this.ws.on('close', () => this.handleClose());
+    this.ws.on('error', (error) => {
       this.emit('error', { message: 'bus_client_error', detail: String(error) });
     });
   }
@@ -62,19 +61,12 @@ export class BusClient extends EventEmitter {
   }
 
   close(): void {
-    if (!this.socket) return;
+    if (!this.ws) return;
     this.connected = false;
     this.subscriptions.clear();
-    const socket = this.socket;
-    this.socket = null;
-    // Graceful close: end() flushes pending writes and sends FIN
-    // Only destroy after a timeout to ensure data is flushed
-    socket.end();
-    setTimeout(() => {
-      if (!socket.destroyed) {
-        socket.destroy();
-      }
-    }, 500);
+    const ws = this.ws;
+    this.ws = null;
+    ws.close();
   }
 
   private handleClose(): void {
@@ -82,27 +74,11 @@ export class BusClient extends EventEmitter {
     this.emit('close');
   }
 
-  private handleData(chunk: string): void {
-    profiler.begin('bus.client.handleData', 'bus');
-    this.buffer += chunk;
-    let newlineIndex = this.buffer.indexOf('\n');
-
-    while (newlineIndex >= 0) {
-      const line = this.buffer.slice(0, newlineIndex).trim();
-      this.buffer = this.buffer.slice(newlineIndex + 1);
-      if (line.length > 0) {
-        this.handleLine(line);
-      }
-      newlineIndex = this.buffer.indexOf('\n');
-    }
-    profiler.end('bus.client.handleData', 'bus');
-  }
-
-  private handleLine(line: string): void {
+  private handleMessage(data: string): void {
     profiler.begin('bus.client.parse', 'bus');
     let message: BusMessage;
     try {
-      message = JSON.parse(line) as BusMessage;
+      message = JSON.parse(data) as BusMessage;
     } catch (error) {
       profiler.end('bus.client.parse', 'bus');
       this.emit('error', { message: 'invalid_json', detail: String(error) });
@@ -111,7 +87,7 @@ export class BusClient extends EventEmitter {
     profiler.end('bus.client.parse', 'bus');
 
     if (!message || typeof message !== 'object' || !('type' in message)) {
-      this.emit('error', { message: 'invalid_message', detail: line });
+      this.emit('error', { message: 'invalid_message', detail: data });
       return;
     }
 
@@ -132,7 +108,7 @@ export class BusClient extends EventEmitter {
   }
 
   private send(message: BusClientMessage | BusServerMessage): void {
-    if (!this.socket || !this.connected) {
+    if (!this.ws || !this.connected) {
       this.emit('error', { message: 'bus_not_connected' });
       return;
     }
@@ -142,7 +118,7 @@ export class BusClient extends EventEmitter {
       const serialized = JSON.stringify(message);
       profiler.end('bus.client.serialize', 'bus');
       profiler.begin('bus.client.write', 'bus');
-      this.socket.write(`${serialized}\n`);
+      this.ws.send(serialized);
       profiler.end('bus.client.write', 'bus');
     } catch (error) {
       profiler.end('bus.client.serialize', 'bus');
