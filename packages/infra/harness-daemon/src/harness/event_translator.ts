@@ -9,10 +9,7 @@ import type {
   BridgeEvent,
   ProgressEventData,
   StatusEventData,
-  UserPromptEventData,
-  UserPromptEventQuestion,
   EventLevel,
-  EventKind,
 } from './types.js';
 
 /**
@@ -252,18 +249,6 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
       };
     }
 
-    case 'files_modified': {
-      const filesData = data as { paths?: string[] };
-      const paths = Array.isArray(filesData.paths) ? filesData.paths : [];
-      return {
-        type: 'files_modified',
-        data: {
-          request_id: requestId,
-          paths,
-        },
-      };
-    }
-
     case 'artifact_discovered': {
       const artData = data as {
         artifact: { name?: string; kind?: string };
@@ -413,26 +398,6 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
 }
 
 /**
- * Create a stream event for the TUI.
- */
-export function createStreamEvent(
-  requestId: string,
-  chunk: string,
-  chunkIndex: number,
-  isFinal: boolean
-): BridgeEvent {
-  return {
-    type: 'stream',
-    data: {
-      request_id: requestId,
-      chunk,
-      chunk_index: chunkIndex,
-      is_final: isFinal,
-    },
-  };
-}
-
-/**
  * Create a status event for the TUI.
  */
 export function createStatusEvent(
@@ -506,45 +471,5 @@ export function createReadyEvent(
       config_summary: configSummary,
       history,
     },
-  };
-}
-
-/**
- * Agent's question format (camelCase).
- */
-interface AgentQuestion {
-  question: string;
-  options?: Array<string | { label: string; description?: string }>;
-  context?: string;
-  multiSelect?: boolean;
-  questionType?: string;
-}
-
-/**
- * Convert agent question (camelCase) to wire format (snake_case).
- */
-function toWireQuestion(q: AgentQuestion): UserPromptEventQuestion {
-  return {
-    question: q.question,
-    options: q.options,
-    context: q.context,
-    multi_select: q.multiSelect,
-    question_type: q.questionType,
-  };
-}
-
-/** Create a user prompt event for the TUI using question arrays only. */
-export function createUserPromptEvent(
-  requestId: string,
-  questions: AgentQuestion[]
-): BridgeEvent {
-  const data: UserPromptEventData = {
-    request_id: requestId,
-    questions: questions.map(toWireQuestion),
-  };
-
-  return {
-    type: 'user_prompt',
-    data: data as unknown as Record<string, unknown>,
   };
 }

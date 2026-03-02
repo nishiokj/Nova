@@ -7,7 +7,7 @@
 import { EventEmitter } from 'events';
 import { HarnessClient, type ConnectionState, type RpcClient, type BridgeCommand as HarnessBridgeCommand } from 'harness-client';
 import { profiler } from 'shared';
-import type { BridgeCommand, BridgeEvent, BridgeEventType, ReadyData, ResponseData } from './types.js';
+import type { BridgeCommand, BridgeEvent, BridgeEventType } from './types.js';
 
 // Valid bridge event types for runtime validation (Set for O(1) lookups)
 const VALID_EVENT_TYPES = new Set<BridgeEventType>([
@@ -55,10 +55,6 @@ export type { ConnectionState };
 
 export class BridgeClient extends EventEmitter {
   private readonly client: HarnessClient;
-
-  get connected(): boolean {
-    return this.client.connected;
-  }
 
   get rpc(): RpcClient {
     return this.client.rpc;
@@ -109,9 +105,5 @@ export class BridgeClient extends EventEmitter {
 
   close(): void {
     this.client.close();
-  }
-
-  getConnectionState(): ConnectionState {
-    return this.client.getConnectionState();
   }
 }
