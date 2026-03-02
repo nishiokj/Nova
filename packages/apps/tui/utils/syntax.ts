@@ -8,15 +8,54 @@
  */
 
 import type { Node, Tree } from 'web-tree-sitter'
-import { initParser, isParserInitialized, languageForFile, createParser, type SupportedLanguage } from 'entity-graph'
+import type { SupportedLanguage } from 'entity-graph'
 import { Chalk } from 'chalk'
 import { getColors, type ThemeColors, getCurrentThemeName } from '../theme.js'
 
-// Eagerly kick off parser init (non-blocking).
-// highlightCode will await this before first use.
-const parserReady = initParser().catch(() => {
-  // tree-sitter WASM init failed — syntax highlighting will be disabled
-})
+type ParserApi = {
+  initParser: () => Promise<void>
+  isParserInitialized: () => boolean
+  languageForFile: (filePath: string) => SupportedLanguage | null
+  createParser: (language: SupportedLanguage) => { parse: (source: string) => Tree | null }
+}
+
+let parserApi: ParserApi | null = null
+let parserApiPromise: Promise<ParserApi | null> | null = null
+const syntaxHighlightingDisabled = process.env.NOVA_TUI_DISABLE_SYNTAX_HIGHLIGHT === '1'
+
+function loadParserApi(): Promise<ParserApi | null> {
+  if (parserApi) return Promise.resolve(parserApi)
+  if (parserApiPromise) return parserApiPromise
+
+  parserApiPromise = import('entity-graph')
+    .then(async (mod) => {
+      const api: ParserApi = {
+        initParser: mod.initParser,
+        isParserInitialized: mod.isParserInitialized,
+        languageForFile: mod.languageForFile,
+        createParser: mod.createParser,
+      }
+      parserApi = api
+
+      try {
+        await api.initParser()
+      } catch {
+        // tree-sitter WASM init failed — syntax highlighting will be disabled
+      }
+
+      return api
+    })
+    .catch(() => null)
+
+  return parserApiPromise
+}
+
+function ensureParserInitStarted(): void {
+  if (syntaxHighlightingDisabled) return
+  if (!parserApi && !parserApiPromise) {
+    void loadParserApi()
+  }
+}
 
 // Create a chalk instance with forced color support (consistent with markdown.ts)
 const chalk = new Chalk({ level: 3 })
@@ -222,6 +261,9 @@ const LANGUAGE_ALIASES: Record<string, SupportedLanguage> = {
  * Detect supported language from a code block language identifier.
  */
 function detectLanguage(lang: string | undefined): SupportedLanguage | null {
+  const api = parserApi
+  if (!api) return null
+
   if (!lang) return null
 
   const normalized = lang.toLowerCase().trim()
@@ -233,14 +275,20 @@ function detectLanguage(lang: string | undefined): SupportedLanguage | null {
 
   // Try as extension
   const ext = normalized.startsWith('.') ? normalized : `.${normalized}`
-  return languageForFile(`dummy${ext}`)
+  return api.languageForFile(`dummy${ext}`)
 }
 
 /**
  * Check if a language is supported for syntax highlighting.
  */
 export function isLanguageSupported(lang: string | undefined): boolean {
-  if (!isParserInitialized()) return false
+  if (syntaxHighlightingDisabled) return false
+  const api = parserApi
+  if (!api) {
+    ensureParserInitStarted()
+    return false
+  }
+  if (!api.isParserInitialized()) return false
   return detectLanguage(lang) !== null
 }
 
@@ -260,6 +308,16 @@ function getColorForNode(nodeType: string): ((text: string) => string) | null {
  * @returns ANSI-colored string for terminal display, or null if input is null
  */
 export function highlightCode(code: string | null, lang: string | undefined): string {
+  if (syntaxHighlightingDisabled) {
+    return code ?? ''
+  }
+
+  const api = parserApi
+  if (!api) {
+    ensureParserInitStarted()
+    return code ?? ''
+  }
+
   // Handle null/undefined input - return empty string
   if (code == null) return ''
 
@@ -269,7 +327,7 @@ export function highlightCode(code: string | null, lang: string | undefined): st
   }
 
   // Parser not ready yet — return plain text
-  if (!isParserInitialized()) {
+  if (!api.isParserInitialized()) {
     return code
   }
 
@@ -284,8 +342,11 @@ export function highlightCode(code: string | null, lang: string | undefined): st
 
   try {
     // Parse the code
-    const parser = createParser(supportedLang)
+    const parser = api.createParser(supportedLang)
     const tree = parser.parse(code)
+    if (!tree) {
+      return code
+    }
 
     // Apply highlighting without background (syntax only)
     const highlighted = highlightTree(tree, code)
@@ -356,7 +417,7 @@ function applyHighlights(
   highlights: Array<{ start: number; end: number; color: (text: string) => string }>
 ): string {
   // Track which character positions are colored and by which highlight
-  const charColors: Array<{ color: (text: string) => string } | null> = new Array(source.length).fill(null)
+  const charColors: Array<((text: string) => string) | null> = new Array(source.length).fill(null)
 
   // Assign colors to characters (last highlight wins for overlaps)
   for (const h of highlights) {

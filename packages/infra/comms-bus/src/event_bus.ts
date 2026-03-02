@@ -22,10 +22,7 @@ export interface EventBusProtocol {
   subscribeAll(handler: (event: AnyEvent) => void): () => void;
   /** Subscribe to events for a specific run */
   subscribeRun(runId: string, handler: (event: AnyEvent) => void): () => void;
-  /** Subscribe to all events globally */
-  subscribeGlobal(handler: (event: AnyEvent) => void): () => void;
   shutdown(): void;
-  isShutdown(): boolean;
 }
 
 /**
@@ -34,7 +31,6 @@ export interface EventBusProtocol {
 export class EventBus implements EventBusProtocol {
   private emitter = new EventEmitter();
   private runHandlers = new Map<string, Set<(event: AnyEvent) => void>>();
-  private globalHandlers = new Set<(event: AnyEvent) => void>();
   private shutdownFlag = false;
   private readonly ALL_EVENTS = '__all__';
 
@@ -115,15 +111,6 @@ export class EventBus implements EventBusProtocol {
       }
     }
 
-    if (!isStreamingEvent && this.globalHandlers.size) {
-      for (const handler of this.globalHandlers) {
-        try {
-          handler(event);
-        } catch (err) {
-          console.error('[EventBus] Handler error:', err);
-        }
-      }
-    }
   }
 
   subscribe(type: AgentEventType, handler: (event: AnyEvent) => void): () => void {
@@ -149,11 +136,6 @@ export class EventBus implements EventBusProtocol {
     };
   }
 
-  subscribeGlobal(handler: (event: AnyEvent) => void): () => void {
-    this.globalHandlers.add(handler);
-    return () => this.globalHandlers.delete(handler);
-  }
-
   shutdown(): void {
     if (this.shutdownFlag) return;
     this.shutdownFlag = true;
@@ -161,11 +143,6 @@ export class EventBus implements EventBusProtocol {
     this.flushScheduled = false;
     this.emitter.removeAllListeners();
     this.runHandlers.clear();
-    this.globalHandlers.clear();
-  }
-
-  isShutdown(): boolean {
-    return this.shutdownFlag;
   }
 }
 

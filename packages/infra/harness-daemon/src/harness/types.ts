@@ -66,8 +66,7 @@ export type BridgeEventType =
   | 'provider_key_required'
   | 'model_changed'
   | 'permission_request'
-  | 'llm_call'
-  | 'files_modified';
+  | 'llm_call';
 
 /**
  * Bridge event structure matching TUI expectations.

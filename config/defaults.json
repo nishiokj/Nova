@@ -92,9 +92,9 @@
   },
 
   "entity_graph": {
-    "enabled": true,
+    "enabled": false,
     "database_url": "postgresql://postgres:postgres@localhost:5432/agent_memory",
-    "startup_scan": true,
+    "startup_scan": false,
     "lease_duration_sec": 30,
     "lease_wait_timeout_ms": 10000
   },

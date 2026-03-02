@@ -29,7 +29,7 @@ import { randomUUID } from 'crypto';
 import { createAdapter, hasCodexCredentials, type ProviderKeyService } from 'llm';
 import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
 import { ToolRegistry } from 'tools';
-import { createEvent, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
+import { createEvent, getProviderEnvVar, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
 import { ContextWindow } from 'context';
 import { profiler } from 'shared';
 import { GraphDManager, createGraphDConfig, type GraphDSession } from 'graphd';
@@ -45,7 +45,6 @@ import {
   createResponseEvent,
   createErrorEvent,
   createReadyEvent,
-  createUserPromptEvent,
 } from './event_translator.js';
 import type {
   AgentRunParams,
@@ -287,7 +286,8 @@ const defaultLogger: HarnessLogger = createFileLogger();
 
 /**
  * Provider key service implementation for the harness.
- * Queries API keys at runtime from LocalProviderManager (GraphD storage) ONLY.
+ * Queries API keys at runtime from LocalProviderManager (GraphD storage),
+ * with environment-variable fallback for compatibility.
  *
  * This allows API keys to be added/changed at runtime without restarting the harness.
  */
@@ -308,8 +308,24 @@ class HarnessProviderKeyService implements ProviderKeyService {
   }
 
   getApiKey(provider: string): string | null {
-    // ONLY check LocalProviderManager (GraphD storage)
-    // Config file providers and env vars are no longer supported
+    // Prefer environment variables so .env can override stale stored credentials.
+    const envVar = getProviderEnvVar(provider);
+    const envCandidates = [envVar];
+    if (provider === 'gemini') {
+      envCandidates.push('GEMINI_API_KEY');
+    } else if (provider === 'openai-compat') {
+      envCandidates.push('OPENAI_API_KEY');
+    }
+
+    for (const candidate of envCandidates) {
+      const value = process.env[candidate]?.trim();
+      if (value) {
+        this.logger.debug('API key found in environment', { provider, envVar: candidate });
+        return value;
+      }
+    }
+
+    // Fall back to LocalProviderManager (GraphD storage)
     if (this.localProviders) {
       const key = this.localProviders.getProviderKey(provider);
       if (key) {

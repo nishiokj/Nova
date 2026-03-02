@@ -479,6 +479,16 @@ function expandHome(pathStr: string): string {
   return pathStr;
 }
 
+function parseBooleanEnv(name: string): boolean | undefined {
+  const raw = process.env[name];
+  if (typeof raw !== 'string') return undefined;
+
+  const normalized = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return undefined;
+}
+
 /**
  * Resolve a path relative to a base directory.
  * - Paths starting with ~ are expanded to home directory
@@ -563,6 +573,18 @@ export function createConfigFromFile(
     logger.info(`[config]   hooks.directory: ${rawHooksDir} -> ${resolvedHooksDir}`);
   }
 
+  const envEntityGraphEnabled = parseBooleanEnv('NOVA_ENTITY_GRAPH_ENABLED');
+  const envEntityGraphStartupScan = parseBooleanEnv('NOVA_ENTITY_GRAPH_STARTUP_SCAN');
+  const entityGraphEnabled = envEntityGraphEnabled ?? (fileConfig.entity_graph?.enabled ?? DEFAULT_ENTITY_GRAPH_CONFIG.enabled);
+  const entityGraphStartupScan = envEntityGraphStartupScan ?? (fileConfig.entity_graph?.startup_scan ?? DEFAULT_ENTITY_GRAPH_CONFIG.startup_scan ?? true);
+
+  if (envEntityGraphEnabled !== undefined) {
+    logger.info(`[config]   entity_graph.enabled overridden by NOVA_ENTITY_GRAPH_ENABLED=${entityGraphEnabled}`);
+  }
+  if (envEntityGraphStartupScan !== undefined) {
+    logger.info(`[config]   entity_graph.startup_scan overridden by NOVA_ENTITY_GRAPH_STARTUP_SCAN=${entityGraphStartupScan}`);
+  }
+
   return {
     agents,
     defaultAgent: 'standard',
@@ -594,12 +616,12 @@ export function createConfigFromFile(
       definitions: fileConfig.hooks?.definitions ?? [],
     },
     entityGraph: {
-      enabled: fileConfig.entity_graph?.enabled ?? DEFAULT_ENTITY_GRAPH_CONFIG.enabled,
+      enabled: entityGraphEnabled,
       databaseUrl: fileConfig.entity_graph?.database_url,
       include: fileConfig.entity_graph?.include,
       exclude: fileConfig.entity_graph?.exclude,
       leaseDurationSec: fileConfig.entity_graph?.lease_duration_sec ?? DEFAULT_ENTITY_GRAPH_CONFIG.lease_duration_sec ?? 30,
-      startupScan: fileConfig.entity_graph?.startup_scan ?? DEFAULT_ENTITY_GRAPH_CONFIG.startup_scan ?? true,
+      startupScan: entityGraphStartupScan,
       leaseWaitTimeoutMs: fileConfig.entity_graph?.lease_wait_timeout_ms ?? DEFAULT_ENTITY_GRAPH_CONFIG.lease_wait_timeout_ms ?? 10_000,
     },
     auth: {
