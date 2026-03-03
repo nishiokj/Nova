@@ -435,11 +435,16 @@ function resolveAgentConfig(
     fallback,
   };
 
+  // Convention: max_tool_calls = 0 disables tool-call bound checks (effectively unbounded).
+  const maxToolCalls = entry.budget.max_tool_calls === 0
+    ? Number.MAX_SAFE_INTEGER
+    : entry.budget.max_tool_calls;
+
   return {
     llm,
     budget: {
       maxIterations: entry.budget.max_iterations,
-      maxToolCalls: entry.budget.max_tool_calls,
+      maxToolCalls,
       maxDurationMs: entry.budget.max_duration_ms,
     },
     tools: entry.tools ?? [],

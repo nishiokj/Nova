@@ -28,6 +28,7 @@ import {
   translateCodexArgsToNova,
   translateNovaArgsToCodex,
 } from './tool_skins.js';
+import { normalizeResponsesApiUsage } from './token_usage.js';
 
 function parseApiError(provider: string, status: number, responseText: string): Error {
   const parsed = parseApiErrorResponse(provider, status, responseText);
@@ -282,16 +283,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
       ? 'tool_use'
       : (stopReasonMap[finalStatus] ?? 'end_turn');
 
-    const usageData = data.usage as Record<string, unknown> | undefined;
-    const promptDetails = usageData?.prompt_tokens_details as Record<string, number> | undefined;
-    const usage: TokenUsage = usageData
-      ? {
-          promptTokens: (usageData.input_tokens as number) ?? 0,
-          completionTokens: (usageData.output_tokens as number) ?? 0,
-          totalTokens: (usageData.total_tokens as number) ?? 0,
-          cachedTokens: promptDetails?.cached_tokens,
-        }
-      : { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    const usage: TokenUsage = normalizeResponsesApiUsage(data.usage);
 
     return {
       content: outputText,
@@ -589,16 +581,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
                   toolCalls.length = 0;
                   toolCalls.push(...parsedCalls.filter((call) => !!call.name));
                 }
-                const usageData = responseObj.usage as Record<string, unknown> | undefined;
-                const promptDetails = usageData?.prompt_tokens_details as Record<string, number> | undefined;
-                if (usageData) {
-                  usage = {
-                    promptTokens: (usageData.input_tokens as number) ?? 0,
-                    completionTokens: (usageData.output_tokens as number) ?? 0,
-                    totalTokens: (usageData.total_tokens as number) ?? 0,
-                    cachedTokens: promptDetails?.cached_tokens,
-                  };
-                }
+                usage = normalizeResponsesApiUsage(responseObj.usage);
                 model = (responseObj.model as string) ?? model;
               }
             }

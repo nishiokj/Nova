@@ -199,6 +199,7 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
         model?: string;
         promptTokens?: number;
         completionTokens?: number;
+        reasoningTokens?: number;
         totalTokens?: number;
         cachedTokens?: number;
         maxWindowSize?: number;
@@ -212,6 +213,7 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
           model: llmData.model ?? 'unknown',
           promptTokens: llmData.promptTokens ?? 0,
           completionTokens: llmData.completionTokens ?? 0,
+          reasoningTokens: llmData.reasoningTokens ?? 0,
           totalTokens: llmData.totalTokens ?? 0,
           cachedTokens: llmData.cachedTokens,
           maxWindowSize: llmData.maxWindowSize,

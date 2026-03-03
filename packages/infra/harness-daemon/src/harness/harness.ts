@@ -66,6 +66,7 @@ import {
 } from './skills_loader.js';
 import { SessionStore } from './session_store.js';
 import { createFileLogger, createToolRegistry, type HarnessLogger } from './harness_infra.js';
+import { HarnessPluginRegistry } from './plugin_registry.js';
 import { PermissionChecker } from './permissions.js';
 import { DefaultOrchestratorRunner, type OrchestratorRunner } from './orchestrator_runner.js';
 import type { PermissionedTool, PermissionRequest, PermissionResponse } from 'types';
@@ -444,10 +445,12 @@ export class AgentHarness {
   private initializedModelSelections = new Set<string>();
   private readonly pendingSessionHookTasks = new Set<Promise<void>>();
   private readonly closingSessionHooks = new Set<string>();
+  private readonly pluginRegistry: HarnessPluginRegistry;
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger, orchestratorRunner?: OrchestratorRunner) {
     this.config = config;
     this.logger = logger ?? defaultLogger;
+    this.pluginRegistry = new HarnessPluginRegistry(this.logger);
     this.sessionTtlMs = config.context.sessionTtlMs;
     this.maxSessions = config.context.maxSessions;
     this.sessionHookRegistry = createSessionScopedUnifiedHookRegistry();
@@ -615,37 +618,6 @@ export class AgentHarness {
    */
   private isGraphDReady(): boolean {
     return !!(this.graphd && this.graphdStarted);
-  }
-
-  private isOptionalModuleMissing(error: unknown, moduleName: string): boolean {
-    if (!error || typeof error !== 'object') return false;
-    const code = (error as { code?: string }).code;
-    if (code !== 'ERR_MODULE_NOT_FOUND' && code !== 'MODULE_NOT_FOUND') {
-      return false;
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    return (
-      message.includes(`'${moduleName}'`) ||
-      message.includes(`"${moduleName}"`) ||
-      message.includes(`Cannot find package '${moduleName}'`) ||
-      message.includes(`Cannot find module '${moduleName}'`) ||
-      message.includes(moduleName)
-    );
-  }
-
-  private async importOptionalModule<T>(moduleName: string, installHint: string): Promise<T | null> {
-    try {
-      return await import(moduleName) as T;
-    } catch (error) {
-      if (this.isOptionalModuleMissing(error, moduleName)) {
-        this.logger.info('Optional plugin module not installed; feature disabled', {
-          module: moduleName,
-          installHint,
-        });
-        return null;
-      }
-      throw error;
-    }
   }
 
   /**
@@ -1049,17 +1021,11 @@ export class AgentHarness {
 
     let memoryPluginModule: MemoryPluginModule | null = null;
     if (shouldLoadMemoryPlugin) {
-      try {
-        memoryPluginModule = await this.importOptionalModule<MemoryPluginModule>(
-          memoryModuleName,
-          memoryInstallHint
-        );
-      } catch (error) {
-        this.logger.warning('Failed to load memory plugin module', {
-          module: memoryModuleName,
-          error: getErrorMessage(error),
-        });
-      }
+      memoryPluginModule = await this.pluginRegistry.resolve<MemoryPluginModule>({
+        id: 'memory',
+        moduleName: memoryModuleName,
+        installHint: memoryInstallHint,
+      });
     }
 
     if (shouldInitMemoryInjector && !this.memoryInjector) {
@@ -2395,9 +2361,23 @@ export class AgentHarness {
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
     const asyncId = profiler.asyncBegin(`orchestrator:${agentType}`, 'orchestrator');
+    let orchestratorBudget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number } | undefined;
+    try {
+      orchestratorBudget = this.agentRegistry?.getConfig(agentType)?.budget;
+    } catch {
+      // If agent config lookup fails, orchestrator falls back to internal defaults.
+    }
+
     const result = await this.orchestratorRunner.execute({
       config: {
         memoryInjector: this.memoryInjector ?? undefined,
+        ...(orchestratorBudget
+          ? {
+              maxIterations: orchestratorBudget.maxIterations,
+              maxToolCalls: orchestratorBudget.maxToolCalls,
+              maxDurationMs: orchestratorBudget.maxDurationMs,
+            }
+          : {}),
       },
       toolRegistry: this.toolRegistry,
       llm,

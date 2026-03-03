@@ -82,6 +82,49 @@ latest_run_id() {
     basename "$latest"
 }
 
+snapshot_run_dirs() {
+    local snapshot_file="$1"
+    find "$PROJECT_ROOT/.lab/runs" -mindepth 1 -maxdepth 1 -type d -name 'run_*' -print 2>/dev/null | sort >"$snapshot_file" || true
+}
+
+resolve_new_run_id_since_snapshot() {
+    local snapshot_file="$1"
+    local candidate
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        if ! grep -Fqx "$candidate" "$snapshot_file"; then
+            basename "$candidate"
+            return 0
+        fi
+    done < <(find "$PROJECT_ROOT/.lab/runs" -mindepth 1 -maxdepth 1 -type d -name 'run_*' -print 2>/dev/null | sort)
+    return 1
+}
+
+summarize_run_progress() {
+    local run_dir="$1"
+    local run_control="$run_dir/runtime/run_control.json"
+    local schedule_progress="$run_dir/runtime/schedule_progress.json"
+    [ -f "$run_control" ] || [ -f "$schedule_progress" ] || return 1
+
+    local status="unknown"
+    local active_count="0"
+    local total_slots="0"
+    local completed_slots="0"
+    local next_idx="0"
+
+    if [ -f "$run_control" ]; then
+        status=$(jq -r '.status // "unknown"' "$run_control" 2>/dev/null || echo "unknown")
+        active_count=$(jq -r '(.active_trials | length) // 0' "$run_control" 2>/dev/null || echo "0")
+    fi
+    if [ -f "$schedule_progress" ]; then
+        total_slots=$(jq -r '.total_slots // 0' "$schedule_progress" 2>/dev/null || echo "0")
+        completed_slots=$(jq -r '(.completed_slots | length) // 0' "$schedule_progress" 2>/dev/null || echo "0")
+        next_idx=$(jq -r '.next_schedule_index // 0' "$schedule_progress" 2>/dev/null || echo "0")
+    fi
+
+    echo "status=$status committed=$completed_slots/$total_slots active_trials=$active_count next_schedule_idx=$next_idx"
+}
+
 strict_grade_audit_run() {
     local run_id="$1"
     local run_dir="$PROJECT_ROOT/.lab/runs/$run_id"
@@ -415,10 +458,12 @@ def run_case(*, case_name, payload_hidden_command, hidden_exit, public_command, 
             "\n".join(
                 [
                     "#!/usr/bin/env python3",
+                    "import json",
                     "import os",
                     "import sys",
-                    "print('hidden smoke')",
-                    "raise SystemExit(int(os.environ.get('SMOKE_HIDDEN_EXIT', '0')))",
+                    "code = int(os.environ.get('SMOKE_HIDDEN_EXIT', '0'))",
+                    "print(json.dumps({'case_id': 'smoke', 'passed': code == 0}))",
+                    "raise SystemExit(code)",
                 ]
             )
             + "\n",
@@ -1012,23 +1057,80 @@ cmd_run() {
         mv "${run_experiment}.next" "$run_experiment"
     fi
 
+    local pre_run_snapshot
+    pre_run_snapshot=$(mktemp)
+    snapshot_run_dirs "$pre_run_snapshot"
+
     if [ -n "$tmp_dataset" ]; then
-        trap "rm -f '$tmp_experiment' '$tmp_dataset'" EXIT
+        trap "rm -f '$tmp_experiment' '$tmp_dataset' '$pre_run_snapshot'" EXIT
     else
-        trap "rm -f '$tmp_experiment'" EXIT
+        trap "rm -f '$tmp_experiment' '$pre_run_snapshot'" EXIT
     fi
 
     cmd_preflight "$run_experiment" || exit 1
     echo ""
+    echo "=== Run launch ==="
+    echo "Submitting run to lab-cli..."
+    echo "Once run_id appears, open live scoreboard with: $0 scoreboard --run-id <run_id>"
     cd "$PROJECT_ROOT"
     local run_status=0
-    DOCKER_CONTEXT="$BENCH_DOCKER_CONTEXT" "$LAB_CLI" run "$run_experiment" "${passthrough[@]+"${passthrough[@]}"}" || run_status=$?
+    local run_pid=0
+    local announced_run_id=""
+    local can_show_progress=0
+    local last_progress=""
+    if command -v jq >/dev/null 2>&1; then
+        can_show_progress=1
+    fi
+
+    set +e
+    DOCKER_CONTEXT="$BENCH_DOCKER_CONTEXT" "$LAB_CLI" run "$run_experiment" "${passthrough[@]+"${passthrough[@]}"}" &
+    run_pid=$!
+
+    while kill -0 "$run_pid" 2>/dev/null; do
+        if [ -z "$announced_run_id" ]; then
+            announced_run_id=$(resolve_new_run_id_since_snapshot "$pre_run_snapshot" || true)
+            if [ -n "$announced_run_id" ]; then
+                echo "run_id: $announced_run_id"
+                echo "run_dir: $PROJECT_ROOT/.lab/runs/$announced_run_id"
+                echo "scoreboard: $0 scoreboard --run-id $announced_run_id"
+            fi
+        fi
+
+        if [ "$can_show_progress" -eq 1 ] && [ -n "$announced_run_id" ]; then
+            local progress_line
+            progress_line=$(summarize_run_progress "$PROJECT_ROOT/.lab/runs/$announced_run_id" || true)
+            if [ -n "$progress_line" ] && [ "$progress_line" != "$last_progress" ]; then
+                echo "[run-progress] $progress_line"
+                last_progress="$progress_line"
+            fi
+        fi
+        sleep 2
+    done
+
+    wait "$run_pid"
+    run_status=$?
+    set -e
+
+    if [ -z "$announced_run_id" ]; then
+        announced_run_id=$(resolve_new_run_id_since_snapshot "$pre_run_snapshot" || true)
+    fi
+    if [ -z "$announced_run_id" ]; then
+        announced_run_id=$(latest_run_id || true)
+    fi
+    if [ -n "$announced_run_id" ]; then
+        echo "run_id: $announced_run_id"
+        echo "run_dir: $PROJECT_ROOT/.lab/runs/$announced_run_id"
+    fi
+
     if [ "$run_status" -ne 0 ]; then
         return "$run_status"
     fi
     if [ "$BENCH_STRICT_GRADE_AUDIT" = "1" ]; then
         local latest
-        latest=$(latest_run_id || true)
+        latest="$announced_run_id"
+        if [ -z "$latest" ]; then
+            latest=$(latest_run_id || true)
+        fi
         if [ -z "$latest" ]; then
             echo "  [FAIL] strict grade audit: could not resolve latest run id"
             return 1
@@ -1131,7 +1233,7 @@ cmd_scoreboard() {
                         v=$1; o=$2;
                         total[v] += 1;
                         if (o == "success") success[v] += 1;
-                        if (o == "error" || o == "failed" || o == "aborted") failed[v] += 1;
+                        if (o == "error" || o == "failed" || o == "failure" || o == "aborted") failed[v] += 1;
                     }
                     END {
                         if (length(total) == 0) {

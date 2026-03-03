@@ -990,9 +990,11 @@ export class Agent {
 
       // Update local context metrics with actual token usage from LLM
       if (response.usage) {
+        const reasoningTokens = response.usage.reasoningTokens ?? 0;
+        const visibleCompletionTokens = Math.max(0, (response.usage.completionTokens ?? 0) - reasoningTokens);
         localContext.updateMetrics(
           response.usage.promptTokens ?? 0,
-          response.usage.completionTokens ?? 0,
+          visibleCompletionTokens,
           response.usage.cachedTokens
         );
       }
@@ -2676,7 +2678,7 @@ export class Agent {
    * Emit llm_call event.
    */
   private emitLlmCall(
-    response: { content?: string; toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>; usage?: { totalTokens: number; promptTokens: number; completionTokens: number; cachedTokens?: number }; model?: string },
+    response: { content?: string; toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>; usage?: { totalTokens: number; promptTokens: number; completionTokens: number; cachedTokens?: number; reasoningTokens?: number }; model?: string },
     messages: Array<Record<string, unknown>>,
     durationMs: number,
     tools: ToolDefinition[],
@@ -2694,6 +2696,7 @@ export class Agent {
       totalTokens: response.usage?.totalTokens ?? 0,
       promptTokens: response.usage?.promptTokens ?? 0,
       completionTokens: response.usage?.completionTokens ?? 0,
+      reasoningTokens: response.usage?.reasoningTokens,
       cachedTokens: response.usage?.cachedTokens,
       maxWindowSize,
       durationMs,

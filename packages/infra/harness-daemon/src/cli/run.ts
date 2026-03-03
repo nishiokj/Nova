@@ -650,8 +650,13 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
       if (event.type === 'llm_call') {
         const promptTokens = Number((event.data ?? {}).promptTokens ?? 0);
         const completionTokens = Number((event.data ?? {}).completionTokens ?? 0);
-        tokensIn += Number.isFinite(promptTokens) ? promptTokens : 0;
-        tokensOut += Number.isFinite(completionTokens) ? completionTokens : 0;
+        const reasoningTokens = Number((event.data ?? {}).reasoningTokens ?? 0);
+        const safePromptTokens = Number.isFinite(promptTokens) ? promptTokens : 0;
+        const safeCompletionTokens = Number.isFinite(completionTokens) ? completionTokens : 0;
+        const safeReasoningTokens = Number.isFinite(reasoningTokens) ? reasoningTokens : 0;
+        const visibleCompletionTokens = Math.max(0, safeCompletionTokens - safeReasoningTokens);
+        tokensIn += safePromptTokens;
+        tokensOut += visibleCompletionTokens;
         modelCallCount += 1;
         const provider = asNonEmptyString((event.data ?? {}).provider) ?? 'unknown';
         const model = asNonEmptyString((event.data ?? {}).model) ?? 'unknown';
@@ -661,8 +666,9 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
           turn_index: modelCallCount - 1,
           model: { identity: `${provider}/${model}` },
           usage: {
-            tokens_in: Number.isFinite(promptTokens) ? promptTokens : 0,
-            tokens_out: Number.isFinite(completionTokens) ? completionTokens : 0,
+            tokens_in: safePromptTokens,
+            tokens_out: visibleCompletionTokens,
+            reasoning_tokens: safeReasoningTokens,
           },
           outcome: { status: 'ok' },
         });

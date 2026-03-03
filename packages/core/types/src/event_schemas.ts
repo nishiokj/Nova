@@ -160,6 +160,7 @@ export const LLMCallDataSchema = z.object({
   totalTokens: z.number(),
   promptTokens: z.number(),
   completionTokens: z.number(),
+  reasoningTokens: z.number().optional(),
   durationMs: z.number(),
   model: z.string(),
   toolCallsCount: z.number(),

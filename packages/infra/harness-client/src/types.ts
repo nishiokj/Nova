@@ -192,6 +192,7 @@ export interface LlmCallData {
   model?: string;
   promptTokens?: number;
   completionTokens?: number;
+  reasoningTokens?: number;
   totalTokens?: number;
   cachedTokens?: number;
   maxWindowSize?: number;

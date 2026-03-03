@@ -208,6 +208,8 @@ export interface TokenUsage {
   completionTokens: number;
   totalTokens: number;
   cachedTokens?: number;
+  /** Optional reasoning/thinking token count when provider exposes it separately. */
+  reasoningTokens?: number;
 }
 
 /**
