@@ -66,6 +66,7 @@ import {
 } from './skills_loader.js';
 import { SessionStore } from './session_store.js';
 import { createFileLogger, createToolRegistry, type HarnessLogger } from './harness_infra.js';
+import { HarnessPluginRegistry } from './plugin_registry.js';
 import { PermissionChecker } from './permissions.js';
 import { DefaultOrchestratorRunner, type OrchestratorRunner } from './orchestrator_runner.js';
 import type { PermissionedTool, PermissionRequest, PermissionResponse } from 'types';
@@ -252,10 +253,12 @@ function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentC
     'Bash',
     'WebFetch',
     'WebSearch',
-    'Skill',
     'PromptUser',
     'ExpandConversation',
   ]);
+  if (config.skills.enabled) {
+    builtinTools.add('Skill');
+  }
   const registeredAgentTypes = new Set(agentConfigs.map(c => c.type));
   for (const agentConf of agentConfigs) {
     // Filter out self-references to prevent recursive agent calls
@@ -442,10 +445,12 @@ export class AgentHarness {
   private initializedModelSelections = new Set<string>();
   private readonly pendingSessionHookTasks = new Set<Promise<void>>();
   private readonly closingSessionHooks = new Set<string>();
+  private readonly pluginRegistry: HarnessPluginRegistry;
 
   constructor(config: FullHarnessConfig, logger?: HarnessLogger, orchestratorRunner?: OrchestratorRunner) {
     this.config = config;
     this.logger = logger ?? defaultLogger;
+    this.pluginRegistry = new HarnessPluginRegistry(this.logger);
     this.sessionTtlMs = config.context.sessionTtlMs;
     this.maxSessions = config.context.maxSessions;
     this.sessionHookRegistry = createSessionScopedUnifiedHookRegistry();
@@ -613,37 +618,6 @@ export class AgentHarness {
    */
   private isGraphDReady(): boolean {
     return !!(this.graphd && this.graphdStarted);
-  }
-
-  private isOptionalModuleMissing(error: unknown, moduleName: string): boolean {
-    if (!error || typeof error !== 'object') return false;
-    const code = (error as { code?: string }).code;
-    if (code !== 'ERR_MODULE_NOT_FOUND' && code !== 'MODULE_NOT_FOUND') {
-      return false;
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    return (
-      message.includes(`'${moduleName}'`) ||
-      message.includes(`"${moduleName}"`) ||
-      message.includes(`Cannot find package '${moduleName}'`) ||
-      message.includes(`Cannot find module '${moduleName}'`) ||
-      message.includes(moduleName)
-    );
-  }
-
-  private async importOptionalModule<T>(moduleName: string, installHint: string): Promise<T | null> {
-    try {
-      return await import(moduleName) as T;
-    } catch (error) {
-      if (this.isOptionalModuleMissing(error, moduleName)) {
-        this.logger.info('Optional plugin module not installed; feature disabled', {
-          module: moduleName,
-          installHint,
-        });
-        return null;
-      }
-      throw error;
-    }
   }
 
   /**
@@ -1038,79 +1012,96 @@ export class AgentHarness {
       }
     }
 
-    const shouldInitTracePersistence = this.config.memory.enabled || !!process.env.MEMORY_DAEMON_URL;
-    const needsMemoryPlugin = this.config.memory.enabled || shouldInitTracePersistence || this.config.entityGraph.enabled;
+    const shouldInitMemoryInjector = this.config.memory.enabled;
+    const shouldInitTracePersistence = shouldInitMemoryInjector || !!process.env.MEMORY_DAEMON_URL;
+    const shouldInitEntityGraph = this.config.entityGraph.enabled;
+    const shouldLoadMemoryPlugin = shouldInitTracePersistence || shouldInitEntityGraph;
     const memoryModuleName = process.env.NOVA_MEMORY_MODULE ?? 'memory';
     const memoryInstallHint = `bun add ${memoryModuleName}`;
 
     let memoryPluginModule: MemoryPluginModule | null = null;
-    if (needsMemoryPlugin) {
-      try {
-        memoryPluginModule = await this.importOptionalModule<MemoryPluginModule>(
-          memoryModuleName,
-          memoryInstallHint
-        );
-      } catch (error) {
-        this.logger.warning('Failed to load memory plugin module', {
-          module: memoryModuleName,
-          error: getErrorMessage(error),
-        });
-      }
+    if (shouldLoadMemoryPlugin) {
+      memoryPluginModule = await this.pluginRegistry.resolve<MemoryPluginModule>({
+        id: 'memory',
+        moduleName: memoryModuleName,
+        installHint: memoryInstallHint,
+      });
     }
 
-    if (this.config.memory.enabled && !this.memoryInjector) {
-      try {
-        const createMemoryInjector = memoryPluginModule?.createMemoryInjector;
-        if (createMemoryInjector) {
-          this.memoryInjector = createMemoryInjector({
-            baseUrl: this.config.memory.baseUrl,
-            timeout: this.config.memory.timeoutMs,
-          });
-          this.logger.info('MemoryInjector initialized', {
-            baseUrl: this.config.memory.baseUrl,
-            timeoutMs: this.config.memory.timeoutMs,
-            module: memoryModuleName,
-          });
-        } else {
-          this.logger.warning('Memory integration requested but memory plugin is missing createMemoryInjector export', {
-            module: memoryModuleName,
-            installHint: memoryInstallHint,
+    if (shouldInitMemoryInjector && !this.memoryInjector) {
+      if (!memoryPluginModule) {
+        this.logger.warning('Memory integration requested but memory plugin module is unavailable', {
+          module: memoryModuleName,
+          installHint: memoryInstallHint,
+        });
+      } else {
+        try {
+          const createMemoryInjector = memoryPluginModule.createMemoryInjector;
+          if (createMemoryInjector) {
+            this.memoryInjector = createMemoryInjector({
+              baseUrl: this.config.memory.baseUrl,
+              timeout: this.config.memory.timeoutMs,
+            });
+            this.logger.info('MemoryInjector initialized', {
+              baseUrl: this.config.memory.baseUrl,
+              timeoutMs: this.config.memory.timeoutMs,
+              module: memoryModuleName,
+            });
+          } else {
+            this.logger.warning('Memory integration requested but memory plugin is missing createMemoryInjector export', {
+              module: memoryModuleName,
+              installHint: memoryInstallHint,
+            });
+          }
+        } catch (error) {
+          this.logger.warning('Failed to initialize MemoryInjector', {
+            error: getErrorMessage(error),
           });
         }
-      } catch (error) {
-        this.logger.warning('Failed to initialize MemoryInjector', {
-          error: getErrorMessage(error),
-        });
       }
     }
 
     if (shouldInitTracePersistence && !this.memoryClient) {
-      const memoryDaemonUrl = process.env.MEMORY_DAEMON_URL || 'http://127.0.0.1:3001';
-      try {
-        const SyncClient = memoryPluginModule?.SyncClient;
-        if (SyncClient) {
-          this.memoryClient = new SyncClient(memoryDaemonUrl);
-          this.logger.info('Memory client initialized for traces', {
-            url: memoryDaemonUrl,
-            module: memoryModuleName,
-          });
-        } else {
-          this.logger.info('Trace persistence disabled: memory plugin is missing SyncClient export', {
-            module: memoryModuleName,
-            installHint: memoryInstallHint,
+      if (!memoryPluginModule) {
+        this.logger.info('Trace persistence disabled: memory plugin module is unavailable', {
+          module: memoryModuleName,
+          installHint: memoryInstallHint,
+        });
+      } else {
+        const memoryDaemonUrl = process.env.MEMORY_DAEMON_URL || this.config.memory.baseUrl;
+        try {
+          const SyncClient = memoryPluginModule.SyncClient;
+          if (SyncClient) {
+            this.memoryClient = new SyncClient(memoryDaemonUrl);
+            this.logger.info('Memory client initialized for traces', {
+              url: memoryDaemonUrl,
+              module: memoryModuleName,
+            });
+          } else {
+            this.logger.info('Trace persistence disabled: memory plugin is missing SyncClient export', {
+              module: memoryModuleName,
+              installHint: memoryInstallHint,
+            });
+          }
+        } catch (error) {
+          this.logger.warning('Failed to initialize memory client (traces will not be persisted)', {
+            error: getErrorMessage(error),
           });
         }
-      } catch (error) {
-        this.logger.warning('Failed to initialize memory client (traces will not be persisted)', {
-          error: getErrorMessage(error),
-        });
       }
     }
 
     // Initialize EntityGraph if enabled
-    if (this.config.entityGraph.enabled && !this.entityGraph) {
+    if (shouldInitEntityGraph && !this.entityGraph) {
+      if (!memoryPluginModule) {
+        this.logger.warning('EntityGraph requested but memory plugin module is unavailable', {
+          module: memoryModuleName,
+          installHint: memoryInstallHint,
+        });
+        return true;
+      }
       try {
-        const createEntityGraph = memoryPluginModule?.createEntityGraph;
+        const createEntityGraph = memoryPluginModule.createEntityGraph;
         if (!createEntityGraph) {
           this.logger.warning('EntityGraph requested but memory plugin is missing createEntityGraph export', {
             module: memoryModuleName,
@@ -2370,9 +2361,23 @@ export class AgentHarness {
 
     // Execute with session-specific working directory (passed explicitly for concurrent-safety)
     const asyncId = profiler.asyncBegin(`orchestrator:${agentType}`, 'orchestrator');
+    let orchestratorBudget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number } | undefined;
+    try {
+      orchestratorBudget = this.agentRegistry?.getConfig(agentType)?.budget;
+    } catch {
+      // If agent config lookup fails, orchestrator falls back to internal defaults.
+    }
+
     const result = await this.orchestratorRunner.execute({
       config: {
         memoryInjector: this.memoryInjector ?? undefined,
+        ...(orchestratorBudget
+          ? {
+              maxIterations: orchestratorBudget.maxIterations,
+              maxToolCalls: orchestratorBudget.maxToolCalls,
+              maxDurationMs: orchestratorBudget.maxDurationMs,
+            }
+          : {}),
       },
       toolRegistry: this.toolRegistry,
       llm,

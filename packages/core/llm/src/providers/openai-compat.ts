@@ -23,6 +23,7 @@ import {
 import { parseApiErrorResponse, formatApiError } from '../response_schemas.js';
 import { profiler } from 'shared';
 import { compileSchemaForOpenAI } from './schema_compiler.js';
+import { normalizeChatCompletionsUsage } from './token_usage.js';
 
 function parseApiError(provider: string, status: number, responseText: string): Error {
   const parsed = parseApiErrorResponse(provider, status, responseText);
@@ -43,12 +44,18 @@ function parseApiError(provider: string, status: number, responseText: string): 
  * the model to see its own raw output on the next turn and loop.
  */
 class ThinkTagFilter {
-  private inThink = false;
+  private inThink: boolean;
   private buffer = '';
-  // Track whether we've emitted any real content yet. Before the first real
-  // content, an unpaired </think> means the opening tag was in the generation
-  // prompt (Qwen3.5 template adds `<think>\n` as the prompt suffix).
-  private seenContent = false;
+
+  /**
+   * @param startInThink - Set true when the model's prompt template ends with
+   *   `<think>\n` (Qwen, DeepSeek). Without this, multi-chunk reasoning before
+   *   the closing `</think>` leaks into the content stream because the filter
+   *   doesn't know it's inside a think block.
+   */
+  constructor(startInThink = false) {
+    this.inThink = startInThink;
+  }
 
   processChunk(chunk: string): { content: string; reasoning: string } {
     let input = this.buffer + chunk;
@@ -85,15 +92,7 @@ class ThinkTagFilter {
         }
 
         if (openIdx === -1) {
-          // Check for partial opening/closing tags at buffer boundary
-          const partialOpen = this.partialTagAt(input, '<think>');
-          const partialClose = !this.seenContent
-            ? this.partialTagAt(input, '</think>')
-            : -1;
-          const partial = partialOpen >= 0 && partialClose >= 0
-            ? Math.min(partialOpen, partialClose)
-            : partialOpen >= 0 ? partialOpen : partialClose;
-
+          const partial = this.partialTagAt(input, '<think>');
           if (partial >= 0) {
             content += input.slice(0, partial);
             this.buffer = input.slice(partial);
@@ -108,7 +107,6 @@ class ThinkTagFilter {
       }
     }
 
-    if (content) this.seenContent = true;
     return { content, reasoning };
   }
 
@@ -634,6 +632,9 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
         prompt_tokens: number;
         completion_tokens: number;
         total_tokens: number;
+        completion_tokens_details?: Record<string, unknown>;
+        output_tokens_details?: Record<string, unknown>;
+        prompt_tokens_details?: Record<string, unknown>;
       };
     };
 
@@ -702,11 +703,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       stopReason = 'tool_use';
     }
 
-    const usage: TokenUsage = {
-      promptTokens: data.usage?.prompt_tokens ?? 0,
-      completionTokens: data.usage?.completion_tokens ?? 0,
-      totalTokens: data.usage?.total_tokens ?? 0,
-    };
+    const usage: TokenUsage = normalizeChatCompletionsUsage(data.usage);
 
     return {
       content: cleanContent,
@@ -871,7 +868,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     let model = resolved.model;
     let buffer = '';
     let eventCount = 0;
-    const thinkFilter = new ThinkTagFilter();
+    const thinkFilter = new ThinkTagFilter(this.modelStartsInThinkBlock(resolved.model));
     const toolCallFilter = new ToolCallTagFilter();
 
     // Profile stream consumption (reading all SSE events)
@@ -919,6 +916,9 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
                 prompt_tokens: number;
                 completion_tokens: number;
                 total_tokens: number;
+                completion_tokens_details?: Record<string, unknown>;
+                output_tokens_details?: Record<string, unknown>;
+                prompt_tokens_details?: Record<string, unknown>;
               };
             };
 
@@ -1010,11 +1010,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
             }
 
             if (event.usage) {
-              usage = {
-                promptTokens: event.usage.prompt_tokens,
-                completionTokens: event.usage.completion_tokens,
-                totalTokens: event.usage.total_tokens,
-              };
+              usage = normalizeChatCompletionsUsage(event.usage);
             }
           } catch {
             // Skip malformed events
@@ -1136,6 +1132,16 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     const providerLower = (displayProvider ?? '').toLowerCase();
     if (!modelLower.includes('qwen')) return false;
     return providerLower.includes('lmstudio') || providerLower.includes('vllm') || providerLower.includes('openai-compat');
+  }
+
+  /**
+   * Models whose prompt template ends with `<think>\n`, causing the model to
+   * start generation inside a think block. Without startInThink=true, the
+   * ThinkTagFilter misclassifies multi-chunk reasoning as content.
+   */
+  private modelStartsInThinkBlock(model?: string): boolean {
+    const m = (model ?? '').toLowerCase();
+    return m.includes('qwen') || m.includes('deepseek');
   }
 
   private buildQwenToolSkinInstruction(tools: ToolDefinition[]): string {

@@ -19,7 +19,10 @@ REPO_SNAPSHOT="$EXPERIMENTS_ROOT/bench/benchmark/repos/jesus/src.tar.zst"
 TASKS_DIR="$EXPERIMENTS_ROOT/bench/benchmark/tasks/v0"
 BENCH_GRADER_SRC="$PROJECT_ROOT/benchmark/grader/bench_benchmark_adapter.py"
 BENCH_GRADER_IMAGE_PATH="/opt/bench/bench_benchmark_adapter.py"
+BENCH_HIDDEN_IMAGE_ROOT="/opt/bench/hidden"
 BENCH_DOCKER_CONTEXT="${BENCH_DOCKER_CONTEXT:-orbstack}"
+BENCH_HIDE_HIDDEN_COMMANDS="${BENCH_HIDE_HIDDEN_COMMANDS:-1}"
+BENCH_STRICT_GRADE_AUDIT="${BENCH_STRICT_GRADE_AUDIT:-1}"
 
 usage() {
     cat <<'EOF'
@@ -70,6 +73,172 @@ ensure_docker() {
     fi
 }
 
+latest_run_id() {
+    local latest
+    latest=$(ls -1dt "$PROJECT_ROOT"/.lab/runs/run_* 2>/dev/null | head -1 || true)
+    if [ -z "$latest" ]; then
+        return 1
+    fi
+    basename "$latest"
+}
+
+snapshot_run_dirs() {
+    local snapshot_file="$1"
+    find "$PROJECT_ROOT/.lab/runs" -mindepth 1 -maxdepth 1 -type d -name 'run_*' -print 2>/dev/null | sort >"$snapshot_file" || true
+}
+
+resolve_new_run_id_since_snapshot() {
+    local snapshot_file="$1"
+    local candidate
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        if ! grep -Fqx "$candidate" "$snapshot_file"; then
+            basename "$candidate"
+            return 0
+        fi
+    done < <(find "$PROJECT_ROOT/.lab/runs" -mindepth 1 -maxdepth 1 -type d -name 'run_*' -print 2>/dev/null | sort)
+    return 1
+}
+
+summarize_run_progress() {
+    local run_dir="$1"
+    local run_control="$run_dir/runtime/run_control.json"
+    local schedule_progress="$run_dir/runtime/schedule_progress.json"
+    [ -f "$run_control" ] || [ -f "$schedule_progress" ] || return 1
+
+    local status="unknown"
+    local active_count="0"
+    local total_slots="0"
+    local completed_slots="0"
+    local next_idx="0"
+
+    if [ -f "$run_control" ]; then
+        status=$(jq -r '.status // "unknown"' "$run_control" 2>/dev/null || echo "unknown")
+        active_count=$(jq -r '(.active_trials | length) // 0' "$run_control" 2>/dev/null || echo "0")
+    fi
+    if [ -f "$schedule_progress" ]; then
+        total_slots=$(jq -r '.total_slots // 0' "$schedule_progress" 2>/dev/null || echo "0")
+        completed_slots=$(jq -r '(.completed_slots | length) // 0' "$schedule_progress" 2>/dev/null || echo "0")
+        next_idx=$(jq -r '.next_schedule_index // 0' "$schedule_progress" 2>/dev/null || echo "0")
+    fi
+
+    echo "status=$status committed=$completed_slots/$total_slots active_trials=$active_count next_schedule_idx=$next_idx"
+}
+
+strict_grade_audit_run() {
+    local run_id="$1"
+    local run_dir="$PROJECT_ROOT/.lab/runs/$run_id"
+    local trials_path="$run_dir/facts/trials.jsonl"
+    local metrics_long_path="$run_dir/facts/metrics_long.jsonl"
+    local scores_path="$run_dir/benchmark/scores.jsonl"
+    local summary_path="$run_dir/benchmark/summary.json"
+
+    if [ ! -d "$run_dir" ]; then
+        echo "  [FAIL] strict grade audit: run directory missing: $run_dir"
+        return 1
+    fi
+    if [ ! -f "$trials_path" ]; then
+        echo "  [FAIL] strict grade audit: trials facts missing: $trials_path"
+        return 1
+    fi
+    if [ ! -f "$scores_path" ]; then
+        echo "  [FAIL] strict grade audit: benchmark scores missing: $scores_path"
+        return 1
+    fi
+    if [ ! -f "$summary_path" ]; then
+        echo "  [FAIL] strict grade audit: benchmark summary missing: $summary_path"
+        return 1
+    fi
+
+    if python3 - "$trials_path" "$scores_path" "$summary_path" "$metrics_long_path" <<'PY'
+import json
+import pathlib
+import sys
+
+trials_path = pathlib.Path(sys.argv[1])
+scores_path = pathlib.Path(sys.argv[2])
+summary_path = pathlib.Path(sys.argv[3])
+metrics_long_path = pathlib.Path(sys.argv[4])
+
+def load_jsonl(path: pathlib.Path):
+    rows = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        rows.append(json.loads(raw))
+    return rows
+
+trials = load_jsonl(trials_path)
+if not trials:
+    raise SystemExit(f"strict grade audit failed: no trial rows in {trials_path}")
+
+verdict_to_outcome = {
+    "pass": "success",
+    "fail": "failure",
+    "error": "error",
+    "missing": "missing",
+}
+
+for row in trials:
+    trial_id = row.get("trial_id", "unknown")
+    primary = row.get("primary_metric_name")
+    if primary != "resolved":
+        raise SystemExit(
+            f"strict grade audit failed: trial {trial_id} primary_metric_name={primary!r} (expected 'resolved')"
+        )
+    metrics = row.get("metrics")
+    if isinstance(metrics, dict):
+        if metrics.get("grade_error") is True:
+            reason = metrics.get("grade_error_reason")
+            raise SystemExit(
+                f"strict grade audit failed: trial {trial_id} has grade_error=true ({reason})"
+            )
+        verdict = metrics.get("benchmark_verdict")
+        mapped = verdict_to_outcome.get(verdict)
+        if mapped is not None and row.get("outcome") != mapped:
+            raise SystemExit(
+                f"strict grade audit failed: trial {trial_id} outcome={row.get('outcome')!r} "
+                f"does not match benchmark_verdict={verdict!r} mapped={mapped!r}"
+            )
+
+scores = load_jsonl(scores_path)
+if len(scores) != len(trials):
+    raise SystemExit(
+        f"strict grade audit failed: score row count {len(scores)} does not match trial row count {len(trials)}"
+    )
+for idx, score in enumerate(scores, start=1):
+    if score.get("schema_version") != "benchmark_score_record_v1":
+        raise SystemExit(
+            f"strict grade audit failed: score row {idx} invalid schema_version={score.get('schema_version')!r}"
+        )
+
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+totals = summary.get("totals", {})
+if int(totals.get("trials", -1)) != len(trials):
+    raise SystemExit(
+        f"strict grade audit failed: benchmark summary totals.trials={totals.get('trials')} "
+        f"does not match trial rows={len(trials)}"
+    )
+if int(totals.get("missing", 0)) != 0 or int(totals.get("error", 0)) != 0:
+    raise SystemExit(
+        f"strict grade audit failed: benchmark summary has missing={totals.get('missing')} error={totals.get('error')}"
+    )
+
+if metrics_long_path.exists():
+    for row in load_jsonl(metrics_long_path):
+        if row.get("metric_name") == "grade_error" and bool(row.get("metric_value")):
+            raise SystemExit(
+                f"strict grade audit failed: metrics_long contains grade_error=true for trial {row.get('trial_id')}"
+            )
+PY
+    then
+        echo "  [ok] strict grade audit: run $run_id has grading-consistent outcomes and zero grade schema errors"
+    else
+        return 1
+    fi
+}
+
 resolve_experiment_artifact() {
     local experiment_file="$1"
     local artifact
@@ -82,6 +251,68 @@ resolve_experiment_artifact() {
     fi
     artifact=$(cd "$(dirname "$artifact")" && echo "$(pwd)/$(basename "$artifact")")
     echo "$artifact"
+}
+
+resolve_dataset_path_from_experiment() {
+    local experiment_file="$1"
+    local dataset_path
+    dataset_path=$(grep '^\s*path:' "$experiment_file" 2>/dev/null | head -1 | sed 's/.*path:\s*//' | xargs || true)
+    if [ -z "$dataset_path" ]; then
+        return 1
+    fi
+    if [[ "$dataset_path" != /* ]]; then
+        dataset_path="$(dirname "$experiment_file")/$dataset_path"
+    fi
+    dataset_path=$(cd "$(dirname "$dataset_path")" && echo "$(pwd)/$(basename "$dataset_path")")
+    echo "$dataset_path"
+}
+
+write_sanitized_dataset_without_hidden_commands() {
+    local source_dataset="$1"
+    local target_dataset="$2"
+    python3 - "$source_dataset" "$target_dataset" <<'PY'
+import json
+import pathlib
+import sys
+
+src = pathlib.Path(sys.argv[1])
+dst = pathlib.Path(sys.argv[2])
+dst.parent.mkdir(parents=True, exist_ok=True)
+
+rows = []
+for line in src.read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    row = json.loads(line)
+    task = row.get("task")
+    if isinstance(task, dict):
+        task["hidden_command"] = ""
+    rows.append(json.dumps(row, separators=(",", ":")))
+
+dst.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
+PY
+}
+
+sanitize_hidden_commands_in_experiment() {
+    local experiment_file="$1"
+    if [ "$BENCH_HIDE_HIDDEN_COMMANDS" != "1" ]; then
+        return 0
+    fi
+
+    local source_dataset
+    source_dataset=$(resolve_dataset_path_from_experiment "$experiment_file" || true)
+    if [ -z "$source_dataset" ] || [ ! -f "$source_dataset" ]; then
+        return 0
+    fi
+
+    local sanitized_dataset
+    sanitized_dataset=$(mktemp "${experiment_file%.yaml}.tmp_dataset_XXXXXX.jsonl")
+    write_sanitized_dataset_without_hidden_commands "$source_dataset" "$sanitized_dataset"
+
+    sed -E "s|^  path: .*|  path: $sanitized_dataset|" "$experiment_file" >"${experiment_file}.next"
+    mv "${experiment_file}.next" "$experiment_file"
+
+    echo "$sanitized_dataset"
 }
 
 prepare_experiment_for_task_image_grader() {
@@ -215,18 +446,36 @@ def assert_true(condition, message):
         raise AssertionError(message)
 
 
-def run_case(*, case_name, hidden_command, public_command, outcome, expected_resolved, expected_verdict):
+def run_case(*, case_name, payload_hidden_command, hidden_exit, public_command, outcome, expected_resolved, expected_verdict):
     with tempfile.TemporaryDirectory(prefix="bench_adapter_smoke_") as tmp:
         root = pathlib.Path(tmp)
         workspace = root / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
+        hidden_root = root / "hidden_bundle"
+        hidden_root.mkdir(parents=True, exist_ok=True)
+        (hidden_root / "cases.jsonl").write_text("{}\n", encoding="utf-8")
+        (hidden_root / "runner.py").write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import json",
+                    "import os",
+                    "import sys",
+                    "code = int(os.environ.get('SMOKE_HIDDEN_EXIT', '0'))",
+                    "print(json.dumps({'case_id': 'smoke', 'passed': code == 0}))",
+                    "raise SystemExit(code)",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
         task = {
             "id": "TASK_SMOKE",
             "workspace": str(workspace),
             "benchmark": {"adapter_id": "bench_v0", "name": "bench", "split": "test"},
             "public_command": public_command,
-            "hidden_command": hidden_command,
+            "hidden_command": payload_hidden_command,
         }
         result = {"outcome": outcome, "answer": "smoke fixture"}
 
@@ -255,6 +504,8 @@ def run_case(*, case_name, hidden_command, public_command, outcome, expected_res
                 "AGENTLAB_ATTEMPT": "1",
                 "AGENTLAB_ROW_SEQ": "0",
                 "AGENTLAB_GRADER_TIMEOUT_SECONDS": "5",
+                "BENCH_HIDDEN_ROOT": str(hidden_root),
+                "SMOKE_HIDDEN_EXIT": str(hidden_exit),
             }
         )
 
@@ -293,20 +544,35 @@ def run_case(*, case_name, hidden_command, public_command, outcome, expected_res
             score.get("evaluator", {}).get("command") == ["python3", "/opt/bench/bench_benchmark_adapter.py"],
             f"{case_name}: evaluator command path must be /opt/bench/bench_benchmark_adapter.py",
         )
+        diagnostics = score.get("ext", {}).get("bench", {}).get("diagnostics", {})
+        assert_true(
+            diagnostics.get("hidden_command_source") == "image_hidden_bundle",
+            f"{case_name}: hidden_command_source must be image_hidden_bundle",
+        )
+        assert_true(
+            str(hidden_root / "runner.py") in (diagnostics.get("hidden_command") or ""),
+            f"{case_name}: hidden_command should resolve to BENCH_HIDDEN_ROOT runner.py",
+        )
+        assert_true(
+            diagnostics.get("payload_hidden_command_present") is True,
+            f"{case_name}: payload hidden command presence should be tracked",
+        )
 
 
 def main():
     run_case(
-        case_name="self_report_error_but_checks_pass",
-        hidden_command="true",
+        case_name="image_hidden_overrides_payload_and_outcome",
+        payload_hidden_command="false",
+        hidden_exit=0,
         public_command="true",
         outcome="error",
         expected_resolved=1.0,
         expected_verdict="pass",
     )
     run_case(
-        case_name="self_report_success_but_hidden_fails",
-        hidden_command="false",
+        case_name="image_hidden_failure_overrides_payload_and_outcome",
+        payload_hidden_command="true",
+        hidden_exit=1,
         public_command="true",
         outcome="success",
         expected_resolved=0.0,
@@ -418,11 +684,16 @@ for line in open('$dataset_abs'):
                 echo "  [ok] all task Docker images present"
 
                 local missing_graders=0
+                local missing_hidden_bundles=0
                 while IFS= read -r image_name; do
                     [ -n "$image_name" ] || continue
                     if ! docker --context "$BENCH_DOCKER_CONTEXT" run --rm --entrypoint /bin/sh "$image_name" -lc "test -x '$BENCH_GRADER_IMAGE_PATH'" >/dev/null 2>&1; then
                         echo "  [FAIL] task image missing embedded grader: $image_name ($BENCH_GRADER_IMAGE_PATH)"
                         missing_graders=$((missing_graders + 1))
+                    fi
+                    if ! docker --context "$BENCH_DOCKER_CONTEXT" run --rm --entrypoint /bin/sh "$image_name" -lc "test -f '$BENCH_HIDDEN_IMAGE_ROOT/runner.py' && test -f '$BENCH_HIDDEN_IMAGE_ROOT/cases.jsonl' && command -v python3 >/dev/null 2>&1" >/dev/null 2>&1; then
+                        echo "  [FAIL] task image missing hidden bundle or python3: $image_name ($BENCH_HIDDEN_IMAGE_ROOT)"
+                        missing_hidden_bundles=$((missing_hidden_bundles + 1))
                     fi
                 done < <(python3 -c "
 import json, sys
@@ -437,6 +708,12 @@ for line in open('$dataset_abs'):
                 else
                     echo "  [FAIL] $missing_graders task image(s) missing embedded benchmark grader — run: $0 build-task-images"
                     errors=$((errors + missing_graders))
+                fi
+                if [ "$missing_hidden_bundles" -eq 0 ]; then
+                    echo "  [ok] all task Docker images include hidden bundle + python3: $BENCH_HIDDEN_IMAGE_ROOT"
+                else
+                    echo "  [FAIL] $missing_hidden_bundles task image(s) missing hidden bundle/python3 — run: $0 build-task-images"
+                    errors=$((errors + missing_hidden_bundles))
                 fi
             else
                 echo "  [FAIL] $missing_images task image(s) missing — run: $0 build-task-images"
@@ -624,6 +901,16 @@ cmd_build_task_images() {
             cp -r "$task_dir/public" "$ctx/public"
             has_public=true
         fi
+        local has_hidden=false
+        if [ -d "$task_dir/hidden" ] && [ "$(ls -A "$task_dir/hidden")" ]; then
+            cp -r "$task_dir/hidden" "$ctx/hidden"
+            has_hidden=true
+        else
+            echo "FAILED: $tag (hidden bundle missing at $task_dir/hidden)"
+            failed=$((failed + 1))
+            rm -rf "$ctx"
+            continue
+        fi
         cp "$BENCH_GRADER_SRC" "$ctx/bench_benchmark_adapter.py"
 
         # Build the per-task Dockerfile
@@ -637,6 +924,9 @@ cmd_build_task_images() {
             fi
             if $has_public; then
                 echo "COPY public/ .bench_public/"
+            fi
+            if $has_hidden; then
+                echo "COPY hidden/ $BENCH_HIDDEN_IMAGE_ROOT/"
             fi
             echo "COPY bench_benchmark_adapter.py $BENCH_GRADER_IMAGE_PATH"
             echo "RUN chmod +x $BENCH_GRADER_IMAGE_PATH"
@@ -672,18 +962,30 @@ cmd_describe() {
     ensure_cli
     cd "$PROJECT_ROOT"
     local tmp_experiment
+    local tmp_dataset=""
     tmp_experiment=$(mktemp "${EXPERIMENT%.yaml}.tmp_XXXXXX.yaml")
-    trap "rm -f '$tmp_experiment'" RETURN
     prepare_experiment_for_task_image_grader "$EXPERIMENT" "$tmp_experiment"
+    tmp_dataset=$(sanitize_hidden_commands_in_experiment "$tmp_experiment" || true)
+    if [ -n "$tmp_dataset" ]; then
+        trap "rm -f '$tmp_experiment' '$tmp_dataset'" RETURN
+    else
+        trap "rm -f '$tmp_experiment'" RETURN
+    fi
     DOCKER_CONTEXT="$BENCH_DOCKER_CONTEXT" "$LAB_CLI" describe "$tmp_experiment" "$@"
 }
 
 cmd_preflight_entry() {
     local experiment_file="${1:-$EXPERIMENT}"
     local tmp_experiment
+    local tmp_dataset=""
     tmp_experiment=$(mktemp "${EXPERIMENT%.yaml}.tmp_preflight_XXXXXX.yaml")
-    trap "rm -f '$tmp_experiment'" RETURN
     prepare_experiment_for_task_image_grader "$experiment_file" "$tmp_experiment"
+    tmp_dataset=$(sanitize_hidden_commands_in_experiment "$tmp_experiment" || true)
+    if [ -n "$tmp_dataset" ]; then
+        trap "rm -f '$tmp_experiment' '$tmp_dataset'" RETURN
+    else
+        trap "rm -f '$tmp_experiment'" RETURN
+    fi
     cmd_preflight "$tmp_experiment"
 }
 
@@ -724,11 +1026,13 @@ cmd_run() {
 
     local run_experiment="$EXPERIMENT"
     local tmp_experiment=""
+    local tmp_dataset=""
     local artifact
     tmp_experiment=$(mktemp "${EXPERIMENT%.yaml}.tmp_XXXXXX.yaml")
     cp "$EXPERIMENT" "$tmp_experiment"
     run_experiment="$tmp_experiment"
     prepare_experiment_for_task_image_grader "$EXPERIMENT" "$run_experiment"
+    tmp_dataset=$(sanitize_hidden_commands_in_experiment "$run_experiment" || true)
     artifact=$(resolve_experiment_artifact "$run_experiment" || true)
 
     if [ -n "$artifact" ] && [ -f "$artifact" ] && artifact_needs_linux_repack "$artifact"; then
@@ -753,12 +1057,86 @@ cmd_run() {
         mv "${run_experiment}.next" "$run_experiment"
     fi
 
-    trap "rm -f '$tmp_experiment'" EXIT
+    local pre_run_snapshot
+    pre_run_snapshot=$(mktemp)
+    snapshot_run_dirs "$pre_run_snapshot"
+
+    if [ -n "$tmp_dataset" ]; then
+        trap "rm -f '$tmp_experiment' '$tmp_dataset' '$pre_run_snapshot'" EXIT
+    else
+        trap "rm -f '$tmp_experiment' '$pre_run_snapshot'" EXIT
+    fi
 
     cmd_preflight "$run_experiment" || exit 1
     echo ""
+    echo "=== Run launch ==="
+    echo "Submitting run to lab-cli..."
+    echo "Once run_id appears, open live scoreboard with: $0 scoreboard --run-id <run_id>"
     cd "$PROJECT_ROOT"
-    DOCKER_CONTEXT="$BENCH_DOCKER_CONTEXT" "$LAB_CLI" run "$run_experiment" "${passthrough[@]+"${passthrough[@]}"}"
+    local run_status=0
+    local run_pid=0
+    local announced_run_id=""
+    local can_show_progress=0
+    local last_progress=""
+    if command -v jq >/dev/null 2>&1; then
+        can_show_progress=1
+    fi
+
+    set +e
+    DOCKER_CONTEXT="$BENCH_DOCKER_CONTEXT" "$LAB_CLI" run "$run_experiment" "${passthrough[@]+"${passthrough[@]}"}" &
+    run_pid=$!
+
+    while kill -0 "$run_pid" 2>/dev/null; do
+        if [ -z "$announced_run_id" ]; then
+            announced_run_id=$(resolve_new_run_id_since_snapshot "$pre_run_snapshot" || true)
+            if [ -n "$announced_run_id" ]; then
+                echo "run_id: $announced_run_id"
+                echo "run_dir: $PROJECT_ROOT/.lab/runs/$announced_run_id"
+                echo "scoreboard: $0 scoreboard --run-id $announced_run_id"
+            fi
+        fi
+
+        if [ "$can_show_progress" -eq 1 ] && [ -n "$announced_run_id" ]; then
+            local progress_line
+            progress_line=$(summarize_run_progress "$PROJECT_ROOT/.lab/runs/$announced_run_id" || true)
+            if [ -n "$progress_line" ] && [ "$progress_line" != "$last_progress" ]; then
+                echo "[run-progress] $progress_line"
+                last_progress="$progress_line"
+            fi
+        fi
+        sleep 2
+    done
+
+    wait "$run_pid"
+    run_status=$?
+    set -e
+
+    if [ -z "$announced_run_id" ]; then
+        announced_run_id=$(resolve_new_run_id_since_snapshot "$pre_run_snapshot" || true)
+    fi
+    if [ -z "$announced_run_id" ]; then
+        announced_run_id=$(latest_run_id || true)
+    fi
+    if [ -n "$announced_run_id" ]; then
+        echo "run_id: $announced_run_id"
+        echo "run_dir: $PROJECT_ROOT/.lab/runs/$announced_run_id"
+    fi
+
+    if [ "$run_status" -ne 0 ]; then
+        return "$run_status"
+    fi
+    if [ "$BENCH_STRICT_GRADE_AUDIT" = "1" ]; then
+        local latest
+        latest="$announced_run_id"
+        if [ -z "$latest" ]; then
+            latest=$(latest_run_id || true)
+        fi
+        if [ -z "$latest" ]; then
+            echo "  [FAIL] strict grade audit: could not resolve latest run id"
+            return 1
+        fi
+        strict_grade_audit_run "$latest"
+    fi
 }
 
 cmd_scoreboard() {
@@ -855,7 +1233,7 @@ cmd_scoreboard() {
                         v=$1; o=$2;
                         total[v] += 1;
                         if (o == "success") success[v] += 1;
-                        if (o == "error" || o == "failed" || o == "aborted") failed[v] += 1;
+                        if (o == "error" || o == "failed" || o == "failure" || o == "aborted") failed[v] += 1;
                     }
                     END {
                         if (length(total) == 0) {

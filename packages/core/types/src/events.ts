@@ -282,6 +282,7 @@ export interface LLMCallData {
   totalTokens: number;
   promptTokens: number;
   completionTokens: number;
+  reasoningTokens?: number;
   cachedTokens?: number;
   maxWindowSize?: number;
   durationMs: number;

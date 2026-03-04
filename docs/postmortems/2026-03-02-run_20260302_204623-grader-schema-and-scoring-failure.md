@@ -67,10 +67,11 @@ Implemented scorer behavior in grader to:
 1. Emit schema-valid `benchmark_prediction_record_v1` and `benchmark_score_record_v1` fields, including identity keys required by schema.
 2. Compute score by executing benchmark commands in workspace:
    - `public_command` (if present)
-   - `hidden_command` (required for resolved pass/fail)
-3. Set `resolved=1.0` only when required command checks pass.
-4. Emit explicit failure labels (`hidden_command_failed`, `hidden_command_timeout`, etc.) and command diagnostics in `ext.bench`.
-5. Stop using agent self-reported `outcome` as the benchmark score.
+   - hidden tests from image bundle (`/opt/bench/hidden/runner.py` + `cases.jsonl`)
+3. Parse hidden test case output rows (`{"passed": ...}`) and score `hidden_cases_passed/hidden_cases_total` from case results (not only process exit code).
+4. Set `resolved=1.0` only when required command checks pass.
+5. Emit explicit failure labels (`hidden_command_failed`, `hidden_command_timeout`, etc.) and command diagnostics in `ext.bench`.
+6. Stop using agent self-reported `outcome` as the benchmark score.
 
 Also implemented wrapper hardening in `scripts/run-bench-experiment.sh`:
 
@@ -79,7 +80,8 @@ Also implemented wrapper hardening in `scripts/run-bench-experiment.sh`:
    - asserts required score identity fields are present
    - asserts score follows command outcomes (not agent self-report)
 2. `run`/`describe` now rewrite experiment command paths to task-image grader (`/opt/bench/bench_benchmark_adapter.py`).
-3. Task-image build now copies tracked grader into image (`build-task-images`).
+3. Task-image build now copies tracked grader and hidden bundle into image (`build-task-images`).
+4. Wrapper sanitizes dataset `task.hidden_command` before run (`BENCH_HIDE_HIDDEN_COMMANDS=1` default), preventing hidden command leakage to agent payload.
 
 ## Corrective Actions (Follow-up)
 
