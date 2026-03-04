@@ -63,7 +63,7 @@ jobs:
             --outfile ./nova-${{ matrix.target }}${EXT}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nova-${{ matrix.target }}
           path: nova-${{ matrix.target }}*
