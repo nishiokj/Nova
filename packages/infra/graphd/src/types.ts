@@ -360,6 +360,45 @@ export interface GraphDEvent {
 }
 
 // ============================================
+// FILE TRACE (v7)
+// ============================================
+
+/**
+ * File trace as stored in database.
+ * Records each Write/Edit tool call for attribution.
+ */
+export interface GraphDFileTrace {
+  id: number;
+  sessionKey: string;
+  filePath: string;
+  toolName: string;
+  modelId: string | null;
+  requestId: string | null;
+  oldContent: string | null;
+  oldContentSizeBytes: number | null;
+  oldContentTruncated: boolean;
+  newContent: string | null;
+  newContentSizeBytes: number;
+  newContentTruncated: boolean;
+  contentHash: string;
+  createdAt: number;
+}
+
+/**
+ * Input for adding a file trace (omits id, computed fields).
+ */
+export interface FileTraceInput {
+  filePath: string;
+  toolName: string;
+  modelId?: string;
+  requestId?: string;
+  oldContent?: string;
+  newContent: string;
+  contentHash: string;
+  createdAt?: number;
+}
+
+// ============================================
 // AUTH TYPES (v5)
 // ============================================
 

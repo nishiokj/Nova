@@ -18,6 +18,7 @@ import {
   EXPORTABLE_TABLES,
   isExportableTable,
   V6_MIGRATION_STATEMENTS,
+  V7_MIGRATION_STATEMENTS,
 } from './schema.js';
 import type {
   SymbolDef,
@@ -28,6 +29,8 @@ import type {
   GraphDMessage,
   GraphDContextSnapshot,
   GraphDEvent,
+  GraphDFileTrace,
+  FileTraceInput,
   GraphDStats,
   UserRecord,
   UserSessionRecord,
@@ -168,6 +171,14 @@ export class GraphStore {
             throw err;
           }
         }
+      }
+    }
+
+    // Run v7 migrations (add file_traces table)
+    // Uses CREATE TABLE/INDEX IF NOT EXISTS so idempotent
+    if (existingNum < 7) {
+      for (const stmt of V7_MIGRATION_STATEMENTS) {
+        this.db.exec(stmt);
       }
     }
 
@@ -1216,6 +1227,148 @@ export class GraphStore {
     const result = this.db.query(query).run(...params);
     return result.changes;
   }
+
+  // =========================================================================
+  // File Trace Methods (v7)
+  // =========================================================================
+
+  /** Max stored bytes per content field (256 KiB). */
+  private static readonly FILE_TRACE_MAX_CONTENT_BYTES = 262144;
+
+  /**
+   * Add a file trace for a Write/Edit tool call.
+   */
+  addFileTrace(sessionKey: string, trace: FileTraceInput): number {
+    const maxBytes = GraphStore.FILE_TRACE_MAX_CONTENT_BYTES;
+    const ts = trace.createdAt ?? Date.now();
+
+    // Truncate content fields if needed
+    const newContentBytes = Buffer.byteLength(trace.newContent, 'utf-8');
+    let newContent = trace.newContent;
+    let newContentTruncated = 0;
+    if (newContentBytes > maxBytes) {
+      newContent = Buffer.from(trace.newContent).subarray(0, maxBytes).toString('utf-8');
+      newContentTruncated = 1;
+    }
+
+    let oldContent: string | null = null;
+    let oldContentSizeBytes: number | null = null;
+    let oldContentTruncated = 0;
+    if (trace.oldContent != null) {
+      const oldBytes = Buffer.byteLength(trace.oldContent, 'utf-8');
+      oldContentSizeBytes = oldBytes;
+      oldContent = trace.oldContent;
+      if (oldBytes > maxBytes) {
+        oldContent = Buffer.from(trace.oldContent).subarray(0, maxBytes).toString('utf-8');
+        oldContentTruncated = 1;
+      }
+    }
+
+    try {
+      const result = this.db
+        .query(
+          `INSERT INTO file_traces
+           (session_key, file_path, tool_name, model_id, request_id,
+            old_content, old_content_size_bytes, old_content_truncated,
+            new_content, new_content_size_bytes, new_content_truncated,
+            content_hash, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+        )
+        .run(
+          sessionKey,
+          trace.filePath,
+          trace.toolName,
+          trace.modelId ?? null,
+          trace.requestId ?? null,
+          oldContent,
+          oldContentSizeBytes,
+          oldContentTruncated,
+          newContent,
+          newContentBytes,
+          newContentTruncated,
+          trace.contentHash,
+          ts
+        );
+      return Number(result.lastInsertRowid);
+    } catch (err) {
+      if ((err as Error).message.includes('FOREIGN KEY constraint')) {
+        throw new Error(`Session '${sessionKey}' does not exist`);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Get file traces for a session with optional filters.
+   */
+  getFileTraces(
+    sessionKey: string,
+    opts?: { filePath?: string; toolName?: string; limit?: number; offset?: number }
+  ): GraphDFileTrace[] {
+    const limit = Math.min(opts?.limit ?? 100, 500);
+    const offset = opts?.offset ?? 0;
+
+    let query = 'SELECT * FROM file_traces WHERE session_key = ?';
+    const params: (string | number)[] = [sessionKey];
+
+    if (opts?.filePath) {
+      query += ' AND file_path = ?';
+      params.push(opts.filePath);
+    }
+    if (opts?.toolName) {
+      query += ' AND tool_name = ?';
+      params.push(opts.toolName);
+    }
+
+    query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+
+    const rows = this.db.query(query).all(...params) as Record<string, unknown>[];
+    return rows.map(this.rowToFileTrace);
+  }
+
+  /**
+   * Get file traces for a specific file across all sessions.
+   */
+  getFileTracesByPath(
+    filePath: string,
+    opts?: { limit?: number; offset?: number }
+  ): GraphDFileTrace[] {
+    const limit = Math.min(opts?.limit ?? 100, 500);
+    const offset = opts?.offset ?? 0;
+
+    const rows = this.db
+      .query('SELECT * FROM file_traces WHERE file_path = ? ORDER BY created_at DESC LIMIT ? OFFSET ?')
+      .all(filePath, limit, offset) as Record<string, unknown>[];
+    return rows.map(this.rowToFileTrace);
+  }
+
+  /**
+   * Get file trace count for a session.
+   */
+  getFileTraceCount(sessionKey: string): number {
+    const row = this.db
+      .query('SELECT COUNT(*) as count FROM file_traces WHERE session_key = ?')
+      .get(sessionKey) as { count: number };
+    return row.count;
+  }
+
+  private rowToFileTrace = (row: Record<string, unknown>): GraphDFileTrace => ({
+    id: row.id as number,
+    sessionKey: row.session_key as string,
+    filePath: row.file_path as string,
+    toolName: row.tool_name as string,
+    modelId: row.model_id as string | null,
+    requestId: row.request_id as string | null,
+    oldContent: row.old_content as string | null,
+    oldContentSizeBytes: row.old_content_size_bytes as number | null,
+    oldContentTruncated: Boolean(row.old_content_truncated),
+    newContent: row.new_content as string | null,
+    newContentSizeBytes: row.new_content_size_bytes as number,
+    newContentTruncated: Boolean(row.new_content_truncated),
+    contentHash: row.content_hash as string,
+    createdAt: row.created_at as number,
+  });
 
   // =========================================================================
   // User Management Methods (v5)

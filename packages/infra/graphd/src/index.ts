@@ -32,6 +32,9 @@ export type {
   // Session workflow types (v6)
   SessionStatus,
   SessionMetrics,
+  // File trace types (v7)
+  GraphDFileTrace,
+  FileTraceInput,
 } from './types.js';
 
 export {

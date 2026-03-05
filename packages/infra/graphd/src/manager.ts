@@ -1055,6 +1055,67 @@ export class GraphDManager {
   }
 
   // =========================================================================
+  // File Trace Management (v7)
+  // =========================================================================
+
+  /**
+   * Add a file trace for a Write/Edit tool call.
+   */
+  fileTraceAdd(
+    sessionKey: string,
+    trace: import('./types.js').FileTraceInput
+  ): Record<string, unknown> {
+    if (!this.store) {
+      return { success: false, error: 'reusing_existing_instance' };
+    }
+    try {
+      const id = this.store.addFileTrace(sessionKey, trace);
+      return { success: true, trace_id: id };
+    } catch (err) {
+      console.warn('File trace add failed:', err);
+      return { success: false, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Get file traces for a session.
+   */
+  fileTracesGet(
+    sessionKey: string,
+    opts?: { filePath?: string; toolName?: string; limit?: number; offset?: number }
+  ): Record<string, unknown> {
+    if (!this.store) {
+      return { traces: [], error: 'reusing_existing_instance' };
+    }
+    try {
+      const traces = this.store.getFileTraces(sessionKey, opts);
+      return { traces };
+    } catch (err) {
+      console.warn('File traces get failed:', err);
+      return { traces: [], error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Get file traces for a specific file across all sessions.
+   */
+  fileTracesByPathGet(
+    filePath: string,
+    opts?: { limit?: number; offset?: number }
+  ): Record<string, unknown> {
+    if (!this.store) {
+      return { traces: [], error: 'reusing_existing_instance' };
+    }
+    try {
+      const traces = this.store.getFileTracesByPath(filePath, opts);
+      return { traces };
+    } catch (err) {
+      console.warn('File traces by path get failed:', err);
+      return { traces: [], error: (err as Error).message };
+    }
+  }
+
+  // =========================================================================
   // Session Fork
   // =========================================================================
 

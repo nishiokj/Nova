@@ -16,10 +16,11 @@
  * v3: Added session_events table for real-time event persistence
  * v5: Added auth tables (users, user_sessions, provider_credentials)
  * v6: Enriched sessions table with workflow fields (goal, current_work_item_id, current_objective)
+ * v7: Added file_traces table for Write/Edit tool call persistence
  *
  * MUST match Python GRAPH_D_SCHEMA_VERSION
  */
-export const GRAPHD_SCHEMA_VERSION = 'v6';
+export const GRAPHD_SCHEMA_VERSION = 'v7';
 
 /**
  * GraphD version string.
@@ -196,6 +197,31 @@ CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_revoked ON user_sessions(revoked);
 CREATE INDEX IF NOT EXISTS idx_provider_credentials_user_id ON provider_credentials(user_id);
 CREATE INDEX IF NOT EXISTS idx_provider_credentials_user_provider ON provider_credentials(user_id, provider);
+
+-- File traces table (v7) - Write/Edit tool call persistence
+CREATE TABLE IF NOT EXISTS file_traces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_key TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    model_id TEXT,
+    request_id TEXT,
+    old_content TEXT,
+    old_content_size_bytes INTEGER,
+    old_content_truncated INTEGER NOT NULL DEFAULT 0,
+    new_content TEXT,
+    new_content_size_bytes INTEGER NOT NULL,
+    new_content_truncated INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (session_key) REFERENCES sessions(session_key) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_traces_session ON file_traces(session_key);
+CREATE INDEX IF NOT EXISTS idx_file_traces_path ON file_traces(file_path);
+CREATE INDEX IF NOT EXISTS idx_file_traces_created ON file_traces(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_file_traces_session_path_created
+  ON file_traces(session_key, file_path, created_at DESC);
 `;
 
 /**
@@ -228,6 +254,7 @@ export const EXPORTABLE_TABLES = new Set([
   'users',
   'user_sessions',
   'provider_credentials',
+  'file_traces',
 ]);
 
 /**
@@ -245,4 +272,32 @@ export const V6_MIGRATION_STATEMENTS = [
   'ALTER TABLE sessions ADD COLUMN goal TEXT;',
   'ALTER TABLE sessions ADD COLUMN current_work_item_id TEXT;',
   'ALTER TABLE sessions ADD COLUMN current_objective TEXT;',
+];
+
+/**
+ * Migration statements for v7 (add file_traces table).
+ * Uses CREATE TABLE/INDEX IF NOT EXISTS for idempotency.
+ */
+export const V7_MIGRATION_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS file_traces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_key TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    model_id TEXT,
+    request_id TEXT,
+    old_content TEXT,
+    old_content_size_bytes INTEGER,
+    old_content_truncated INTEGER NOT NULL DEFAULT 0,
+    new_content TEXT,
+    new_content_size_bytes INTEGER NOT NULL,
+    new_content_truncated INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (session_key) REFERENCES sessions(session_key) ON DELETE CASCADE
+  );`,
+  'CREATE INDEX IF NOT EXISTS idx_file_traces_session ON file_traces(session_key);',
+  'CREATE INDEX IF NOT EXISTS idx_file_traces_path ON file_traces(file_path);',
+  'CREATE INDEX IF NOT EXISTS idx_file_traces_created ON file_traces(created_at DESC);',
+  'CREATE INDEX IF NOT EXISTS idx_file_traces_session_path_created ON file_traces(session_key, file_path, created_at DESC);',
 ];

@@ -146,12 +146,6 @@ export {
   type EvidenceRetrievalLogRow,
   type EvidenceRetrievalLogInput,
   type RetrievalStatus,
-  // Agent Traces (cursor/agent-trace spec)
-  createAgentTracesRepository,
-  type AgentTracesRepository,
-  type AgentTraceRow,
-  type AgentTraceInput,
-  type TraceFilterOptions,
   // Architecture boundaries
   createArchitectureRepository,
   type ArchitectureRepository,
