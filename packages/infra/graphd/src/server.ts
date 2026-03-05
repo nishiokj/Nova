@@ -83,8 +83,32 @@ export class GraphDRequestHandler {
         break;
       }
 
-      default:
+      case '/traces/by-file': {
+        const filePath = params.get('file_path');
+        if (!filePath) {
+          this.sendJson(res, { error: 'missing_file_path' }, 400);
+          break;
+        }
+        const limit = safeInt(params.get('limit'), 100);
+        const offset = safeInt(params.get('offset'), 0);
+        this.sendJson(res, this.manager.fileTracesByPathGet(filePath, { limit, offset }));
+        break;
+      }
+
+      default: {
+        // Dynamic GET routes with path params
+        const sessionTracesMatch = path.match(/^\/sessions\/([^/]+)\/traces$/);
+        if (sessionTracesMatch) {
+          const sessionKey = decodeURIComponent(sessionTracesMatch[1]);
+          const filePath = params.get('file_path') ?? undefined;
+          const toolName = params.get('tool_name') ?? undefined;
+          const limit = safeInt(params.get('limit'), 100);
+          const offset = safeInt(params.get('offset'), 0);
+          this.sendJson(res, this.manager.fileTracesGet(sessionKey, { filePath, toolName, limit, offset }));
+          break;
+        }
         this.sendJson(res, { error: 'not_found' }, 404);
+      }
     }
   }
 
@@ -225,8 +249,31 @@ export class GraphDRequestHandler {
         this.sendJson(res, this.manager.handleArtifact(payload));
         break;
 
-      default:
+      default: {
+        // Dynamic POST routes with path params
+        const sessionTracesMatch = path.match(/^\/sessions\/([^/]+)\/traces$/);
+        if (sessionTracesMatch) {
+          const sessionKey = decodeURIComponent(sessionTracesMatch[1]);
+          const filePath = payload.file_path as string | undefined;
+          const toolName = payload.tool_name as string | undefined;
+          if (!filePath || !toolName) {
+            this.sendJson(res, { error: 'missing_file_path_or_tool_name' }, 400);
+            break;
+          }
+          this.sendJson(res, this.manager.fileTraceAdd(sessionKey, {
+            filePath,
+            toolName,
+            modelId: payload.model_id as string | undefined,
+            requestId: payload.request_id as string | undefined,
+            oldContent: payload.old_content as string | undefined,
+            newContent: payload.new_content as string ?? '',
+            contentHash: payload.content_hash as string ?? '',
+            createdAt: payload.created_at as number | undefined,
+          }));
+          break;
+        }
         this.sendJson(res, { error: 'not_found' }, 404);
+      }
     }
   }
 

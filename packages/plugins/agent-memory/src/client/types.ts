@@ -5,29 +5,6 @@
  */
 
 import type { ConnectorType } from '../ids.js'
-import type { TraceRecord } from 'types'
-
-// ============ Agent Traces ============
-
-export interface AgentTrace {
-  id: string
-  revision: string
-  session_key: string | null
-  tool_name: string
-  tool_version: string
-  trace: TraceRecord
-  created_at: string
-  updated_at: string
-}
-
-export interface TracesResponse {
-  traces: AgentTrace[]
-  total: number
-}
-
-export interface TraceResponse {
-  trace: AgentTrace
-}
 
 // ============ Internal Events ============
 

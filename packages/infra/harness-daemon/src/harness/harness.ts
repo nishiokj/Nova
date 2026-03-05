@@ -36,7 +36,8 @@ import { GraphDManager, createGraphDConfig, type GraphDSession } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
 import { LogSubscriber, createLogSubscriber } from '../subscribers/log_subscriber.js';
-import { createTraceSubscriber, extractCommitSha, isGitCommitCommand, type TraceSubscriber } from '../subscribers/trace_subscriber.js';
+import { createTraceSubscriber, extractCommitSha, isGitCommitCommand } from '../subscribers/trace_subscriber.js';
+import type { TraceSubscriber } from '../subscribers/trace_subscriber.js';
 import path from 'path';
 import fs from 'fs';
 import {
@@ -116,23 +117,8 @@ type EntityGraphInstance = {
   getHooks(): EntityGraphHooks;
 };
 
-type TraceCreatePayload = {
-  revision: string;
-  session_key?: string;
-  tool_name: string;
-  tool_version: string;
-  trace: unknown;
-};
-
-type TraceClient = {
-  traces: {
-    create(payload: TraceCreatePayload): Promise<unknown>;
-  };
-};
-
 type MemoryPluginModule = {
   createMemoryInjector?: (config: { baseUrl: string; timeout: number }) => MemoryInjector;
-  SyncClient?: new (baseUrl: string) => TraceClient;
   createEntityGraph?: (options: {
     databaseUrl: string;
     config: EntityGraphConfig;
@@ -441,7 +427,6 @@ export class AgentHarness {
   private entityGraph: EntityGraphInstance | null = null;
   private memoryInjector: MemoryInjector | null = null;
   private traceSubscriber: TraceSubscriber | null = null;
-  private memoryClient: TraceClient | null = null;
   private initializedModelSelections = new Set<string>();
   private readonly pendingSessionHookTasks = new Set<Promise<void>>();
   private readonly closingSessionHooks = new Set<string>();
@@ -514,35 +499,11 @@ export class AgentHarness {
 
     this.orchestratorRunner = orchestratorRunner ?? new DefaultOrchestratorRunner();
 
-    // Initialize TraceSubscriber for collecting Write/Edit tool calls and emitting on git commits
-    this.traceSubscriber = createTraceSubscriber(this.eventBus, {
-      repoRoot: workingDir,
-      toolName: 'agent',
-      toolVersion: '0.1.0',
-    });
-    this.logger.debug('TraceSubscriber initialized', { repoRoot: workingDir });
-
-    // Register callback to persist traces to database when emitted
-    this.traceSubscriber.onTraceEmitted(async (trace) => {
-      try {
-        if (this.memoryClient) {
-          await this.memoryClient.traces.create({
-            revision: trace.vcs.revision,
-            session_key: undefined, // Session key is per-file in trace, top-level is nullable
-            tool_name: trace.tool.name,
-            tool_version: trace.tool.version,
-            trace: trace,
-          });
-          this.logger.info('Trace persisted to database', { revision: trace.vcs.revision });
-        }
-      } catch (error) {
-        // Log warning but don't crash the agent if DB is down
-        this.logger.warning('Failed to persist trace to database (is agent-memory daemon running?)', {
-          error: getErrorMessage(error),
-          revision: trace.vcs.revision,
-        });
-      }
-    });
+    // Initialize TraceSubscriber for persisting Write/Edit tool calls to GraphD
+    if (this.graphd) {
+      this.traceSubscriber = createTraceSubscriber(this.eventBus, this.graphd, workingDir);
+      this.logger.debug('TraceSubscriber initialized', { repoRoot: workingDir });
+    }
 
 
     const defaultAgent = config.agents[config.defaultAgent];
@@ -1013,9 +974,8 @@ export class AgentHarness {
     }
 
     const shouldInitMemoryInjector = this.config.memory.enabled;
-    const shouldInitTracePersistence = shouldInitMemoryInjector || !!process.env.MEMORY_DAEMON_URL;
     const shouldInitEntityGraph = this.config.entityGraph.enabled;
-    const shouldLoadMemoryPlugin = shouldInitTracePersistence || shouldInitEntityGraph;
+    const shouldLoadMemoryPlugin = shouldInitMemoryInjector || shouldInitEntityGraph;
     const memoryModuleName = process.env.NOVA_MEMORY_MODULE ?? 'memory';
     const memoryInstallHint = `bun add ${memoryModuleName}`;
 
@@ -1055,36 +1015,6 @@ export class AgentHarness {
           }
         } catch (error) {
           this.logger.warning('Failed to initialize MemoryInjector', {
-            error: getErrorMessage(error),
-          });
-        }
-      }
-    }
-
-    if (shouldInitTracePersistence && !this.memoryClient) {
-      if (!memoryPluginModule) {
-        this.logger.info('Trace persistence disabled: memory plugin module is unavailable', {
-          module: memoryModuleName,
-          installHint: memoryInstallHint,
-        });
-      } else {
-        const memoryDaemonUrl = process.env.MEMORY_DAEMON_URL || this.config.memory.baseUrl;
-        try {
-          const SyncClient = memoryPluginModule.SyncClient;
-          if (SyncClient) {
-            this.memoryClient = new SyncClient(memoryDaemonUrl);
-            this.logger.info('Memory client initialized for traces', {
-              url: memoryDaemonUrl,
-              module: memoryModuleName,
-            });
-          } else {
-            this.logger.info('Trace persistence disabled: memory plugin is missing SyncClient export', {
-              module: memoryModuleName,
-              installHint: memoryInstallHint,
-            });
-          }
-        } catch (error) {
-          this.logger.warning('Failed to initialize memory client (traces will not be persisted)', {
             error: getErrorMessage(error),
           });
         }

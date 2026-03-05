@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 MAX_LOG_CHARS = 4000
+RUNNER_WORKSPACE = "/agentlab/workspace"
 
 
 def _required_env(name: str) -> str:
@@ -185,18 +186,14 @@ def _resolve_timeout_seconds() -> int:
 
 
 def _resolve_workspace(task_payload: Any) -> str:
-    if isinstance(task_payload, dict):
-        workspace = task_payload.get("workspace")
-        if isinstance(workspace, str) and workspace.strip():
-            return workspace.strip()
     env_workspace = os.environ.get("WORKSPACE", "").strip()
     if env_workspace:
         return env_workspace
-    return "/workspace"
+    return RUNNER_WORKSPACE
 
 
 def _resolve_image_hidden_bundle(task_payload: Any) -> tuple[str, Path | None]:
-    hidden_root = Path(os.environ.get("BENCH_HIDDEN_ROOT", "/opt/bench/hidden"))
+    hidden_root = Path(os.environ.get("BENCH_HIDDEN_ROOT", "/agentlab/deps/hidden"))
     workspace = _resolve_workspace(task_payload)
     candidates = [
         (hidden_root / "runner.py", hidden_root / "cases.jsonl"),
@@ -332,6 +329,10 @@ def _score_workspace(task_payload: Any) -> dict[str, Any]:
     hidden_command = image_hidden_command
     hidden_command_source = "image_hidden_bundle" if image_hidden_command else "missing"
     expected_hidden_cases_total = _count_hidden_cases(image_hidden_cases_path)
+    if not hidden_command and payload_hidden_command:
+        # Backward-compatible rewrite for legacy payloads that hardcode /workspace.
+        hidden_command = payload_hidden_command.replace("/workspace", str(workspace_path))
+        hidden_command_source = "payload_hidden_command"
 
     diagnostics: dict[str, Any] = {
         "workspace": str(workspace_path),
@@ -438,6 +439,39 @@ def _score_workspace(task_payload: Any) -> dict[str, Any]:
         resolved = 0.0
     resolved_binary = 1.0 if (hidden_pass and public_pass) else 0.0
 
+    hidden_cases_failed = (
+        hidden_command
+        and hidden_result is not None
+        and not hidden_result["timed_out"]
+        and isinstance(hidden_result.get("case_stats"), dict)
+        and not hidden_case_count_mismatch
+        and not hidden_case_parse_failed
+        and hidden_total > 0
+        and hidden_passed < hidden_total
+    )
+    hidden_command_exec_failed = (
+        hidden_command
+        and hidden_result is not None
+        and not hidden_result["timed_out"]
+        and int(hidden_result.get("exit_code", 0)) != 0
+        and not hidden_cases_failed
+    )
+    grading_completed = (
+        hidden_command
+        and hidden_result is not None
+        and not hidden_result["timed_out"]
+        and (
+            (isinstance(hidden_result.get("case_stats"), dict) and not hidden_case_count_mismatch and not hidden_case_parse_failed)
+            or expected_hidden_cases_total <= 0
+        )
+        and (not public_command or (public_result is not None and not public_result["timed_out"]))
+    )
+    patch_failed_tests = bool(
+        grading_completed and resolved_binary == 0.0 and (hidden_cases_failed or (public_command and not public_pass))
+    )
+    diagnostics["grading_completed"] = bool(grading_completed)
+    diagnostics["patch_failed_tests"] = patch_failed_tests
+
     if resolved_binary == 1.0:
         verdict = "pass"
         failure_label = None
@@ -451,6 +485,10 @@ def _score_workspace(task_payload: Any) -> dict[str, Any]:
             failure_label = "hidden_cases_count_mismatch"
         elif hidden_case_parse_failed:
             failure_label = "hidden_cases_parse_failed"
+        elif hidden_cases_failed:
+            failure_label = "hidden_cases_failed"
+        elif hidden_command_exec_failed:
+            failure_label = "hidden_command_exec_failed"
         else:
             failure_label = "hidden_command_failed"
 
@@ -500,7 +538,7 @@ def _score_record(task_payload: Any, agent_result: Any, patch_text: str | None) 
         "primary_metric_name": "resolved",
         "primary_metric_value": score["resolved"],
         "metrics": score["metrics"],
-        "evaluator": {"name": "bench_grader", "mode": "custom", "command": ["python3", "/opt/bench/bench_benchmark_adapter.py"]},
+        "evaluator": {"name": "bench_grader", "mode": "custom", "command": ["python3", "/agentlab/deps/bench_benchmark_adapter.py"]},
         "ext": {
             "bench": {
                 "overall_pass": score["resolved"] == 1.0,

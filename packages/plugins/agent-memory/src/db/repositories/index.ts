@@ -243,14 +243,6 @@ export {
 } from './resource-pool.js'
 
 export {
-  createAgentTracesRepository,
-  type AgentTracesRepository,
-  type AgentTraceRow,
-  type AgentTraceInput,
-  type TraceFilterOptions,
-} from './agent-traces.js'
-
-export {
   createWorkItemTemplatesRepository,
   type WorkItemTemplatesRepository,
   type WorkItemTemplateRow,
