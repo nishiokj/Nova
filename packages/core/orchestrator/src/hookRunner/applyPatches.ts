@@ -28,7 +28,7 @@ export interface ApplyResult {
   /** Patches that were successfully applied */
   applied: StatePatch[];
   /** Patches that were rejected with reasons */
-  rejected: Array<{ patch: StatePatch; reason: string }>;
+  rejected: { patch: StatePatch; reason: string }[];
   /** Audit entries for all operations */
   audit: AuditLogEntry[];
 }
@@ -54,10 +54,10 @@ export interface HookState {
 export function applyPatches(
   state: HookState,
   patches: StatePatch[],
-  source: string = 'unknown'
+  source = 'unknown'
 ): ApplyResult {
   const applied: StatePatch[] = [];
-  const rejected: Array<{ patch: StatePatch; reason: string }> = [];
+  const rejected: { patch: StatePatch; reason: string }[] = [];
   const audit: AuditLogEntry[] = [];
 
   for (const patch of patches) {

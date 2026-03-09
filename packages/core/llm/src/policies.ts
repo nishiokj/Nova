@@ -109,7 +109,7 @@ export function calculateBackoff(
   return Math.max(0, delay + jitter);
 }
 
-export function sleep(ms: number): Effect.Effect<void, never> {
+export function sleep(ms: number): Effect.Effect<void> {
   return Effect.sleep(ms);
 }
 
@@ -126,7 +126,7 @@ export class TimeoutError extends Error {
 export function withTimeout<T>(
   effect: Effect.Effect<T, unknown>,
   timeoutMs: number,
-  operationName: string = 'Operation'
+  operationName = 'Operation'
 ): Effect.Effect<T, Error | TimeoutError> {
   return effect.pipe(
     Effect.mapError((error) => error instanceof Error ? error : new Error(String(error))),
@@ -251,7 +251,7 @@ export class RateLimitError extends Error {
     info: RateLimitInfo,
     provider: string,
     model: string,
-    status: number = 429
+    status = 429
   ) {
     super(message);
     this.name = 'RateLimitError';
@@ -261,7 +261,7 @@ export class RateLimitError extends Error {
     this.status = status;
   }
 
-  isWorthWaiting(maxWaitMs: number = 60000): boolean {
+  isWorthWaiting(maxWaitMs = 60000): boolean {
     if (this.info.type === 'quota' || this.info.type === 'billing') {
       return false;
     }

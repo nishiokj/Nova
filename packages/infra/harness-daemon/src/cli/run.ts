@@ -11,15 +11,15 @@ import {
 } from 'harness-client';
 import { HarnessDaemon } from '../harness/daemon.js';
 
-type AgentResultIds = {
+interface AgentResultIds {
   run_id: string;
   trial_id: string;
   variant_id: string;
   task_id: string;
   repl_idx: number;
-};
+}
 
-type AgentResult = {
+interface AgentResult {
   schema_version: 'agent_result_v1';
   ids: AgentResultIds;
   outcome: 'success' | 'failure' | 'missing' | 'error';
@@ -30,33 +30,33 @@ type AgentResult = {
     message?: string;
     stack?: string;
   };
-};
+}
 
-type ProviderEnvBinding = {
+interface ProviderEnvBinding {
   provider: string;
   envName: string;
-};
+}
 
-type ModelSelection = {
+interface ModelSelection {
   provider: string;
   model: string;
   reasoning?: string;
   agentType: string;
-};
+}
 
-type RunInputPayload = {
+interface RunInputPayload {
   ids?: Partial<AgentResultIds>;
   task?: Record<string, unknown>;
   bindings?: Record<string, unknown>;
-};
+}
 
-type RunResult = {
+interface RunResult {
   success: boolean;
   content?: string;
   error?: string;
-};
+}
 
-type RunCliOptions = {
+interface RunCliOptions {
   prompt?: string;
   inputFilePath?: string;
   bindingsFilePath?: string;
@@ -71,44 +71,48 @@ type RunCliOptions = {
   dangerous: boolean;
   providerEnv: ProviderEnvBinding[];
   modelSelection?: ModelSelection;
-};
+}
 
-type PreparedRunInput = {
+interface PreparedRunInput {
   ids?: Partial<AgentResultIds>;
   task: Record<string, unknown>;
   bindings?: Record<string, unknown>;
-};
+}
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 0;
 
+function usageText(message?: string): string {
+  const body = `Usage: nova run (--input <prompt> | --input-file <path> | <input_path>) [<output_path>] [options]
+Options:
+  --output <path>
+  --events <path>
+  --working-dir <path>
+  --config <path>
+  --host <host>
+  --port <port>
+  --session-key <key>
+  --timeout-ms <ms>
+  --dangerous
+  --provider <provider>
+  --model <model>
+  --agent-type <agent_type>
+  --reasoning <reasoning>
+  --bindings-file <path> (legacy)
+  --provider-env <provider=ENV_NAME> (repeatable)
+
+AgentLab container example:
+  nova run \
+    --provider z.ai-coder \
+    --model glm-5 \
+    /in/task.json /out/result.json`;
+  return message ? `${message}
+${body}` : body;
+}
+
 function failUsage(message: string): never {
-  throw new Error(
-    `${message}\n` +
-      'Usage: nova run (--input <prompt> | --input-file <path> | <input_path>) [<output_path>] [options]\n' +
-      'Options:\n' +
-      '  --output <path>\n' +
-      '  --events <path>\n' +
-      '  --working-dir <path>\n' +
-      '  --config <path>\n' +
-      '  --host <host>\n' +
-      '  --port <port>\n' +
-      '  --session-key <key>\n' +
-      '  --timeout-ms <ms>\n' +
-      '  --dangerous\n' +
-      '  --provider <provider>\n' +
-      '  --model <model>\n' +
-      '  --agent-type <agent_type>\n' +
-      '  --reasoning <reasoning>\n' +
-      '  --bindings-file <path> (legacy)\n' +
-      '  --provider-env <provider=ENV_NAME> (repeatable)\n\n' +
-      'AgentLab container example:\n' +
-      '  nova run \\\n' +
-      '    --provider z.ai-coder \\\n' +
-      '    --model glm-5 \\\n' +
-      '    /in/task.json /out/result.json'
-  );
+  throw new Error(usageText(message));
 }
 
 function asNonEmptyString(value: unknown): string | undefined {
@@ -245,7 +249,8 @@ function parseRunArgs(rawArgs: string[]): RunCliOptions {
     } else if (arg === '--dangerous') {
       dangerous = true;
     } else if (arg === '--help' || arg === '-h') {
-      failUsage('Help requested');
+      console.log(usageText());
+      process.exit(0);
     } else {
       failUsage(`Unknown argument: ${arg}`);
     }
@@ -508,7 +513,7 @@ function waitForRunResponse(
 
     const onEvent = (event: BridgeEvent) => {
       if (event.type === 'response') {
-        const data = (event.data ?? {}) as ResponseData;
+        const data = (event.data ?? {});
         if (data.request_id !== requestId) return;
         cleanup();
         resolvePromise({
@@ -675,7 +680,7 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
         return;
       }
       if (event.type === 'progress') {
-        const data = (event.data ?? {}) as ProgressData;
+        const data = (event.data ?? {});
         const toolName = asNonEmptyString(data.tool_name);
         if (!toolName || typeof data.tool_success !== 'boolean') return;
         toolCallCount += 1;

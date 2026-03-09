@@ -1,4 +1,5 @@
-import { Deferred, Effect, Exit, Scope } from 'effect';
+import type { Exit, Scope } from 'effect';
+import { Deferred, Effect } from 'effect';
 import { RuntimeExecutionError } from './errors.js';
 
 export interface RuntimeCancellationSignal {

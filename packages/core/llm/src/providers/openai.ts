@@ -180,7 +180,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
     }
 
     body.input = this.normalizeInput(params.messages);
-    const inputArray = body.input as Array<Record<string, unknown>>;
+    const inputArray = body.input as Record<string, unknown>[];
     if (!inputArray || inputArray.length === 0) {
       logger.error('OpenAI request has no input items', {
         method: 'respond',
@@ -300,8 +300,8 @@ export class OpenAIProvider implements LLMProviderAdapter {
     resolved: ResolvedRequestConfig,
     responseId: string,
     logger: any,
-    maxWaitMs: number = 300000,
-    pollIntervalMs: number = 2000
+    maxWaitMs = 300000,
+    pollIntervalMs = 2000
   ): Promise<Record<string, unknown>> {
     const startTime = Date.now();
     let pollCount = 0;
@@ -629,8 +629,8 @@ export class OpenAIProvider implements LLMProviderAdapter {
   // HELPERS
   // ============================================
 
-  private normalizeInput(messages: any[]): Array<Record<string, unknown>> {
-    const input: Array<Record<string, unknown>> = [];
+  private normalizeInput(messages: any[]): Record<string, unknown>[] {
+    const input: Record<string, unknown>[] = [];
     const isValidToolName = (name: unknown): name is string =>
       typeof name === 'string' && /^[A-Za-z0-9_-]+$/.test(name);
 
@@ -644,7 +644,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
           continue;
         }
         // Translate Nova names → Codex names so the model sees its native tool names
-        const novaName = item.name as string;
+        const novaName = item.name;
         const codexName = NOVA_TO_CODEX[novaName] ?? novaName;
 
         // apply_patch: unwrap { input: text } to raw text for freeform round-trip
@@ -741,7 +741,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
     const direct = response.output_text as string | undefined;
     if (direct) return direct;
 
-    const output = response.output as Array<Record<string, unknown>> | undefined;
+    const output = response.output as Record<string, unknown>[] | undefined;
     if (!output) return '';
 
     let content = '';
@@ -750,7 +750,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
       const itemType = item.type as string | undefined;
 
       if (itemType === 'message') {
-        const contentBlocks = item.content as Array<Record<string, unknown>> | string | undefined;
+        const contentBlocks = item.content as Record<string, unknown>[] | string | undefined;
         if (typeof contentBlocks === 'string') {
           content += contentBlocks;
           continue;
@@ -797,7 +797,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
   }
 
   private parseToolCalls(response: Record<string, unknown>): ToolCall[] {
-    const output = response.output as Array<Record<string, unknown>> | undefined;
+    const output = response.output as Record<string, unknown>[] | undefined;
     if (!output || !Array.isArray(output)) return [];
 
     const toolCalls: ToolCall[] = [];
@@ -858,7 +858,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
       }
 
       if (item.type !== 'message') continue;
-      const contentBlocks = item.content as Array<Record<string, unknown>> | undefined;
+      const contentBlocks = item.content as Record<string, unknown>[] | undefined;
       if (!contentBlocks || !Array.isArray(contentBlocks)) continue;
 
       for (const block of contentBlocks) {

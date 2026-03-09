@@ -177,8 +177,8 @@ export function createDerivedEdge(
   dst: string,
   kind: string,
   provenance: string,
-  confidence: number = 0.7,
-  expiresAt: number = 0
+  confidence = 0.7,
+  expiresAt = 0
 ): DerivedEdge {
   return {
     src,

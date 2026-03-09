@@ -279,5 +279,5 @@ export interface ContextWindowTelemetry {
   percentageUsed: number;
   version: number;
   /** For dashboard inspection */
-  recentItems?: Array<{ type: string; preview: string; timestamp: number }>;
+  recentItems?: { type: string; preview: string; timestamp: number }[];
 }

@@ -141,6 +141,8 @@ export interface ToolParameterSchema {
   type: 'string' | 'number' | 'boolean' | 'object' | 'array';
   description?: string;
   enum?: string[];
+  minimum?: number;
+  maximum?: number;
   items?: ToolParameterSchema;
   properties?: Record<string, ToolParameterSchema>;
   required?: string[];

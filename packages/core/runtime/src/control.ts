@@ -59,7 +59,7 @@ export function takeRuntimeControl(
 
 export function takeAllRuntimeControl(
   queue: RuntimeControlQueue
-): Effect.Effect<ReadonlyArray<RuntimeControlMessage>> {
+): Effect.Effect<readonly RuntimeControlMessage[]> {
   return Queue.takeAll(queue).pipe(
     Effect.map((messages) => Array.from(messages))
   );

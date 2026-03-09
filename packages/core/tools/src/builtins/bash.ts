@@ -19,7 +19,7 @@ import { isDangerousCommand, toToolExecutionError } from '../types.js';
 /**
  * Truncate output if it exceeds maximum length.
  */
-function truncateOutput(output: string, maxLength: number = 100000): string {
+function truncateOutput(output: string, maxLength = 100000): string {
   return output.length > maxLength
     ? output.slice(0, maxLength) + '\n...[truncated]'
     : output;
@@ -202,7 +202,8 @@ export const bashToolOptions: ToolRegistrationOptions = {
       },
       timeout: {
         type: 'number',
-        description: 'Timeout in seconds (default: 30)',
+        description: 'Timeout in seconds (minimum: 1, default: 30)',
+        minimum: 1,
       },
     },
     required: ['command'],

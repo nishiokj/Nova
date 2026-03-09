@@ -34,7 +34,7 @@ export class EventBus implements EventBusProtocol {
   private shutdownFlag = false;
   private readonly ALL_EVENTS = '__all__';
 
-  private pendingEvents: Array<AnyEvent> = [];
+  private pendingEvents: AnyEvent[] = [];
   private flushScheduled = false;
 
   constructor() {
@@ -101,7 +101,7 @@ export class EventBus implements EventBusProtocol {
       console.error('[EventBus] Handler error:', err);
     }
 
-    if (runHandlers && runHandlers.size) {
+    if (runHandlers?.size) {
       for (const handler of runHandlers) {
         try {
           handler(event);

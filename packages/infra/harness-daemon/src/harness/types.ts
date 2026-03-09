@@ -38,7 +38,7 @@ export interface AgentRunResult {
 /** Single question item */
 export interface UserPromptQuestion {
   question: string;
-  options?: Array<string | { label: string; description?: string }>;
+  options?: (string | { label: string; description?: string })[];
   context?: string;
   multiSelect?: boolean;
   questionType?: string;
@@ -178,7 +178,7 @@ export interface ReadyEventData {
 /** Single question item in wire format */
 export interface UserPromptEventQuestion {
   question: string;
-  options?: Array<string | { label: string; description?: string }>;
+  options?: (string | { label: string; description?: string })[];
   context?: string;
   multi_select?: boolean;
   question_type?: string;

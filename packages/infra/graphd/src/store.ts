@@ -142,7 +142,7 @@ export class GraphStore {
     // Parse version numbers (e.g., "v4" -> 4)
     const parseVersion = (v: string | null): number => {
       if (!v) return 0;
-      const match = v.match(/^v(\d+)$/);
+      const match = /^v(\d+)$/.exec(v);
       return match ? parseInt(match[1], 10) : 0;
     };
 
@@ -1064,7 +1064,7 @@ export class GraphStore {
   listContextSnapshots(
     sessionKey: string,
     limit = 10
-  ): Array<{ id: number; sessionKey: string; snapshotVersion: number; createdAt: number }> {
+  ): { id: number; sessionKey: string; snapshotVersion: number; createdAt: number }[] {
     const rows = this.db
       .query(
         `SELECT id, session_key, snapshot_version, created_at

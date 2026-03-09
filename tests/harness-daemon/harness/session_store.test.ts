@@ -35,11 +35,12 @@ describe('SessionStore model selections', () => {
       workingDir: process.cwd(),
     });
 
-    store.setModelSelection('standard', { provider: 'openai', model: 'gpt-4o' });
+    store.setModelSelection('standard', { provider: 'openai', model: 'gpt-4o', contextWindow: 128_000 });
     const latestSetPatch = metadataUpdates.at(-1) as { model_selections?: Record<string, unknown> } | undefined;
     expect(latestSetPatch?.model_selections?.standard).toEqual({
       provider: 'openai',
       model: 'gpt-4o',
+      contextWindow: 128_000,
     });
 
     const removed = store.clearModelSelection('standard');
@@ -67,8 +68,8 @@ describe('SessionStore model selections', () => {
       workingDir: process.cwd(),
     });
 
-    store.setModelSelection('standard', { provider: 'openai', model: 'gpt-4o' });
-    store.setModelSelection('planner', { provider: 'openai', model: 'gpt-4o-mini' });
+    store.setModelSelection('standard', { provider: 'openai', model: 'gpt-4o', contextWindow: 128_000 });
+    store.setModelSelection('planner', { provider: 'openai', model: 'gpt-4o-mini', contextWindow: 128_000 });
     const updateCountBeforeClear = metadataUpdates.length;
 
     store.clearModelSelections();

@@ -151,7 +151,7 @@ function createAgentRegistry(budget?: { maxIterations: number; maxToolCalls: num
 }
 
 function getModelSelection() {
-  return { provider: 'openai', model: 'gpt-4o', displayName: 'GPT-4o' };
+  return { provider: 'openai', model: 'gpt-4o', contextWindow: 128_000, displayName: 'GPT-4o' };
 }
 
 /**

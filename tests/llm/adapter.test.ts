@@ -18,6 +18,7 @@ function createCompatRequest(overrides: Partial<LLMRequestConfig> = {}): LLMRequ
     model: 'mock-model',
     baseUrl: 'https://compat.example/v1',
     apiKey: 'test-key',
+    contextWindow: 128_000,
     ...overrides,
   };
 }

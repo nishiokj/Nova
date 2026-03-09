@@ -13,13 +13,13 @@ export interface DeferredWorkItem {
 }
 
 export interface ExecutionSnapshot {
-  toolHistory: Array<{
+  toolHistory: {
     name: string;
     args: Record<string, unknown>;
     success: boolean;
     durationMs: number;
     outputPreview?: string;
-  }>;
+  }[];
   filesModified: string[];
   filesRead: string[];
   metrics: {
@@ -32,7 +32,7 @@ export interface ExecutionSnapshot {
     outputTokens: number;
     contextPercentUsed: number;
   };
-  artifacts?: Array<{ sourcePath: string; name: string; kind: string; insight?: string }>;
+  artifacts?: { sourcePath: string; name: string; kind: string; insight?: string }[];
   fullResponse: string;
 }
 
@@ -52,7 +52,7 @@ export type StopHookResult =
 
 export interface StopHookUserPrompt {
   question: string;
-  options?: Array<string | { label: string; description?: string }>;
+  options?: (string | { label: string; description?: string })[];
   context?: string;
   multiSelect?: boolean;
   questionType?: string;

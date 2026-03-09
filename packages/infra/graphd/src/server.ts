@@ -97,7 +97,7 @@ export class GraphDRequestHandler {
 
       default: {
         // Dynamic GET routes with path params
-        const sessionTracesMatch = path.match(/^\/sessions\/([^/]+)\/traces$/);
+        const sessionTracesMatch = /^\/sessions\/([^/]+)\/traces$/.exec(path);
         if (sessionTracesMatch) {
           const sessionKey = decodeURIComponent(sessionTracesMatch[1]);
           const filePath = params.get('file_path') ?? undefined;
@@ -132,7 +132,7 @@ export class GraphDRequestHandler {
     // GET /control-plane/projects
     if (path === '/control-plane/projects') {
       const result = this.manager.sessionsList({ limit: 1000 });
-      const sessions = (result as { sessions?: Array<{ workingDir?: string; lastAccessedAt?: number }> }).sessions ?? [];
+      const sessions = (result as { sessions?: { workingDir?: string; lastAccessedAt?: number }[] }).sessions ?? [];
 
       const projectMap = new Map<string, { count: number; lastAccessed: number }>();
       for (const session of sessions) {
@@ -162,7 +162,7 @@ export class GraphDRequestHandler {
     }
 
     // GET /control-plane/sessions/:id/messages
-    const messagesMatch = path.match(/^\/control-plane\/sessions\/([^/]+)\/messages$/);
+    const messagesMatch = /^\/control-plane\/sessions\/([^/]+)\/messages$/.exec(path);
     if (messagesMatch) {
       const sessionKey = decodeURIComponent(messagesMatch[1]);
       const result = this.manager.messagesGet(sessionKey, 200, 0);
@@ -172,7 +172,7 @@ export class GraphDRequestHandler {
     }
 
     // GET /control-plane/sessions/:id
-    const sessionMatch = path.match(/^\/control-plane\/sessions\/([^/]+)$/);
+    const sessionMatch = /^\/control-plane\/sessions\/([^/]+)$/.exec(path);
     if (sessionMatch) {
       const sessionKey = decodeURIComponent(sessionMatch[1]);
       const result = this.manager.sessionGet(sessionKey);
@@ -251,13 +251,15 @@ export class GraphDRequestHandler {
 
       default: {
         // Dynamic POST routes with path params
-        const sessionTracesMatch = path.match(/^\/sessions\/([^/]+)\/traces$/);
+        const sessionTracesMatch = /^\/sessions\/([^/]+)\/traces$/.exec(path);
         if (sessionTracesMatch) {
           const sessionKey = decodeURIComponent(sessionTracesMatch[1]);
           const filePath = payload.file_path as string | undefined;
           const toolName = payload.tool_name as string | undefined;
-          if (!filePath || !toolName) {
-            this.sendJson(res, { error: 'missing_file_path_or_tool_name' }, 400);
+          const newContent = payload.new_content as string | undefined;
+          const contentHash = payload.content_hash as string | undefined;
+          if (!filePath || !toolName || !newContent || !contentHash) {
+            this.sendJson(res, { error: 'missing required fields: file_path, tool_name, new_content, content_hash' }, 400);
             break;
           }
           this.sendJson(res, this.manager.fileTraceAdd(sessionKey, {
@@ -266,8 +268,8 @@ export class GraphDRequestHandler {
             modelId: payload.model_id as string | undefined,
             requestId: payload.request_id as string | undefined,
             oldContent: payload.old_content as string | undefined,
-            newContent: payload.new_content as string ?? '',
-            contentHash: payload.content_hash as string ?? '',
+            newContent,
+            contentHash,
             createdAt: payload.created_at as number | undefined,
           }));
           break;

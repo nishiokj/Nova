@@ -112,7 +112,7 @@ describe('CodexProvider', () => {
 
     const { chunks, response } = await consumeStream(provider, context, {
       messages: [{ role: 'user', content: 'debug this' }],
-      llm: { provider: 'codex', model: 'gpt-5.3-codex' },
+      llm: { provider: 'codex', model: 'gpt-5.3-codex', contextWindow: 64_000 },
     });
 
     expect(chunks.join('')).toBe('Investigating Codex adapter issue.');
@@ -162,7 +162,7 @@ describe('CodexProvider', () => {
 
     const { response } = await consumeStream(provider, context, {
       messages: [{ role: 'user', content: 'debug this' }],
-      llm: { provider: 'codex', model: 'gpt-5.3-codex' },
+      llm: { provider: 'codex', model: 'gpt-5.3-codex', contextWindow: 64_000 },
     });
 
     expect(response.toolCalls).toEqual([
@@ -212,7 +212,7 @@ describe('CodexProvider', () => {
 
     const { chunks, response } = await consumeStream(provider, context, {
       messages: [{ role: 'user', content: 'respond with schema and call Edit' }],
-      llm: { provider: 'codex', model: 'gpt-5.3-codex' },
+      llm: { provider: 'codex', model: 'gpt-5.3-codex', contextWindow: 64_000 },
     });
 
     expect(chunks.join('')).toContain('"action":"done"');
@@ -269,7 +269,7 @@ describe('CodexProvider', () => {
           output: 'file body',
         },
       ] as unknown as StreamParams['messages'],
-      llm: { provider: 'codex', model: 'gpt-5.3-codex' },
+      llm: { provider: 'codex', model: 'gpt-5.3-codex', contextWindow: 64_000 },
     });
 
     expect(capturedBody).not.toBeNull();
@@ -331,7 +331,7 @@ describe('CodexProvider', () => {
 
     await consumeStream(provider, context, {
       messages: [{ role: 'user', content: 'return structured output' }],
-      llm: { provider: 'codex', model: 'gpt-5.3-codex' },
+      llm: { provider: 'codex', model: 'gpt-5.3-codex', contextWindow: 64_000 },
       responseSchema: {
         name: 'test_schema',
         schemaId: 'agent_action',

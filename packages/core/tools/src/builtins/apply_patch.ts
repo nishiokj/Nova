@@ -62,7 +62,7 @@ export function parsePatch(input: string): PatchOperation[] {
   let currentHunk: Hunk | null = null;
 
   const finalizeHunk = () => {
-    if (currentHunk && currentOp && currentOp.type === 'update') {
+    if (currentHunk && currentOp?.type === 'update') {
       if (currentHunk.lines.length > 0) {
         currentOp.hunks.push(currentHunk);
       }
@@ -133,7 +133,7 @@ export function parsePatch(input: string): PatchOperation[] {
     }
 
     if (line.startsWith('*** Move to: ')) {
-      if (!currentOp || currentOp.type !== 'update') {
+      if (currentOp?.type !== 'update') {
         throw new PatchParseError(`Line ${i + 1}: "Move to" without preceding "Update File"`);
       }
       currentOp.moveTo = line.slice('*** Move to: '.length).trim();
@@ -142,12 +142,12 @@ export function parsePatch(input: string): PatchOperation[] {
 
     // Hunk header
     if (line.startsWith('@@')) {
-      if (!currentOp || currentOp.type !== 'update') {
+      if (currentOp?.type !== 'update') {
         throw new PatchParseError(`Line ${i + 1}: hunk header outside of Update operation`);
       }
       finalizeHunk();
       // Extract optional context header after @@
-      const headerMatch = line.match(/^@@\s*(.*)$/);
+      const headerMatch = /^@@\s*(.*)$/.exec(line);
       const contextHeader = headerMatch?.[1]?.trim() || undefined;
       currentHunk = { contextHeader, lines: [] };
       state = State.HUNK_BODY;
@@ -172,7 +172,7 @@ export function parsePatch(input: string): PatchOperation[] {
     }
 
     // Add file content lines (all lines are +prefixed)
-    if (state === State.FILE_OP && currentOp && currentOp.type === 'add') {
+    if (state === State.FILE_OP && currentOp?.type === 'add') {
       if (line.startsWith('+')) {
         currentOp.content += (currentOp.content ? '\n' : '') + line.slice(1);
       } else if (line === '') {

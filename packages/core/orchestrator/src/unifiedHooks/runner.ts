@@ -78,11 +78,11 @@ export interface UnifiedEffectAuditEntry {
 
 export interface UnifiedEffectExecutionResult<E extends EffectEventType> {
   status: 'completed' | 'blocked';
-  outcomes: Array<{
+  outcomes: {
     hookId: string;
     source: string;
     outcome: EffectOutcomeFor<E>;
-  }>;
+  }[];
   blockedBy?: {
     hookId: string;
     source: string;
@@ -96,8 +96,8 @@ export function runUnifiedDecisionHooks<E extends DecisionEventType>(
   event: EventFor<E>,
   context: HookContext,
   registry: UnifiedHookRegistry
-): Effect.Effect<UnifiedDecisionExecutionResult<DecisionFor<E>>, never> {
-  const hooks = registry.getDecisionHooks(event.type as E);
+): Effect.Effect<UnifiedDecisionExecutionResult<DecisionFor<E>>> {
+  const hooks = registry.getDecisionHooks(event.type);
   if (hooks.length === 0) {
     return Effect.succeed({
       status: 'no_hooks',
@@ -132,7 +132,7 @@ export function runUnifiedDecisionHooks<E extends DecisionEventType>(
 
         if (isSuccess(result.outcome)) {
           if (decision === null) {
-            decision = result.outcome.decision as DecisionFor<E>;
+            decision = result.outcome.decision;
           }
           if (result.outcome.patches) {
             patches.push(...result.outcome.patches);
@@ -196,7 +196,7 @@ export function runUnifiedDecisionHooksForSession<E extends DecisionEventType>(
   event: EventFor<E>,
   context: HookContext,
   sessionRegistry: SessionScopedUnifiedHookRegistry
-): Effect.Effect<UnifiedDecisionExecutionResult<DecisionFor<E>>, never> {
+): Effect.Effect<UnifiedDecisionExecutionResult<DecisionFor<E>>> {
   const registry = sessionRegistry.getSessionRegistry(sessionKey);
   if (!registry) {
     return Effect.succeed({
@@ -216,7 +216,7 @@ export function runUnifiedEffectHooks<E extends EffectEventType>(
   event: { type: E } & Record<string, unknown>,
   context: UnifiedEffectContext,
   registry: UnifiedHookRegistry
-): Effect.Effect<UnifiedEffectExecutionResult<E>, never> {
+): Effect.Effect<UnifiedEffectExecutionResult<E>> {
   const hooks = registry.getEffectHooks(event.type);
   if (hooks.length === 0) {
     return Effect.succeed({
@@ -304,7 +304,7 @@ export function runUnifiedEffectHooksForSession<E extends EffectEventType>(
   event: { type: E } & Record<string, unknown>,
   context: UnifiedEffectContext,
   sessionRegistry: SessionScopedUnifiedHookRegistry
-): Effect.Effect<UnifiedEffectExecutionResult<E>, never> {
+): Effect.Effect<UnifiedEffectExecutionResult<E>> {
   const registry = sessionRegistry.getSessionRegistry(sessionKey);
   if (!registry) {
     return Effect.succeed({
@@ -326,7 +326,7 @@ function executeDecisionHookWithPolicy<E extends DecisionEventType>(
   hook: RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>;
   outcome: HookOutcome<DecisionFor<E>>;
   audit: UnifiedDecisionAuditEntry;
-}, never> {
+}> {
   return Effect.gen(function* () {
     const startedAt = Date.now();
     const maxRetries = hook.idempotency === 'idempotent' ? getMaxRetries(hook.policy) : 0;
@@ -381,7 +381,7 @@ function executeEffectHookWithPolicy<E extends EffectEventType>(
   policy: HookPolicy;
   error?: string;
   audit: UnifiedEffectAuditEntry;
-}, never> {
+}> {
   return Effect.gen(function* () {
     const startedAt = Date.now();
     const policy = hook.policy ?? { kind: 'fire_and_forget' };
@@ -454,7 +454,7 @@ function executeDecisionHookAttemptEffect<E extends DecisionEventType>(
   hook: RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>,
   event: EventFor<E>,
   context: HookContext
-): Effect.Effect<HookOutcome<DecisionFor<E>>, never> {
+): Effect.Effect<HookOutcome<DecisionFor<E>>> {
   const runEffect: Effect.Effect<HookOutcome<DecisionFor<E>>, Error> = Effect.suspend(() =>
     hook.callback(event, context).pipe(Effect.mapError(toError))
   ).pipe(
@@ -466,7 +466,7 @@ function executeDecisionHookAttemptEffect<E extends DecisionEventType>(
       duration: hook.timeoutMs,
       onTimeout: () => new Error(HOOK_TIMEOUT_SENTINEL),
     }),
-    Effect.catchAll((error): Effect.Effect<HookOutcome<DecisionFor<E>>, never> => {
+    Effect.catchAll((error): Effect.Effect<HookOutcome<DecisionFor<E>>> => {
       if (error.message === HOOK_TIMEOUT_SENTINEL) {
         return Effect.succeed(timeout() as HookOutcome<DecisionFor<E>>);
       }
@@ -479,7 +479,7 @@ function executeEffectHookAttemptEffect<E extends EffectEventType>(
   hook: RegisteredUnifiedHook<UnifiedEffectHookRegistration<E>>,
   event: { type: E } & Record<string, unknown>,
   context: UnifiedEffectContext
-): Effect.Effect<{ outcome: EffectOutcomeFor<E>; error?: string }, never> {
+): Effect.Effect<{ outcome: EffectOutcomeFor<E>; error?: string }> {
   const runEffect: Effect.Effect<EffectOutcomeFor<E>, Error> = Effect.suspend(() =>
     hook.callback(event as never, context).pipe(Effect.mapError(toError))
   ).pipe(
@@ -492,7 +492,7 @@ function executeEffectHookAttemptEffect<E extends EffectEventType>(
       onTimeout: () => new Error(HOOK_TIMEOUT_SENTINEL),
     }),
     Effect.map((outcome) => ({ outcome })),
-    Effect.catchAll((error): Effect.Effect<{ outcome: EffectOutcomeFor<E>; error?: string }, never> => {
+    Effect.catchAll((error): Effect.Effect<{ outcome: EffectOutcomeFor<E>; error?: string }> => {
       if (error.message === HOOK_TIMEOUT_SENTINEL) {
         return Effect.succeed({ outcome: { kind: 'skip', reason: 'timeout' } as EffectOutcomeFor<E> });
       }

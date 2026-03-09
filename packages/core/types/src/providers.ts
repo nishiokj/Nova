@@ -236,7 +236,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
       {
         id: 'gpt-5.3-codex-spark',
         name: 'GPT-5.3 Codex Spark',
-        context_window: 128_000,
+        context_window: 64_000,
         reasoning: ['low', 'medium', 'high', 'xhigh'],
       },
     ],
@@ -412,7 +412,7 @@ export const GATEWAY_MODEL_PROVIDER_IDS = [
   'gemini',
   'z.ai-coder',
   'claude',
-] as const satisfies ReadonlyArray<SupportedProvider>;
+] as const satisfies readonly SupportedProvider[];
 
 export const GATEWAY_MODEL_PROVIDERS = new Set<string>(GATEWAY_MODEL_PROVIDER_IDS);
 

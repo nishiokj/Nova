@@ -114,6 +114,12 @@ interface Frontmatter {
   maxTokens: number;
   fileContentCounter?: number;
   artifactCounter?: number;
+  // Persisted metrics — restored on hydration so compaction decisions use real token counts
+  inputTokens?: number;
+  peakInputTokens?: number;
+  totalOutputTokens?: number;
+  percentageUsed?: number;
+  totalCachedTokens?: number;
 }
 
 function serializeFrontmatter(fm: Frontmatter): string {
@@ -128,6 +134,21 @@ function serializeFrontmatter(fm: Frontmatter): string {
   }
   if (fm.artifactCounter !== undefined) {
     lines.push(`artifactCounter: ${fm.artifactCounter}`);
+  }
+  if (fm.inputTokens !== undefined) {
+    lines.push(`inputTokens: ${fm.inputTokens}`);
+  }
+  if (fm.peakInputTokens !== undefined) {
+    lines.push(`peakInputTokens: ${fm.peakInputTokens}`);
+  }
+  if (fm.totalOutputTokens !== undefined) {
+    lines.push(`totalOutputTokens: ${fm.totalOutputTokens}`);
+  }
+  if (fm.percentageUsed !== undefined) {
+    lines.push(`percentageUsed: ${fm.percentageUsed}`);
+  }
+  if (fm.totalCachedTokens !== undefined) {
+    lines.push(`totalCachedTokens: ${fm.totalCachedTokens}`);
   }
   lines.push('---', '');
   return lines.join('\n');
@@ -161,6 +182,11 @@ function parseFrontmatter(content: string): { frontmatter: Frontmatter; bodyStar
       maxTokens: parseInt(fm.maxTokens, 10),
       fileContentCounter: fm.fileContentCounter ? parseInt(fm.fileContentCounter, 10) : undefined,
       artifactCounter: fm.artifactCounter ? parseInt(fm.artifactCounter, 10) : undefined,
+      inputTokens: fm.inputTokens ? parseInt(fm.inputTokens, 10) : undefined,
+      peakInputTokens: fm.peakInputTokens ? parseInt(fm.peakInputTokens, 10) : undefined,
+      totalOutputTokens: fm.totalOutputTokens ? parseInt(fm.totalOutputTokens, 10) : undefined,
+      percentageUsed: fm.percentageUsed ? parseFloat(fm.percentageUsed) : undefined,
+      totalCachedTokens: fm.totalCachedTokens ? parseInt(fm.totalCachedTokens, 10) : undefined,
     },
     bodyStart: endIdx + 5, // Skip '\n---\n'
   };
@@ -379,8 +405,8 @@ function parseItemBlocks(body: string): ContextItem[] {
 
   const items: ContextItem[] = [];
   for (let i = 0; i < matches.length; i++) {
-    const start = matches[i].index!;
-    const end = i + 1 < matches.length ? matches[i + 1].index! : body.length;
+    const start = matches[i].index;
+    const end = i + 1 < matches.length ? matches[i + 1].index : body.length;
     const block = body.slice(start, end).trim();
     if (block.length === 0) continue;
     const item = parseItem(block);
@@ -409,8 +435,8 @@ function parseItemBlocks(body: string): ContextItem[] {
 export function buildSystemMessage(
   goal: string,
   objective: string,
-  behavioralRules: string = '',
-  workspaceRoot: string = ''
+  behavioralRules = '',
+  workspaceRoot = ''
 ): { system: string; taskContext: string } {
   const system = behavioralRules || '';
 
@@ -440,7 +466,7 @@ export class ContextWindow {
   private _items: ContextItem[] = [];
   private _metrics: ContextWindowMetrics;
   private _version = 0;
-  private _readFiles: Set<string> = new Set();
+  private _readFiles = new Set<string>();
   private _fileContentCounter = 0;
   private _artifactCounter = 0;
   private _created: string;
@@ -494,6 +520,11 @@ export class ContextWindow {
       maxTokens: this.maxTokens,
       fileContentCounter: this._fileContentCounter,
       artifactCounter: this._artifactCounter,
+      inputTokens: this._metrics.inputTokens || undefined,
+      peakInputTokens: this._metrics.peakInputTokens || undefined,
+      totalOutputTokens: this._metrics.totalOutputTokens || undefined,
+      percentageUsed: this._metrics.percentageUsed || undefined,
+      totalCachedTokens: this._metrics.totalCachedTokens || undefined,
     });
   }
 
@@ -517,9 +548,16 @@ export class ContextWindow {
       }
     }
 
+    const messageCount = this._items.filter(i => i.type === 'message').length;
     this._metrics = {
-      ...this._metrics,
-      messageCount: this._items.filter(i => i.type === 'message').length,
+      inputTokens: parsed.frontmatter.inputTokens ?? 0,
+      peakInputTokens: parsed.frontmatter.peakInputTokens ?? 0,
+      outputTokens: 0, // transient — only meaningful during a live request
+      totalOutputTokens: parsed.frontmatter.totalOutputTokens ?? 0,
+      maxTokens: this.maxTokens,
+      percentageUsed: parsed.frontmatter.percentageUsed ?? 0,
+      messageCount,
+      totalCachedTokens: parsed.frontmatter.totalCachedTokens,
     };
   }
 
@@ -546,7 +584,7 @@ export class ContextWindow {
       .filter(f => /^context\.v(\d+)\.md$/.test(f))
       .map(f => ({
         name: f,
-        version: parseInt(f.match(/^context\.v(\d+)\.md$/)![1], 10),
+        version: parseInt(/^context\.v(\d+)\.md$/.exec(f)![1], 10),
       }))
       .sort((a, b) => a.version - b.version);
 
@@ -718,7 +756,7 @@ export class ContextWindow {
    * Add multiple artifacts at once.
    */
   addArtifacts(
-    artifacts: Array<Omit<ArtifactItem, 'type' | 'id' | 'timestamp'>>,
+    artifacts: Omit<ArtifactItem, 'type' | 'id' | 'timestamp'>[],
     workItemId?: string
   ): string[] {
     this._syncFromDiskIfBacked();
@@ -1253,7 +1291,7 @@ export class ContextWindow {
 
         case 'artifact':
           // Collect artifacts for batching
-          artifactItems.push(item as ArtifactItem);
+          artifactItems.push(item);
           break;
       }
     }
@@ -1280,17 +1318,17 @@ export class ContextWindow {
    * Anthropic only accepts 'user' and 'assistant' roles in messages.
    * Batches artifacts into a single message to reduce token overhead.
    */
-  getItemsForAnthropic(): { system: string; messages: Array<Record<string, unknown>> } {
+  getItemsForAnthropic(): { system: string; messages: Record<string, unknown>[] } {
     this._syncFromDiskIfBacked();
     const systemParts: string[] = [];
-    const messages: Array<Record<string, unknown>> = [];
+    const messages: Record<string, unknown>[] = [];
     const artifactItems: ArtifactItem[] = [];
-    let pendingToolCalls: Array<{
+    let pendingToolCalls: {
       type: 'tool_use';
       id: string;
       name: string;
       input: Record<string, unknown>;
-    }> = [];
+    }[] = [];
 
     for (const item of this._items) {
       switch (item.type) {
@@ -1364,7 +1402,7 @@ export class ContextWindow {
 
         case 'artifact':
           // Collect artifacts for batching
-          artifactItems.push(item as ArtifactItem);
+          artifactItems.push(item);
           break;
       }
     }
@@ -1437,7 +1475,7 @@ export class ContextWindow {
    * Extract message history for TUI rehydration.
    * Returns only message-type items with role, content, timestamp, and optional requestId.
    */
-  getMessageHistory(): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }> {
+  getMessageHistory(): { role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }[] {
     this._syncFromDiskIfBacked();
     return this._items
       .filter((item): item is MessageItem => item.type === 'message')
@@ -1516,7 +1554,7 @@ export class ContextWindow {
    * Check if context is near capacity based on estimated token usage.
    * @param threshold - Fraction of maxTokens (0.0 to 1.0), default 0.8
    */
-  isNearFull(threshold: number = 0.8): boolean {
+  isNearFull(threshold = 0.8): boolean {
     this._syncFromDiskIfBacked();
     return this.estimateTokenUsage() / this.maxTokens >= threshold;
   }
@@ -1542,6 +1580,9 @@ export class ContextWindow {
           break;
         case 'reasoning':
           chars += item.content.length;
+          break;
+        case 'artifact':
+          chars += item.name.length + item.sourcePath.length + (item.signature?.length ?? 0) + (item.insight?.length ?? 0);
           break;
       }
     }
@@ -1590,6 +1631,9 @@ export class ContextWindow {
           break;
         case 'file_content':
           preview = item.path;
+          break;
+        case 'artifact':
+          preview = `${item.kind}: ${item.name}`;
           break;
       }
       return {

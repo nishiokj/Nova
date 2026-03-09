@@ -20,7 +20,7 @@ export class LogSubscriber {
   private logger: Logger;
   private unsubscribe: (() => void) | null = null;
   private eventTypes: string[];
-  private pendingEvents: Array<AgentEvent<unknown>> = [];
+  private pendingEvents: AgentEvent<unknown>[] = [];
   private flushScheduled = false;
   private closed = false;
 

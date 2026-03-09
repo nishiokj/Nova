@@ -5,7 +5,7 @@
  * plus schema-validated parsing via Zod.
  */
 
-import { z } from 'zod';
+import type { z } from 'zod';
 import {
   parseAgentOutput,
   isValidOutput,
@@ -52,7 +52,7 @@ function tryParseJson(value: string): Record<string, unknown> | null {
 }
 
 function extractJsonFromFence(value: string): Record<string, unknown> | null {
-  const fenceMatch = value.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const fenceMatch = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(value);
   if (!fenceMatch) return null;
   const candidate = fenceMatch[1]?.trim();
   if (!candidate) return null;
@@ -197,7 +197,7 @@ export function extractPreJsonText(content: string): string {
   if (trimmed.startsWith('{')) return '';
 
   // Check for JSON in markdown fence first
-  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const fenceMatch = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(trimmed);
   if (fenceMatch) {
     const fenceStart = trimmed.indexOf('```');
     if (fenceStart > 0) {

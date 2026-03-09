@@ -328,10 +328,10 @@ export const NOVA_VOCAB: ToolVocabulary = {
 
 /** Codex tool names — derived from NOVA_TO_CODEX map. Used for OpenAI/Codex providers. */
 export const CODEX_VOCAB: ToolVocabulary = {
-  read: NOVA_TO_CODEX['Read'] ?? 'Read',
-  glob: NOVA_TO_CODEX['Glob'] ?? 'Glob',
-  grep: NOVA_TO_CODEX['Grep'] ?? 'Grep',
-  bash: NOVA_TO_CODEX['Bash'] ?? 'Bash',
+  read: NOVA_TO_CODEX.Read ?? 'Read',
+  glob: NOVA_TO_CODEX.Glob ?? 'Glob',
+  grep: NOVA_TO_CODEX.Grep ?? 'Grep',
+  bash: NOVA_TO_CODEX.Bash ?? 'Bash',
   edit: 'apply_patch',
   write: 'apply_patch',
   explorer: 'Explorer',

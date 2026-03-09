@@ -164,17 +164,17 @@ export interface ProgressData {
 export interface UserPromptData {
   request_id: string;
   question?: string;
-  options?: Array<string | { label: string; description?: string }>;
+  options?: (string | { label: string; description?: string })[];
   context?: string;
   multi_select?: boolean;
   question_type?: string;
-  questions?: Array<{
+  questions?: {
     question: string;
-    options?: Array<string | { label: string; description?: string }>;
+    options?: (string | { label: string; description?: string })[];
     context?: string;
     multi_select?: boolean;
     question_type?: string;
-  }>;
+  }[];
 }
 
 export interface PermissionRequestData {

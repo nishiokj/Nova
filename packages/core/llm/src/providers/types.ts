@@ -13,7 +13,7 @@ import type {
   StreamParams,
   LLMExecutionError,
 } from 'types';
-import { Effect, Stream } from 'effect';
+import type { Effect, Stream } from 'effect';
 
 /**
  * Error thrown when a streaming request fails mid-stream.
@@ -117,7 +117,7 @@ export interface LLMProviderAdapter {
   /**
    * Format messages for this provider's API.
    */
-  formatMessages?(messages: Message[]): Array<Record<string, unknown>>;
+  formatMessages?(messages: Message[]): Record<string, unknown>[];
 }
 
 function inferExecutionErrorType(

@@ -19,9 +19,9 @@ export interface UnifiedHookRegistry {
   unregister(hookId: string): void;
   has(hookId: string): boolean;
   getHook(hookId: string): RegisteredUnifiedHook | undefined;
-  getHooksForEvent<E extends UnifiedEventType>(event: E): Array<RegisteredUnifiedHook<Extract<UnifiedHookRegistration, { event: E }>>>;
-  getDecisionHooks<E extends DecisionEventType>(event: E): Array<RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>>;
-  getEffectHooks<E extends EffectEventType>(event: E): Array<RegisteredUnifiedHook<UnifiedEffectHookRegistration<E>>>;
+  getHooksForEvent<E extends UnifiedEventType>(event: E): RegisteredUnifiedHook<Extract<UnifiedHookRegistration, { event: E }>>[];
+  getDecisionHooks<E extends DecisionEventType>(event: E): RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>[];
+  getEffectHooks<E extends EffectEventType>(event: E): RegisteredUnifiedHook<UnifiedEffectHookRegistration<E>>[];
   clear(): void;
   getAllIds(): string[];
   getCounts(): Partial<Record<UnifiedEventType, number>>;
@@ -64,11 +64,11 @@ export function createUnifiedHookRegistry(): UnifiedHookRegistry {
     byEvent.get(hook.event)!.add(hook.id);
   }
 
-  function getSorted<E extends UnifiedEventType>(event: E): Array<RegisteredUnifiedHook<Extract<UnifiedHookRegistration, { event: E }>>> {
+  function getSorted<E extends UnifiedEventType>(event: E): RegisteredUnifiedHook<Extract<UnifiedHookRegistration, { event: E }>>[] {
     const ids = byEvent.get(event);
     if (!ids) return [];
 
-    const result: Array<RegisteredUnifiedHook<Extract<UnifiedHookRegistration, { event: E }>>> = [];
+    const result: RegisteredUnifiedHook<Extract<UnifiedHookRegistration, { event: E }>>[] = [];
     for (const id of ids) {
       const hook = hooks.get(id);
       if (!hook) continue;
@@ -93,7 +93,7 @@ export function createUnifiedHookRegistry(): UnifiedHookRegistry {
       hooks.delete(hookId);
       const eventSet = byEvent.get(existing.event);
       eventSet?.delete(hookId);
-      if (eventSet && eventSet.size === 0) {
+      if (eventSet?.size === 0) {
         byEvent.delete(existing.event);
       }
     },
@@ -106,22 +106,22 @@ export function createUnifiedHookRegistry(): UnifiedHookRegistry {
       return hooks.get(hookId);
     },
 
-    getHooksForEvent<E extends UnifiedEventType>(event: E): Array<RegisteredUnifiedHook<Extract<UnifiedHookRegistration, { event: E }>>> {
+    getHooksForEvent<E extends UnifiedEventType>(event: E): RegisteredUnifiedHook<Extract<UnifiedHookRegistration, { event: E }>>[] {
       return getSorted(event);
     },
 
-    getDecisionHooks<E extends DecisionEventType>(event: E): Array<RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>> {
+    getDecisionHooks<E extends DecisionEventType>(event: E): RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>[] {
       const hooksForEvent = getSorted(event);
-      const typedHooks = hooksForEvent as Array<RegisteredUnifiedHook<UnifiedHookRegistration>>;
+      const typedHooks = hooksForEvent as RegisteredUnifiedHook[];
       return typedHooks
-        .filter((hook) => hook.mode === 'decision') as unknown as Array<RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>>;
+        .filter((hook) => hook.mode === 'decision') as unknown as RegisteredUnifiedHook<UnifiedDecisionHookRegistration<E>>[];
     },
 
-    getEffectHooks<E extends EffectEventType>(event: E): Array<RegisteredUnifiedHook<UnifiedEffectHookRegistration<E>>> {
+    getEffectHooks<E extends EffectEventType>(event: E): RegisteredUnifiedHook<UnifiedEffectHookRegistration<E>>[] {
       const hooksForEvent = getSorted(event);
-      const typedHooks = hooksForEvent as Array<RegisteredUnifiedHook<UnifiedHookRegistration>>;
+      const typedHooks = hooksForEvent as RegisteredUnifiedHook[];
       return typedHooks
-        .filter((hook) => hook.mode === 'effect') as unknown as Array<RegisteredUnifiedHook<UnifiedEffectHookRegistration<E>>>;
+        .filter((hook) => hook.mode === 'effect') as unknown as RegisteredUnifiedHook<UnifiedEffectHookRegistration<E>>[];
     },
 
     clear(): void {

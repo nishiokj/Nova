@@ -46,6 +46,7 @@ export {
   GrepArgsSchema,
   PromptUserArgsSchema,
   ExpandConversationArgsSchema,
+  WebSearchArgsSchema,
   type BashArgs,
   type ReadArgs,
   type WriteArgs,
@@ -54,6 +55,7 @@ export {
   type GrepArgs,
   type PromptUserArgs,
   type ExpandConversationArgs,
+  type WebSearchArgs,
 } from './tool_schemas.js';
 
 // Built-in tools

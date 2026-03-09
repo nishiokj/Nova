@@ -1,7 +1,7 @@
 import { sessionChannel } from 'comms-bus';
 import type { AgentRunHandle, AgentRunResult, BridgeEvent } from './types.js';
 import type { AuthService } from './auth_service.js';
-import { LocalProviderManager } from './local_providers.js';
+import type { LocalProviderManager } from './local_providers.js';
 import { GATEWAY_MODEL_PROVIDERS, getAllModels, isOpenAICompatProvider, toGatewayModel } from 'types';
 import { deleteSession, getTokenUsage, listSessions } from './session_queries.js';
 import {
@@ -28,6 +28,7 @@ const GATEWAY_PROVIDER_ID = 'vercel-gateway';
 interface PersistedModelSelection {
   provider: string;
   model: string;
+  contextWindow: number;
   reasoning?: string;
 }
 
@@ -231,10 +232,10 @@ export class RpcMethodHandlers {
     // Clear from model_selections user preference if any agent type matches
     const modelSelections = (
       graphd.getUserPreference?.('user_prefs:model_selections') ?? {}
-    ) as Record<string, { provider?: string; model?: string; reasoning?: string }>;
+    ) as Record<string, { provider?: string; model?: string; reasoning?: string; contextWindow?: number }>;
     let modelSelectionsUpdated = false;
     for (const [agentType, selection] of Object.entries(modelSelections)) {
-      if (selection?.model && selection.model.trim().toLowerCase() === normalizedModelId) {
+      if (selection?.model?.trim().toLowerCase() === normalizedModelId) {
         delete modelSelections[agentType];
         modelSelectionsUpdated = true;
       }
@@ -259,10 +260,10 @@ export class RpcMethodHandlers {
 
       const session = graphd.sessionGet(sessionKey);
       const metadata = session?.metadata as Record<string, unknown> | undefined;
-      const sessionSelections = (metadata?.model_selections as Record<string, { provider?: string; model?: string; reasoning?: string }>) ?? {};
+      const sessionSelections = (metadata?.model_selections as Record<string, { provider?: string; model?: string; reasoning?: string; contextWindow?: number }>) ?? {};
       let sessionSelectionsUpdated = false;
       for (const [agentType, selection] of Object.entries(sessionSelections)) {
-        if (selection?.model && selection.model.trim().toLowerCase() === normalizedModelId) {
+        if (selection?.model?.trim().toLowerCase() === normalizedModelId) {
           delete sessionSelections[agentType];
           sessionSelectionsUpdated = true;
           clearedAgentTypes.push(agentType);
@@ -707,7 +708,7 @@ export class RpcMethodHandlers {
 
     // closeSession handles persist + marking inactive
     const closeResult = this.harness.closeSession?.(sessionKey);
-    if (closeResult && closeResult.success === false) {
+    if (closeResult?.success === false) {
       return {
         success: false,
         sessionKey,
@@ -883,6 +884,24 @@ export class RpcMethodHandlers {
     // No companion agents to configure
   }
 
+  private getNormalizedSelection(
+    sessionKey: string,
+    agentType: string
+  ): PersistedModelSelection | null {
+    const selection = this.harness.getSessionSelectedModel?.(sessionKey, agentType) as PersistedModelSelection | null | undefined;
+    const contextWindow = Math.trunc(selection?.contextWindow ?? NaN);
+    if (!selection?.provider || !selection?.model || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+      return null;
+    }
+
+    return {
+      provider: selection.provider,
+      model: selection.model,
+      contextWindow,
+      ...(selection.reasoning ? { reasoning: selection.reasoning } : {}),
+    };
+  }
+
   private isSameSelection(
     a: PersistedModelSelection | null | undefined,
     b: PersistedModelSelection | null | undefined
@@ -893,6 +912,7 @@ export class RpcMethodHandlers {
     return (
       a.provider === b.provider
       && a.model === b.model
+      && a.contextWindow === b.contextWindow
       && (a.reasoning ?? null) === (b.reasoning ?? null)
     );
   }
@@ -991,12 +1011,18 @@ export class RpcMethodHandlers {
     }
 
     const previousStandardSelection = agentType === 'standard'
-      ? (this.harness.getSessionSelectedModel?.(sessionKey, 'standard') as PersistedModelSelection | null | undefined) ?? null
+      ? this.getNormalizedSelection(sessionKey, 'standard')
       : null;
 
-    // Store selected model for this agent type
-    const selectedModel = reasoning ? { provider, model, reasoning } : { provider, model };
-    this.harness.setSessionSelectedModel?.(sessionKey, agentType, selectedModel);
+    const requestedSelection = reasoning ? { provider, model, reasoning } : { provider, model };
+    this.harness.setSessionSelectedModel?.(sessionKey, agentType, requestedSelection);
+    const selectedModel = this.getNormalizedSelection(sessionKey, agentType);
+    if (!selectedModel) {
+      return {
+        success: false,
+        error: `Model selection '${provider}/${model}' could not be normalized`,
+      };
+    }
     this.persistModelSelection(sessionKey, agentType, selectedModel);
 
     if (agentType === 'standard') {
@@ -1011,15 +1037,16 @@ export class RpcMethodHandlers {
     // Emit model_changed event with agentType
     this.sendEvent(connectionId, {
       type: 'model_changed',
-      data: {
-        agentType,
-        selectedModel: selectedModel.model,
-        selectedProvider: selectedModel.provider,
-        provider: selectedModel.provider,
-        model: selectedModel.model,
-        reasoning,
-      },
-    });
+        data: {
+          agentType,
+          selectedModel: selectedModel.model,
+          selectedProvider: selectedModel.provider,
+          provider: selectedModel.provider,
+          model: selectedModel.model,
+          reasoning: selectedModel.reasoning ?? null,
+          contextWindow: selectedModel.contextWindow,
+        },
+      });
 
     // Emit provider_key_required event if missing, but keep selection persisted
     const hasKey = this.harness.hasApiKey(provider);
@@ -1029,7 +1056,7 @@ export class RpcMethodHandlers {
         data: {
           provider,
           model,
-          reasoning: reasoning ?? undefined,
+          reasoning: selectedModel.reasoning ?? undefined,
         },
       });
     }
@@ -1066,7 +1093,7 @@ export class RpcMethodHandlers {
     if (returnAll) {
       // Return all model selections
       const allSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
-      const selectionsObject: Record<string, { provider?: string; model?: string; reasoning?: string }> = {};
+      const selectionsObject: Record<string, { provider?: string; model?: string; reasoning?: string; contextWindow?: number }> = {};
       for (const [type, selection] of allSelections) {
         selectionsObject[type] = selection;
       }
@@ -1078,7 +1105,7 @@ export class RpcMethodHandlers {
     }
 
     // Return selection for specific agent type
-    let selectedModel = this.harness.getSessionSelectedModel?.(sessionKey, agentType) ?? null;
+    const selectedModel = this.harness.getSessionSelectedModel?.(sessionKey, agentType) ?? null;
 
     return {
       success: true,
@@ -1088,6 +1115,7 @@ export class RpcMethodHandlers {
       provider: selectedModel?.provider ?? null,
       model: selectedModel?.model ?? null,
       reasoning: selectedModel?.reasoning ?? null,
+      contextWindow: selectedModel?.contextWindow ?? null,
     };
   }
 
@@ -1368,7 +1396,7 @@ export class RpcMethodHandlers {
       return { success: false, error: 'Missing session_key' };
     }
     const selections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
-    const selectionsObject: Record<string, { provider: string; model: string; reasoning?: string }> = {};
+    const selectionsObject: Record<string, { provider: string; model: string; reasoning?: string; contextWindow: number }> = {};
     for (const [type, selection] of selections) {
       selectionsObject[type] = selection;
     }
@@ -1393,8 +1421,15 @@ export class RpcMethodHandlers {
     if (!provider || !model) {
       return { success: false, error: 'Provider and model are required' };
     }
-    const selectedModel = reasoning ? { provider, model, reasoning } : { provider, model };
-    this.harness.setSessionSelectedModel?.(sessionKey, agentType, selectedModel);
+    const requestedSelection = reasoning ? { provider, model, reasoning } : { provider, model };
+    this.harness.setSessionSelectedModel?.(sessionKey, agentType, requestedSelection);
+    const selectedModel = this.getNormalizedSelection(sessionKey, agentType);
+    if (!selectedModel) {
+      return {
+        success: false,
+        error: `Model selection '${provider}/${model}' could not be normalized`,
+      };
+    }
     this.persistModelSelection(sessionKey, agentType, selectedModel);
 
     return {
@@ -1725,7 +1760,7 @@ export class RpcMethodHandlers {
       return this.handleProvidersDelete(data);
     }
     if (method === 'providers.test') {
-      return await this.handleProvidersTest(data);
+      return this.handleProvidersTest(data);
     }
     if (method === 'models.delete') {
       return this.handleModelsDelete(connectionId, data, state);
@@ -1782,16 +1817,16 @@ export class RpcMethodHandlers {
       return this.handleGetModel(data, state);
     }
     if (method === 'async.start') {
-      return await this.handleAsyncStart(connectionId, data, state);
+      return this.handleAsyncStart(connectionId, data, state);
     }
     if (method === 'async.cancel') {
-      return await this.handleAsyncCancel(connectionId, data, state);
+      return this.handleAsyncCancel(connectionId, data, state);
     }
     if (method === 'control.dispatch') {
       return this.handleControlPlaneDispatch(connectionId, data);
     }
     if (method === 'control.stop') {
-      return await this.handleControlPlaneStop(connectionId, data);
+      return this.handleControlPlaneStop(connectionId, data);
     }
     if (method === 'control.fork') {
       return this.handleControlPlaneFork(connectionId, data);

@@ -38,13 +38,13 @@ export function parseRateLimitHeaders(headers: Headers): Partial<RateLimitInfo> 
     // Parse duration strings like "1s", "500ms", "2m30s"
     const parseResetDuration = (val: string): number | undefined => {
       // Try parsing as duration (e.g., "1s", "500ms", "2m30s")
-      const msMatch = val.match(/^(\d+)ms$/);
+      const msMatch = /^(\d+)ms$/.exec(val);
       if (msMatch) return parseInt(msMatch[1], 10);
 
-      const sMatch = val.match(/^(\d+)s$/);
+      const sMatch = /^(\d+)s$/.exec(val);
       if (sMatch) return parseInt(sMatch[1], 10) * 1000;
 
-      const mMatch = val.match(/^(\d+)m$/);
+      const mMatch = /^(\d+)m$/.exec(val);
       if (mMatch) return parseInt(mMatch[1], 10) * 60 * 1000;
 
       // Try parsing as seconds number

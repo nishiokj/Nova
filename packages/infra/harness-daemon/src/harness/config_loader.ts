@@ -38,6 +38,7 @@ import {
   PROVIDER_MODEL_DEFAULTS,
   getAllModels,
   getProviderForModel,
+  getModelDefinition,
   type ModelRole,
 } from 'types';
 import { getOutputSchemaJson, OUTPUT_SCHEMAS, type OutputSchemaName } from 'shared';
@@ -396,7 +397,14 @@ function resolveAgentConfig(
     }
   }
 
-  const modelProvider = getProviderForModel(resolvedModel);
+  const modelDefinition = getModelDefinition(resolvedModel);
+  if (!modelDefinition) {
+    throw new Error(`Model '${resolvedModel}' is not registered`);
+  }
+  if (!modelDefinition.context_window || !Number.isFinite(modelDefinition.context_window)) {
+    throw new Error(`Model '${resolvedModel}' is missing a context window definition`);
+  }
+  const modelProvider = modelDefinition.provider;
   let configProvider = resolvedProvider ?? modelProvider;
   if (modelProvider && resolvedProvider && resolvedProvider !== modelProvider) {
     _log.warning(
@@ -429,6 +437,7 @@ function resolveAgentConfig(
     displayProvider: configProvider,  // Original provider name for error messages
     model: resolvedModel,
     maxTokens: entry.llm.max_tokens,
+    contextWindow: Math.trunc(modelDefinition.context_window),
     temperature: entry.llm.temperature,
     baseUrl,
     reasoning: { effort: reasoningEffort },

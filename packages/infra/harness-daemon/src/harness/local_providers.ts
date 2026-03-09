@@ -18,9 +18,7 @@ import { stderrLogger, type HarnessLogger } from './harness_infra.js';
  * NOTE: This is now internal-only - no longer used in config files.
  * API keys are stored exclusively in GraphD.
  */
-export interface ProvidersConfigSection {
-  [provider: string]: string | undefined;
-}
+export type ProvidersConfigSection = Record<string, string | undefined>;
 
 // ============================================
 // TYPES
@@ -335,7 +333,7 @@ export class LocalProviderManager {
     } else if (provider === 'anthropic') {
       headers['x-api-key'] = apiKey;
     } else {
-      headers['Authorization'] = `Bearer ${apiKey}`;
+      headers.Authorization = `Bearer ${apiKey}`;
     }
 
     // Make request
