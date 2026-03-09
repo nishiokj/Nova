@@ -81,6 +81,7 @@ export async function persistParseResult(sql: Sql, result: ParseResult): Promise
     if (ids.length > 0) {
       const idList = ids.map((_, i) => `$${i + 1}`).join(',')
       // Pipeline edge table deletes — both source and target sides
+      // Also wipe test-health tables (env_reads, constructor_deps, function_deps)
       await Promise.all([
         tx.unsafe(`DELETE FROM entity_graph.imports WHERE importer_id IN (${idList})`, ids),
         tx.unsafe(`DELETE FROM entity_graph.imports WHERE imported_id IN (${idList})`, ids),
@@ -94,13 +95,16 @@ export async function persistParseResult(sql: Sql, result: ParseResult): Promise
         tx.unsafe(`DELETE FROM entity_graph.extends WHERE parent_id IN (${idList})`, ids),
         tx.unsafe(`DELETE FROM entity_graph.implements WHERE implementor_id IN (${idList})`, ids),
         tx.unsafe(`DELETE FROM entity_graph.implements WHERE interface_id IN (${idList})`, ids),
+        tx.unsafe(`DELETE FROM entity_graph.env_reads WHERE entity_id IN (${idList})`, ids),
+        tx.unsafe(`DELETE FROM entity_graph.constructor_deps WHERE class_id IN (${idList})`, ids),
+        tx.unsafe(`DELETE FROM entity_graph.function_deps WHERE function_id IN (${idList})`, ids),
       ])
     }
     await tx.unsafe(`DELETE FROM entity_graph.entities WHERE filepath = $1`, [result.filepath])
 
     // 2. Bulk insert entities — single multi-row VALUES statement
     if (result.entities.length > 0) {
-      const ENTITY_COLS = 9
+      const ENTITY_COLS = 11
       const values = result.entities
         .map((_, i) => {
           const b = i * ENTITY_COLS
@@ -109,14 +113,16 @@ export async function persistParseResult(sql: Sql, result: ParseResult): Promise
         .join(',')
       const params = result.entities.flatMap(e => [
         e.id, e.kind, e.name, e.filepath, e.startLine, e.endLine, e.exported, e.async, e.rawText,
+        e.paramsText, e.returnText,
       ])
       await tx.unsafe(
-        `INSERT INTO entity_graph.entities (id, kind, name, filepath, start_line, end_line, exported, async, raw_text)
+        `INSERT INTO entity_graph.entities (id, kind, name, filepath, start_line, end_line, exported, async, raw_text, params_text, return_text)
          VALUES ${values}
          ON CONFLICT (id) DO UPDATE SET
            kind = EXCLUDED.kind, name = EXCLUDED.name, filepath = EXCLUDED.filepath,
            start_line = EXCLUDED.start_line, end_line = EXCLUDED.end_line,
-           exported = EXCLUDED.exported, async = EXCLUDED.async, raw_text = EXCLUDED.raw_text`,
+           exported = EXCLUDED.exported, async = EXCLUDED.async, raw_text = EXCLUDED.raw_text,
+           params_text = EXCLUDED.params_text, return_text = EXCLUDED.return_text`,
         params,
       )
     }
@@ -159,6 +165,44 @@ export async function persistParseResult(sql: Sql, result: ParseResult): Promise
       }
     }
     await Promise.all(edgeInserts)
+
+    // 4. Bulk insert test-health data
+    const healthInserts: Promise<unknown>[] = []
+
+    if (result.envReads.length > 0) {
+      const values = result.envReads
+        .map((_, i) => `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`)
+        .join(',')
+      const params = result.envReads.flatMap(e => [e.entityId, e.varName, e.filepath, e.line, e.accessor])
+      healthInserts.push(tx.unsafe(
+        `INSERT INTO entity_graph.env_reads (entity_id, var_name, filepath, line, accessor) VALUES ${values}`,
+        params,
+      ))
+    }
+
+    if (result.constructorDeps.length > 0) {
+      const values = result.constructorDeps
+        .map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`)
+        .join(',')
+      const params = result.constructorDeps.flatMap(d => [d.classId, d.paramName, d.paramType, d.position])
+      healthInserts.push(tx.unsafe(
+        `INSERT INTO entity_graph.constructor_deps (class_id, param_name, param_type, position) VALUES ${values}`,
+        params,
+      ))
+    }
+
+    if (result.functionDeps.length > 0) {
+      const values = result.functionDeps
+        .map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`)
+        .join(',')
+      const params = result.functionDeps.flatMap(d => [d.functionId, d.paramName, d.paramType, d.position])
+      healthInserts.push(tx.unsafe(
+        `INSERT INTO entity_graph.function_deps (function_id, param_name, param_type, position) VALUES ${values}`,
+        params,
+      ))
+    }
+
+    if (healthInserts.length > 0) await Promise.all(healthInserts)
   })
 }
 
@@ -175,6 +219,7 @@ export async function deleteFileContribution(sql: Sql, filepath: string): Promis
 
   if (ids.length > 0) {
     // Delete all edges where this file's entities appear as source or target
+    // Also clean test-health tables
     await Promise.all([
       sql`DELETE FROM entity_graph.imports WHERE importer_id = ANY(${ids})`,
       sql`DELETE FROM entity_graph.imports WHERE imported_id = ANY(${ids})`,
@@ -188,6 +233,9 @@ export async function deleteFileContribution(sql: Sql, filepath: string): Promis
       sql`DELETE FROM entity_graph.extends WHERE parent_id = ANY(${ids})`,
       sql`DELETE FROM entity_graph.implements WHERE implementor_id = ANY(${ids})`,
       sql`DELETE FROM entity_graph.implements WHERE interface_id = ANY(${ids})`,
+      sql`DELETE FROM entity_graph.env_reads WHERE entity_id = ANY(${ids})`,
+      sql`DELETE FROM entity_graph.constructor_deps WHERE class_id = ANY(${ids})`,
+      sql`DELETE FROM entity_graph.function_deps WHERE function_id = ANY(${ids})`,
     ])
   }
 

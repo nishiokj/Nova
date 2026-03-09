@@ -40,6 +40,8 @@ export interface Entity {
   exported: boolean
   async: boolean
   rawText: string | null
+  paramsText: string | null
+  returnText: string | null
 }
 
 export interface Edge {
@@ -50,10 +52,35 @@ export interface Edge {
   meta?: Record<string, unknown>
 }
 
+export interface EnvRead {
+  entityId: string
+  varName: string
+  filepath: string
+  line: number
+  accessor: string // "process.env" | "Bun.env" | "import.meta.env"
+}
+
+export interface ConstructorDep {
+  classId: string
+  paramName: string
+  paramType: string | null
+  position: number
+}
+
+export interface FunctionDep {
+  functionId: string
+  paramName: string
+  paramType: string | null
+  position: number
+}
+
 export interface ParseResult {
   filepath: string
   entities: Entity[]
   edges: Edge[]
+  envReads: EnvRead[]
+  constructorDeps: ConstructorDep[]
+  functionDeps: FunctionDep[]
 }
 
 // --- Configuration ---

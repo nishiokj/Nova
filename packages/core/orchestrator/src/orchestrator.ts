@@ -54,16 +54,10 @@ import {
   createUserInputRequiredEvent,
   type ControlEventType,
   type DecisionFor,
-  type AgentErrorDecision,
-  type BoundsDecision,
-
   type EventFor,
   type ExecutionMetrics,
   type HookContext,
-  type PromptAnswerDecision,
-  type QualityGateDecision,
   type StatePatch,
-  type WorkItemCompletedDecision,
 } from './control-plane/index.js';
 import { applyPatches } from './hookRunner/applyPatches.js';
 import {

@@ -9,6 +9,7 @@ import type {
   TokenUsage,
   StopReason,
   LLMResponse,
+  LLMItem,
   RespondParams,
   StreamParams,
   LLMExecutionError,
@@ -300,7 +301,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     });
   }
 
-  formatMessages(messages: any[], systemPrompt?: string): Record<string, unknown>[] {
+  formatMessages(messages: LLMItem[], systemPrompt?: string): Record<string, unknown>[] {
     const result: Record<string, unknown>[] = [];
 
     if (systemPrompt) {

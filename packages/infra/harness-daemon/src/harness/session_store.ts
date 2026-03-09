@@ -428,7 +428,7 @@ export class SessionStore {
     this.executionCompletionResolver = null;
     this.executionCompletion = null;
     this.executionControlQueue = null;
-    this.executionRuntime?.dispose();
+    void this.executionRuntime?.dispose();
     this.executionRuntime = null;
     this.executionRunControl = { state: 'running' };
     this.executingRequestId = null;
@@ -658,7 +658,7 @@ export class SessionStore {
     this.executionCompletionResolver = null;
     this.executionCompletion = null;
     this.executionControlQueue = null;
-    this.executionRuntime?.dispose();
+    void this.executionRuntime?.dispose();
     this.executionRuntime = null;
     this.executionRunControl = { state: 'running' };
     this.executingRequestId = null;

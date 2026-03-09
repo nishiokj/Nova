@@ -19,7 +19,9 @@ CREATE TABLE IF NOT EXISTS entity_graph.entities (
   end_line    INTEGER,
   exported    BOOLEAN NOT NULL DEFAULT FALSE,
   async       BOOLEAN NOT NULL DEFAULT FALSE,
-  raw_text    TEXT
+  raw_text    TEXT,
+  params_text TEXT,
+  return_text TEXT
 );
 
 -- Relationship tables (one per edge type, composite PKs)
@@ -90,4 +92,36 @@ CREATE INDEX IF NOT EXISTS idx_eg_implements_iface    ON entity_graph.implements
 
 -- Lease expiry index for cleanup queries
 CREATE INDEX IF NOT EXISTS idx_eg_file_leases_expires ON entity_graph.file_leases(expires_at);
+
+-- Test health: env var reads detected in source code
+CREATE TABLE IF NOT EXISTS entity_graph.env_reads (
+  id          SERIAL PRIMARY KEY,
+  entity_id   TEXT NOT NULL,
+  var_name    TEXT NOT NULL,
+  filepath    TEXT NOT NULL,
+  line        INTEGER,
+  accessor    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eg_env_reads_entity ON entity_graph.env_reads(entity_id);
+CREATE INDEX IF NOT EXISTS idx_eg_env_reads_var    ON entity_graph.env_reads(var_name);
+
+-- Test health: constructor parameter dependencies
+CREATE TABLE IF NOT EXISTS entity_graph.constructor_deps (
+  id          SERIAL PRIMARY KEY,
+  class_id    TEXT NOT NULL,
+  param_name  TEXT NOT NULL,
+  param_type  TEXT,
+  position    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eg_ctor_deps_class ON entity_graph.constructor_deps(class_id);
+
+-- Test health: function/method parameter dependencies
+CREATE TABLE IF NOT EXISTS entity_graph.function_deps (
+  id          SERIAL PRIMARY KEY,
+  function_id TEXT NOT NULL,
+  param_name  TEXT NOT NULL,
+  param_type  TEXT,
+  position    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eg_fn_deps_function ON entity_graph.function_deps(function_id);
 `

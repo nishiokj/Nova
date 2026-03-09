@@ -25,14 +25,13 @@ import {
 import { Effect, Layer, ManagedRuntime } from 'effect';
 import os from 'os';
 import { execSync } from 'child_process';
-import { randomUUID } from 'crypto';
 import { createAdapter, hasCodexCredentials, type ProviderKeyService } from 'llm';
 import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
 import type { ToolRegistry } from 'tools';
-import { createEvent, getProviderEnvVar, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
+import { createEvent, getProviderEnvVar, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
 import type { ContextWindow } from 'context';
 import { profiler } from 'shared';
-import { GraphDManager, createGraphDConfig, type GraphDSession } from 'graphd';
+import { GraphDManager, createGraphDConfig } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
 import type { LogSubscriber} from '../subscribers/log_subscriber.js';
@@ -40,7 +39,6 @@ import { createLogSubscriber } from '../subscribers/log_subscriber.js';
 import { createTraceSubscriber, extractCommitSha, isGitCommitCommand } from '../subscribers/trace_subscriber.js';
 import type { TraceSubscriber } from '../subscribers/trace_subscriber.js';
 import path from 'path';
-import fs from 'fs';
 import {
   createStatusEvent,
   createResponseEvent,
@@ -55,7 +53,7 @@ import type {
   SessionControlResult,
 } from './types.js';
 import { loadConfig, getAgentConfig } from './config_loader.js';
-import type { FullHarnessConfig, ResolvedAgentConfig } from './config.js';
+import type { FullHarnessConfig } from './config.js';
 import { LocalProviderManager } from './local_providers.js';
 import { ConfiguredEffectHooksRunner } from './configured_effect_hooks.js';
 import {
@@ -63,7 +61,6 @@ import {
   getHookDefinition,
   normalizeHookTrigger,
   type HookContext as SkillHookContext,
-  type HookDefinition,
   type HookResult as LegacyHookResult,
 } from './skills_loader.js';
 import { SessionStore } from './session_store.js';
@@ -71,7 +68,7 @@ import { createFileLogger, createToolRegistry, type HarnessLogger } from './harn
 import { HarnessPluginRegistry } from './plugin_registry.js';
 import { PermissionChecker } from './permissions.js';
 import { DefaultOrchestratorRunner, type OrchestratorRunner } from './orchestrator_runner.js';
-import type { PermissionedTool, PermissionRequest, PermissionResponse } from 'types';
+import type { PermissionResponse } from 'types';
 import { isPermissionedTool, normalizeToolName } from 'types';
 import { createSessionState, touchSession, clearSessionState, type SessionState } from './session_state.js';
 import {
@@ -126,8 +123,6 @@ interface MemoryPluginModule {
     postgresOptions?: Record<string, unknown>;
   }) => EntityGraphInstance;
 }
-
-interface SessionGetResponse { session?: GraphDSession; error?: string }
 
 export interface CloseSessionResult {
   success: boolean;
@@ -840,7 +835,7 @@ export class AgentHarness {
 
   private trackSessionHookTask(task: Promise<void>): void {
     this.pendingSessionHookTasks.add(task);
-    task.finally(() => {
+    void task.finally(() => {
       this.pendingSessionHookTasks.delete(task);
     });
   }
@@ -880,7 +875,7 @@ export class AgentHarness {
     }
     this.closingSessionHooks.add(sessionKey);
     const workingDir = state.store.getWorkingDirectory();
-    this.enqueueSessionEffectHook(
+    void this.enqueueSessionEffectHook(
       sessionKey,
       { type: 'session_stop', sessionKey, reason: 'session_cleanup' },
       { sessionKey, requestId: 'session_cleanup', workingDir },
@@ -1111,7 +1106,7 @@ export class AgentHarness {
     const state = createSessionState(store);
     this.sessions.set(sessionKey, state);
     this.registerSessionUnifiedHooks(sessionKey, workingDir ?? this.config.tools.workingDir);
-    this.enqueueSessionEffectHook(
+    void this.enqueueSessionEffectHook(
       sessionKey,
       { type: 'session_start', sessionKey, workingDir: workingDir ?? this.config.tools.workingDir },
       {
@@ -1798,7 +1793,6 @@ export class AgentHarness {
         const responseContent = result.finalText.trim().length > 0
           ? result.finalText
           : streamedAssistantChunks.join('');
-        const responseHasContent = responseContent.trim().length > 0;
 
         // Persist canonical messages before emitting response/status events.
         // The dashboard refreshes on SSE response events, so persistence must
@@ -2302,8 +2296,6 @@ export class AgentHarness {
       }
       return selection;
     };
-
-    const sessionKey = context.sessionKey;
 
     const runtime = {
       hookRegistry,

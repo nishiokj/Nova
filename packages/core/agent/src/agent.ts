@@ -7,7 +7,7 @@
 
 import path from 'node:path';
 import { Effect, Stream } from 'effect';
-import type { LLMAdapter, Message, LLMRequestConfig, LLMResponse } from 'llm';
+import type { LLMAdapter, LLMRequestConfig, LLMResponse } from 'llm';
 import {
   resilientCall,
   RateLimitError,
@@ -20,6 +20,7 @@ import {
 } from 'llm';
 import { getAgentPrompt } from './prompts.js';
 import { MemoryBridge } from './memory-bridge.js';
+import type { MemoryInjector } from './memory-bridge.js';
 import type { ToolRegistry } from 'tools';
 import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema, ContextItem, ArtifactItem, LLMItem, ContentBlock } from 'types';
 import { isLLMMessageItem, isLLMFunctionCallItem, isLLMFunctionCallOutputItem } from 'types';
@@ -52,16 +53,6 @@ const MAX_SCHEMA_REMINDER_RETRIES = 3;
 type AgentAction = 'done' | 'continue';
 
 const QUESTION_CLEANUP_REGEX = /```[\s\S]*?```|`[^`]*`/g;
-const BOUNDS_TERMINATION_REASONS = new Set([
-  'max_iterations_exceeded',
-  'max_tool_calls_exceeded',
-  'max_duration_exceeded',
-]);
-
-function isBoundsTerminationReason(reason: string | undefined): boolean {
-  return typeof reason === 'string' && BOUNDS_TERMINATION_REASONS.has(reason);
-}
-
 function inferUserPromptFromResponse(responseText?: string): UserPromptInfo | null {
   if (!responseText) return null;
 
@@ -193,7 +184,7 @@ export class Agent {
     hooks?: AgentHooks;
     internalHookQueue?: InternalHookQueue;
     getModelSelection?: (agentType: string) => ModelSelection | null;
-    memoryInjector?: import('./memory-bridge.js').MemoryInjector;
+    memoryInjector?: MemoryInjector;
   }) {
     this.config = config;
     this.llm = runtime.llm;
@@ -364,7 +355,7 @@ export class Agent {
     iteration: number,
     maxIterations: number
   ): Effect.Effect<{
-    messages: Record<string, unknown>[];
+    messages: LLMItem[];
     tools: ToolDefinition[] | undefined;
     toolChoice: 'none' | 'auto' | 'required' | undefined;
   }> {
@@ -674,7 +665,7 @@ export class Agent {
    */
   private streamWithResilience(
     params: {
-      messages: Message[];
+      messages: LLMItem[];
       tools?: ToolDefinition[];
       toolChoice?: 'none' | 'auto' | 'required';
       responseSchema?: StructuredOutputSchema;
@@ -957,7 +948,7 @@ export class Agent {
       // Use resilient streaming with retry + circuit breaker
       const llmAsyncId = profiler.asyncBegin(`agent.llmCall:${this.config.type}`, 'llm');
       const { response } = yield* this.streamWithResilience({
-        messages: messages as unknown as Message[],
+        messages,
         tools: toolsForThisCall,
         toolChoice: effectiveToolChoice,
         responseSchema: this.config.outputSchema,
@@ -1170,7 +1161,7 @@ export class Agent {
               localContext.addMessage('user', this.buildRequiredToolCallReminder(toolsForThisCall), workItem.workId);
             }
 
-            const schemaReminder = this.buildSchemaReminder(this.resolveOutputSchemaId());
+            const schemaReminder = this.buildSchemaReminder();
             localContext.addMessage('user', schemaReminder, workItem.workId);
             this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
             continue;
@@ -1503,9 +1494,8 @@ export class Agent {
     workItem: WorkItem,
     globalContext: ContextWindow,
     localContext: ContextWindow
-  ): Record<string, unknown>[] {
-    // Use LLMItem[] for type safety during construction
-    const messages: (LLMItem | Record<string, unknown>)[] = [
+  ): LLMItem[] {
+    const messages: LLMItem[] = [
       { type: 'message', role: 'system', content: systemPrompt },
     ];
 
@@ -2082,7 +2072,7 @@ export class Agent {
           : parentWorkItem.goal;
       const delta = typeof args.delta === 'string' ? args.delta : undefined;
       const toolHint = typeof args.toolHint === 'string'
-        ? String(args.toolHint)
+        ? args.toolHint
         : undefined;
       const rawTargetPaths = args.targetPaths;
       const targetPaths = Array.isArray(rawTargetPaths)
@@ -2389,7 +2379,7 @@ export class Agent {
     return null;
   }
 
-  private buildSchemaReminder(schemaId: string | null): string {
+  private buildSchemaReminder(): string {
     if (typeof this.config.schemaReminder === 'string' && this.config.schemaReminder.trim().length > 0) {
       return this.config.schemaReminder;
     }

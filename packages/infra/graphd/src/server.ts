@@ -7,6 +7,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'http';
+import type { Socket } from 'net';
 import { URL } from 'url';
 import type { GraphDManager } from './manager.js';
 import { safeInt } from './utils.js';
@@ -342,7 +343,7 @@ export class GraphDHTTPServer {
   private server: Server | null = null;
   private readonly handler: GraphDRequestHandler;
   private shutdownRequested = false;
-  private connections = new Set<import('net').Socket>();
+  private connections = new Set<Socket>();
 
   constructor(
     private readonly host: string,
@@ -433,7 +434,7 @@ export class GraphDHTTPServer {
    * Check if server is running.
    */
   get isRunning(): boolean {
-    return this.server !== null && this.server.listening;
+    return this.server?.listening ?? false;
   }
 }
 

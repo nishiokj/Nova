@@ -1558,7 +1558,7 @@ export class RpcMethodHandlers {
         workingDir,
       });
 
-      this.streamRunEvents(requestId, handle, (result) => {
+      this.streamRunEvents(requestId, handle, (_result) => {
         const currentAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
         if (currentAsyncRun?.requestId === requestId) {
           this.harness.clearSessionAsyncRun?.(sessionKey);

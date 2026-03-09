@@ -7,6 +7,9 @@
  * Ported from: src/util/llm_adapter.py (Message and related types)
  */
 
+import type { LLMItem } from './context.js';
+import type { ToolDefinition } from './tools.js';
+
 // ============================================
 // MESSAGE TYPES
 // ============================================
@@ -290,8 +293,8 @@ export interface LLMExecutionError {
  * Parameters for LLM respond call.
  */
 export interface RespondParams {
-  messages: Message[];
-  tools?: import('./tools.js').ToolDefinition[];
+  messages: LLMItem[];
+  tools?: ToolDefinition[];
   toolChoice?: 'auto' | 'none' | 'required';
   maxTokens?: number;
   temperature?: number;

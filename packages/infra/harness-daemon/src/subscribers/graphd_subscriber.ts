@@ -126,7 +126,7 @@ export class GraphDSubscriber {
         agent_events: [formattedEvent],
       });
       if ((result as { success?: boolean; error?: string }).success === false) {
-        console.error(`[GraphDSubscriber] Failed to persist event: ${String((result as { error?: string }).error ?? 'unknown_error')}`);
+        console.error(`[GraphDSubscriber] Failed to persist event: ${(result as { error?: string }).error ?? 'unknown_error'}`);
       }
       this.deriveWorkflowState(event);
     } catch (error) {
@@ -280,7 +280,7 @@ export class GraphDSubscriber {
           agent_events: formattedEvents,
         });
         if ((result as { success?: boolean; error?: string }).success === false) {
-          console.error(`[GraphDSubscriber] Failed to flush batch: ${String((result as { error?: string }).error ?? 'unknown_error')}`);
+          console.error(`[GraphDSubscriber] Failed to flush batch: ${(result as { error?: string }).error ?? 'unknown_error'}`);
         }
       }
 

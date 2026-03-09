@@ -5,13 +5,12 @@
  * Integrated directly into the daemon - no separate service needed.
  */
 
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync, createHash } from 'crypto';
+import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
 import { homedir } from 'os';
 import { dirname, join } from 'path';
 import { GraphStore } from 'graphd';
-import type { UserRecord, ProviderCredentialRecord } from 'graphd';
 import { stderrLogger, type HarnessLogger } from './harness_infra.js';
 
 // ============================================

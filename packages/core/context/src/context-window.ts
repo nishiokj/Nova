@@ -11,6 +11,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, copyFileSync, readdirSync, unlinkSync } from 'fs';
 import nodePath from 'path';
 import type {
+  ArtifactKind,
   ContentBlock,
   ContextWindowMetrics,
 } from 'types';
@@ -780,7 +781,7 @@ export class ContextWindow {
   /**
    * Get artifacts by kind (function, class, etc.).
    */
-  getArtifactsByKind(kind: import('types').ArtifactKind): ArtifactItem[] {
+  getArtifactsByKind(kind: ArtifactKind): ArtifactItem[] {
     return this.getArtifacts().filter(a => a.kind === kind);
   }
 
@@ -1508,7 +1509,6 @@ export class ContextWindow {
           role,
           content,
           timestamp: item.timestamp,
-          requestId: (item as any).requestId, // requestId may be stored as metadata on item
         };
       });
   }
@@ -1537,7 +1537,7 @@ export class ContextWindow {
       for (const item of result.localContext.items) {
         if (item.type === 'function_call' || item.type === 'function_call_output') {
           const callId = item.callId;
-          if (callId && callId.startsWith('hook-')) {
+          if (callId?.startsWith('hook-')) {
             continue;
           }
           this.appendItem(item);

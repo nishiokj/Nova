@@ -9,12 +9,13 @@ import type {
   TokenUsage,
   StopReason,
   LLMResponse,
+  LLMItem,
   RespondParams,
   StreamParams,
   LLMExecutionError,
 } from 'types';
 import { Effect, Stream } from 'effect';
-import type { ProviderContext, ResolvedRequestConfig, LLMProviderAdapter } from './types.js';
+import type { ProviderContext, ResolvedRequestConfig, LLMProviderAdapter, AdapterLogger } from './types.js';
 import { PartialStreamError, toLLMExecutionError } from './types.js';
 import { compileSchemaForOpenAI } from './schema_compiler.js';
 import {
@@ -299,7 +300,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
   private async pollForCompletion(
     resolved: ResolvedRequestConfig,
     responseId: string,
-    logger: any,
+    logger: AdapterLogger,
     maxWaitMs = 300000,
     pollIntervalMs = 2000
   ): Promise<Record<string, unknown>> {
@@ -629,7 +630,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
   // HELPERS
   // ============================================
 
-  private normalizeInput(messages: any[]): Record<string, unknown>[] {
+  private normalizeInput(messages: LLMItem[]): Record<string, unknown>[] {
     const input: Record<string, unknown>[] = [];
     const isValidToolName = (name: unknown): name is string =>
       typeof name === 'string' && /^[A-Za-z0-9_-]+$/.test(name);
@@ -708,7 +709,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
       } else if (Array.isArray(msg.content)) {
         input.push({
           role: msg.role,
-          content: msg.content.filter((block: unknown) => block != null).map((block: Record<string, unknown>) => {
+          content: (msg.content as unknown[]).filter((block): block is Record<string, unknown> => block !== null && typeof block === 'object').map((block) => {
             if (block.type === 'text') {
               return { type: 'text', text: block.text };
             }
@@ -879,11 +880,6 @@ export class OpenAIProvider implements LLMProviderAdapter {
 // ============================================
 // MODEL HELPERS
 // ============================================
-
-function isReasoningModel(model: string): boolean {
-  const lower = model.toLowerCase();
-  return lower.startsWith('gpt-5') || lower.startsWith('o1') || lower.startsWith('o3');
-}
 
 function supportsSamplingParams(model: string): boolean {
   const lower = model.toLowerCase();

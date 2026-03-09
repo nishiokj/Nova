@@ -13,8 +13,6 @@ import {
   GRAPHD_SCHEMA_VERSION,
   GRAPHD_SCHEMA_DDL,
   ENABLE_FOREIGN_KEYS,
-  ENABLE_WAL,
-  ENABLE_NORMAL_SYNC,
   EXPORTABLE_TABLES,
   isExportableTable,
   V6_MIGRATION_STATEMENTS,
@@ -1254,7 +1252,7 @@ export class GraphStore {
     let oldContent: string | null = null;
     let oldContentSizeBytes: number | null = null;
     let oldContentTruncated = 0;
-    if (trace.oldContent != null) {
+    if (trace.oldContent !== undefined) {
       const oldBytes = Buffer.byteLength(trace.oldContent, 'utf-8');
       oldContentSizeBytes = oldBytes;
       oldContent = trace.oldContent;
@@ -1715,7 +1713,7 @@ export class GraphStore {
 
       // 2. Copy latest context snapshot
       const latestSnapshot = this.getLatestContextSnapshot(sourceSessionKey);
-      if (latestSnapshot && latestSnapshot.contextJson) {
+      if (latestSnapshot?.contextJson) {
         this.db
           .query(
             `INSERT INTO context_snapshots (session_key, snapshot_version, created_at, context_json)

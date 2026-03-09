@@ -154,7 +154,7 @@ export function isTestPath(filePath: string): boolean {
  * Safely parse an integer from a string value.
  */
 export function safeInt(value: string | null | undefined, defaultValue = 0): number {
-  if (value == null) return defaultValue;
+  if (value === null || value === undefined) return defaultValue;
   const parsed = parseInt(value, 10);
   return Number.isNaN(parsed) ? defaultValue : parsed;
 }
@@ -163,7 +163,7 @@ export function safeInt(value: string | null | undefined, defaultValue = 0): num
  * Safely parse a float from a string value.
  */
 export function safeFloat(value: string | null | undefined, defaultValue = 0): number {
-  if (value == null) return defaultValue;
+  if (value === null || value === undefined) return defaultValue;
   const parsed = parseFloat(value);
   return Number.isNaN(parsed) ? defaultValue : parsed;
 }

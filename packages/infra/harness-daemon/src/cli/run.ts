@@ -4,8 +4,6 @@ import {
   HarnessClient,
   type BridgeEvent,
   type ErrorData,
-  type ProgressData,
-  type ResponseData,
   type StreamData,
   type UserPromptData,
 } from 'harness-client';
@@ -485,7 +483,7 @@ function waitForReady(
 
     const onEvent = (event: BridgeEvent) => {
       if (event.type !== 'ready') return;
-      const key = asNonEmptyString((event.data ?? {}).session_key);
+      const key = asNonEmptyString(event.data?.session_key);
       if (!key || key !== expectedSessionKey) return;
       cleanup();
       resolvePromise();
@@ -533,14 +531,14 @@ function waitForRunResponse(
       }
 
       if (event.type === 'provider_key_required') {
-        const provider = asNonEmptyString((event.data ?? {}).provider) ?? 'unknown';
+        const provider = asNonEmptyString(event.data?.provider) ?? 'unknown';
         cleanup();
         rejectPromise(new Error(`Provider key required for ${provider}`));
         return;
       }
 
       if (event.type === 'error') {
-        const message = asNonEmptyString((event.data ?? {}).message) ?? 'bridge error';
+        const message = asNonEmptyString(event.data?.message) ?? 'bridge error';
         cleanup();
         rejectPromise(new Error(`Bridge error: ${message}`));
       }
@@ -653,9 +651,9 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
         return;
       }
       if (event.type === 'llm_call') {
-        const promptTokens = Number((event.data ?? {}).promptTokens ?? 0);
-        const completionTokens = Number((event.data ?? {}).completionTokens ?? 0);
-        const reasoningTokens = Number((event.data ?? {}).reasoningTokens ?? 0);
+        const promptTokens = (event.data?.promptTokens as number) ?? 0;
+        const completionTokens = (event.data?.completionTokens as number) ?? 0;
+        const reasoningTokens = (event.data?.reasoningTokens as number) ?? 0;
         const safePromptTokens = Number.isFinite(promptTokens) ? promptTokens : 0;
         const safeCompletionTokens = Number.isFinite(completionTokens) ? completionTokens : 0;
         const safeReasoningTokens = Number.isFinite(reasoningTokens) ? reasoningTokens : 0;
@@ -663,8 +661,8 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
         tokensIn += safePromptTokens;
         tokensOut += visibleCompletionTokens;
         modelCallCount += 1;
-        const provider = asNonEmptyString((event.data ?? {}).provider) ?? 'unknown';
-        const model = asNonEmptyString((event.data ?? {}).model) ?? 'unknown';
+        const provider = asNonEmptyString(event.data?.provider) ?? 'unknown';
+        const model = asNonEmptyString(event.data?.model) ?? 'unknown';
         appendHookEvent({
           event_type: 'model_call_end',
           call_id: `model_${modelCallCount}`,

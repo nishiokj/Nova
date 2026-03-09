@@ -9,6 +9,7 @@ import type {
   TokenUsage,
   StopReason,
   LLMResponse,
+  LLMItem,
   RespondParams,
   StreamParams,
   LLMExecutionError,
@@ -101,7 +102,7 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
     }));
   }
 
-  formatMessages(messages: any[], systemPrompt?: string): Record<string, unknown>[] {
+  formatMessages(messages: LLMItem[], systemPrompt?: string): Record<string, unknown>[] {
     const result: Record<string, unknown>[] = [];
 
     if (systemPrompt) {
@@ -176,8 +177,8 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
         result.push({ role: msg.role, content: msg.content });
       } else if (Array.isArray(msg.content)) {
         const content = msg.content
-          .filter((block: unknown) => block != null)
-          .map((block: Record<string, unknown>) => {
+          .filter((block): block is Record<string, unknown> => block !== null && typeof block === 'object')
+          .map((block) => {
             if (block.type === 'text') {
               return { type: 'text', text: block.text };
             }
@@ -993,7 +994,7 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
   // HELPERS
   // ============================================
 
-  private normalizeInput(messages: any[], systemPrompt?: string): Record<string, unknown>[] {
+  private normalizeInput(messages: LLMItem[], systemPrompt?: string): Record<string, unknown>[] {
     const input: Record<string, unknown>[] = [];
     const isValidToolName = (name: unknown): name is string =>
       typeof name === 'string' && /^[A-Za-z0-9_-]+$/.test(name);
@@ -1052,8 +1053,8 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
         });
       } else if (Array.isArray(msg.content)) {
         const content = msg.content
-          .filter((block: unknown) => block != null)
-          .map((block: Record<string, unknown>) => {
+          .filter((block): block is Record<string, unknown> => block !== null && typeof block === 'object')
+          .map((block) => {
             if (block.type === 'text') {
               return { type: 'text', text: block.text };
             }

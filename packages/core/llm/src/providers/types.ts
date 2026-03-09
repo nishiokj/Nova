@@ -4,7 +4,7 @@
 
 import type {
   LLMProvider,
-  Message,
+  LLMItem,
   ToolDefinition,
   ToolCall,
   LLMResponse,
@@ -117,7 +117,7 @@ export interface LLMProviderAdapter {
   /**
    * Format messages for this provider's API.
    */
-  formatMessages?(messages: Message[]): Record<string, unknown>[];
+  formatMessages?(messages: LLMItem[]): Record<string, unknown>[];
 }
 
 function inferExecutionErrorType(

@@ -4,6 +4,8 @@
  * These types bridge the agent's internal types with the TUI's BridgeEvent format.
  */
 
+import type { UnifiedHookRegistry } from 'orchestrator';
+
 /** Tier classification for routing */
 export type Tier = 'simple' | 'standard' | 'complex';
 
@@ -17,7 +19,7 @@ export interface AgentRunParams {
   sessionKey: string;
   workingDir: string;
   context?: string;
-  hookRegistry?: import('orchestrator').UnifiedHookRegistry;
+  hookRegistry?: UnifiedHookRegistry;
 }
 
 /**

@@ -6,7 +6,6 @@
 
 import { writeFile, readFile, mkdir, stat, rename, unlink } from 'fs/promises';
 import { resolve, dirname } from 'path';
-import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { Effect } from 'effect';
 import type { ToolResult } from 'types';

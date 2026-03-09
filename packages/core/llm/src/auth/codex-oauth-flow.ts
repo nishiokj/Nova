@@ -10,7 +10,7 @@
  * 6. Store tokens
  */
 
-import { createServer } from 'http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { URL } from 'url';
 import { randomBytes } from 'crypto';
 import {
@@ -37,7 +37,20 @@ export async function runCodexOAuthFlow(callbacks: OAuthFlowCallbacks): Promise<
   const state = randomBytes(16).toString('hex');
 
   return new Promise((resolve, reject) => {
-    const server = createServer(async (req, res) => {
+    const server = createServer((req, res) => {
+      void handleOAuthCallback(req, res).catch((err) => {
+        // Catch double-faults (e.g. response write fails inside the inner catch)
+        if (!res.headersSent) {
+          try { res.writeHead(500); res.end('Internal error'); } catch { /* connection closed */ }
+        }
+        const error = err instanceof Error ? err : new Error(String(err));
+        server.close();
+        callbacks.onError(error);
+        reject(error);
+      });
+    });
+
+    async function handleOAuthCallback(req: IncomingMessage, res: ServerResponse): Promise<void> {
       const url = new URL(req.url ?? '/', `http://localhost:1455`);
 
       if (url.pathname !== '/auth/callback') {
@@ -80,37 +93,28 @@ export async function runCodexOAuthFlow(callbacks: OAuthFlowCallbacks): Promise<
         return;
       }
 
-      try {
-        // Exchange code for tokens
-        const tokens = await exchangeCodeForTokens(CODEX_OAUTH_CONFIG, code, pkce.verifier);
+      // Exchange code for tokens
+      const tokens = await exchangeCodeForTokens(CODEX_OAUTH_CONFIG, code, pkce.verifier);
 
-        // Store tokens
-        const tokenManager = getCodexTokenManager();
-        await tokenManager.storeTokens(tokens);
+      // Store tokens
+      const tokenManager = getCodexTokenManager();
+      await tokenManager.storeTokens(tokens);
 
-        // Success response
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(`
-          <html>
-            <body style="font-family: system-ui; text-align: center; padding: 50px;">
-              <h1>Authentication Successful</h1>
-              <p>You can close this window and return to the terminal.</p>
-            </body>
-          </html>
-        `);
+      // Success response
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`
+        <html>
+          <body style="font-family: system-ui; text-align: center; padding: 50px;">
+            <h1>Authentication Successful</h1>
+            <p>You can close this window and return to the terminal.</p>
+          </body>
+        </html>
+      `);
 
-        server.close();
-        callbacks.onSuccess();
-        resolve();
-      } catch (err) {
-        res.writeHead(500);
-        res.end(`Token exchange failed: ${err}`);
-        server.close();
-        const error = err instanceof Error ? err : new Error(String(err));
-        callbacks.onError(error);
-        reject(error);
-      }
-    });
+      server.close();
+      callbacks.onSuccess();
+      resolve();
+    }
 
     server.listen(1455, '127.0.0.1', () => {
       const authUrl = buildAuthUrl(CODEX_OAUTH_CONFIG, pkce, state);

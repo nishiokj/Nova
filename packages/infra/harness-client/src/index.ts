@@ -16,8 +16,6 @@ import type {
   BridgeEvent,
   BridgeEventType,
   ConnectionState,
-  ReadyData,
-  ResponseData,
 } from './types.js';
 import { RpcClient } from './rpc_client.js';
 import type { ProcedureMethod } from './rpc_types.js';

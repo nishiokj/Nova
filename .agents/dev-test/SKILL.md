@@ -46,19 +46,61 @@ Compute this path at the start of every invocation. This is the shared interface
 
 ---
 
-## Phase 0: Check for Health Report
+## Phase 0: Structural Analysis via Test Health
 
-Before doing anything else, check if a health report exists at `<health_dir>/report.json`.
+Before doing anything else, use the **test-health system** to understand the target's structure. This is the foundation for all subsequent phases.
 
-**If it exists**, read it. This report was produced by the referee (a deterministic script that ran mutation testing against the current codebase). It contains:
+### 0.1 Check for entity graph availability
+
+If the project has an entity graph database (check for `DATABASE_URL` or `TEST_DATABASE_URL` env var), use the `test-health` CLI or the TestHealthModule API to gather structural data:
+
+```bash
+# What are the testable boundaries?
+test-health boundaries <target-filepath> --json
+
+# What does this boundary depend on? How to wire it?
+test-health deps <entity-id> --json
+
+# What's the call tree? Where are the assertion points?
+test-health tree <entity-id> --json
+
+# What env vars does it need?
+test-health env <entity-id> --json
+
+# What's untested?
+test-health gaps <target-filepath> --json
+```
+
+### 0.2 Use test-health output to guide your work
+
+The test-health system tells you:
+
+1. **Boundaries** — the exported functions/classes with external callers. These are your test targets. Prioritize by fan-in (most-imported first).
+
+2. **Dependencies** — what each boundary needs to run. Each dep has a status:
+   - `wirable` — a test substitute exists in `test-health.yaml`. Use it. The registry provides setup/inspect/teardown code.
+   - `blocked` — no substitute, and the registry explicitly marks it as a blocker. **Stop.** Report the blocker to the user. Do NOT mock it.
+   - `unknown` — no registry entry. Flag it for the developer to add. Do NOT mock it.
+
+3. **Call tree** — the functions reachable from the boundary. Cross-module calls on injected dependencies are your **assertion points** — places where data persists beyond the return value.
+
+4. **Env vars** — environment variables read in the call tree. Covered vars have test defaults. Unmapped vars are blockers.
+
+5. **Readiness verdict** — `ready` means all deps are wirable and all env vars are covered. `blocked` means at least one dependency cannot be satisfied in tests.
+
+### 0.3 Check for mutation testing report
+
+Also check if a health report exists at `<health_dir>/report.json`.
+
+**If it exists**, read it. It contains:
 
 - Per-fault-class kill rates (how many injected bugs your tests caught)
-- Blind spots (fault classes with zero mutations — untested dimensions)
+- Blind spots (fault classes with zero mutations)
 - Survived mutations (specific behavioral changes your tests failed to detect)
 
 **Use this to focus your work:**
 
-1. **Weak fault classes** (kill rate < 80%): Prioritize writing tests that would catch mutations in these categories. The fault classes are:
+1. **Weak fault classes** (kill rate < 80%): Prioritize tests that catch mutations in these categories:
    - `wrong_value` — computation produces incorrect result
    - `wrong_path` — control flow takes incorrect branch
    - `missing_action` — operation that should happen is skipped
@@ -68,17 +110,22 @@ Before doing anything else, check if a health report exists at `<health_dir>/rep
    - `error_handling` — error swallowed, wrong error, missing propagation
    - `resource_lifecycle` — leak, missing cleanup, use-after-close
 
-2. **Survived mutations**: If the report lists specific mutations that survived, read their `gap` descriptions. Each one tells you exactly what behavioral property is unverified. Write tests that close those gaps.
+2. **Survived mutations**: Read their `gap` descriptions. Each tells you what property is unverified. Write tests that close those gaps.
 
-3. **Blind spots**: Fault classes with `NOT TESTED` have zero mutation coverage — the mutation generator didn't produce any mutants in that category. You can't fix this (it's the red team's job), but be aware of the gap.
-
-**If no report exists**, proceed with full discovery from Phase 1. You're starting cold.
+**If no entity graph or report exists**, proceed with manual discovery from Phase 1.
 
 ---
 
 ## Phase 1: Discovery
 
 Before writing a single test, understand the behavioral surface. Do NOT skip this phase. Use Glob, Grep, and Read to actually examine the code.
+
+**If you have test-health data from Phase 0**, use it to accelerate discovery:
+- Boundaries from test-health = your public interface
+- Call tree = your data flow map
+- Deps = your architectural boundaries
+
+**If working without test-health**, manually identify:
 
 ### 1.1 Identify the public interface
 
@@ -113,9 +160,11 @@ These are behaviors the code promises but may not document:
 
 ### 1.4 Map architectural boundaries
 
-Draw the line between your code and external systems:
+**If test-health provided dependency info**, use it directly — wirable deps get test substitutes, blocked deps are flagged.
 
-| BOUNDARY — mock this | NOT A BOUNDARY — use real instances |
+**Otherwise**, draw the line between your code and external systems:
+
+| BOUNDARY — use test substitute | NOT A BOUNDARY — use real instances |
 |---|---|
 | Database connections | Internal collaborator classes |
 | HTTP/gRPC clients | Data structures and value objects |
@@ -149,84 +198,103 @@ Every contract becomes at least one test. If you cannot state a contract in plai
 
 ---
 
-## Phase 3: Mocking Philosophy
+## Phase 3: Dependency Wiring
 
-### The bright-line rule
+### The no-mock rule
 
-**Mock at system boundaries. Never mock collaborators.**
+**Never mock.** If a dependency is marked `wirable` in the test-health output, use the registered test substitute. If it's marked `blocked` or `unknown`, stop and tell the user — do not mock it.
 
-A system boundary is where your code talks to something it doesn't own: network, disk, clock, OS, external processes. Everything else is a collaborator — test it with real instances.
+### Wiring from test-health registry
 
-### Why this is the only correct rule
+When test-health provides a `wirable` dependency with setup/inspect/teardown snippets:
 
-- Mocking collaborators tests that your code calls certain methods in a certain order → **implementation coupling**. Refactor the collaboration, tests break, behavior didn't change.
-- Mocking at system boundaries tests that your code produces the right output given certain external conditions → **behavioral testing**. Restructure all internal collaboration, tests still pass.
+```typescript
+// test-health says: Database → SQLiteMemory (src/infra/sqlite-memory.ts)
+// setup: const db = new SQLiteMemory(); await db.runMigrations()
+// inspect: const rows = await db.query("SELECT * FROM orders")
+// teardown: await db.close()
 
-### Mock implementation guidance
+// Use this directly in your test setup:
+let db: SQLiteMemory
+beforeEach(async () => {
+  db = new SQLiteMemory()
+  await db.runMigrations()
+})
+afterEach(async () => {
+  await db.close()
+})
+```
 
-- **Mocks must be dumb.** A mock containing business logic is a parallel implementation that can diverge from reality. Mocks return canned data or record calls. Nothing more.
-- **Prefer fakes over mocks when available.** An in-memory database (SQLite) beats a mock database because it enforces real constraints. A fake clock that you advance manually beats mocking `SystemTime`.
-- **Never mock what you're testing.** Don't mock internal methods of the thing under test to "isolate" one method. That tests nothing.
-- **If mocking is painful, the design might be wrong.** Difficulty mocking often signals that the code has too many implicit dependencies or does too much. Consider refactoring the production code before writing a complex mock.
+### When test-health is unavailable
+
+Fall back to the bright-line rule: substitute at system boundaries, use real instances for everything else.
+
+- **Prefer fakes over mocks.** An in-memory database beats a mock database because it enforces real constraints.
+- **Mocks must be dumb.** A mock containing business logic is a parallel implementation that can diverge from reality.
+- **Never mock what you're testing.**
+- **If mocking is painful, the design might be wrong.**
 
 ---
 
-## Phase 4: Input Extremes
+## Phase 4: Test Writing — Staged Model
 
-For every input parameter, push it to the edges of what the type system allows. These are the tests that find real bugs, not the happy-path tests.
+### Stage 1: Trunk Verification
 
-### Numeric
+Test the boundary's return value — the trunk of the call tree.
 
+For each boundary, verify:
+- Valid inputs → expected return value
+- Invalid inputs → expected errors
+- Edge inputs → correct boundary behavior
+
+This catches the majority of bugs. If the return value is correct, internal computation is correct.
+
+### Stage 2: Subtree Leaf Verification
+
+For each **assertion point** in the call tree (injected dependency calls that persist data):
+
+After the boundary runs, inspect the test substitute's state:
+- Query the test database for expected rows
+- Check the in-memory event bus for expected events
+- Inspect any other injectable state
+
+This catches bugs that don't manifest in the return value — silent data corruption, wrong events, missing writes.
+
+**Test-health identifies these automatically**: they are the `injected=true` nodes in the call tree.
+
+### Stage 3: Input Extremes
+
+For every input parameter, push it to the edges of what the type system allows.
+
+#### Numeric
 | Category | Values |
 |---|---|
 | Zeros | `0`, `-0.0` |
 | Signs | Positive, negative |
-| Type limits | `MAX`, `MIN`, `MAX + 1` (overflow), `MIN - 1` (underflow) |
-| Float specials | `NaN`, `Infinity`, `-Infinity`, subnormals |
+| Type limits | `MAX`, `MIN`, overflow, underflow |
+| Float specials | `NaN`, `Infinity`, `-Infinity` |
 | Off-by-one zone | Values at and around known boundaries |
 
-### Strings
-
+#### Strings
 | Category | Values |
 |---|---|
 | Empty / whitespace | `""`, `" "`, `"\t"`, `"\n"` |
-| Unicode | Multi-byte (`é`, `中`), emoji (`👨‍👩‍👧‍👦`), RTL, zero-width joiners |
-| Injection | Null bytes (`\0`), format strings (`%s`, `{}`), control characters |
-| Deceptive | `"null"`, `"undefined"`, `"true"`, `"0"`, `"NaN"`, `"<script>"` |
-| Length | Single char, very long string (test implicit size assumptions) |
-| Whitespace traps | Leading/trailing spaces, internal multiple spaces |
+| Unicode | Multi-byte, emoji, RTL, zero-width joiners |
+| Injection | Null bytes, format strings, control characters |
+| Deceptive | `"null"`, `"undefined"`, `"true"`, `"0"` |
 
-### Collections
-
+#### Collections
 | Category | Values |
 |---|---|
 | Size | Empty, single element, very large |
-| Content | Duplicates (if uniqueness assumed), null elements (if type permits) |
-| Nesting | Empty inner collections, deeply nested |
-| Order | Pre-sorted, reverse-sorted, random (if order matters) |
+| Content | Duplicates, null elements |
+| Order | Pre-sorted, reverse-sorted, random |
 
-### Optional / Nullable
-
-- `None`/`null` for every optional parameter
-- Every combination of present/absent optionals (if feasible, otherwise cover the important combos)
-
-### State-dependent behavior
-
+#### State-dependent
 - Call methods in unexpected order
 - Call the same operation twice (idempotency)
-- Use after error (call again after a previous failure)
-- Concurrent calls (if the interface implies thread safety)
-
-### When property-based testing fits
-
-If the module under test has properties that should hold for ALL inputs (not just specific examples), consider property-based tests:
-
-- **Roundtrip**: `deserialize(serialize(x)) == x`
-- **Invariant**: `sorted(list).is_sorted() == true` for any list
-- **Equivalence**: `fast_path(x) == slow_path(x)` for any x
-- **Idempotency**: `f(f(x)) == f(x)`
-
-Use the project's existing property-testing library if available. Don't introduce one solely for this.
+- Use after error
+- Concurrent calls (if thread safety implied)
 
 ---
 
@@ -241,37 +309,25 @@ GOOD: test_out_of_stock_item_returns_error_listing_unavailable_items
 GOOD: test_empty_order_is_rejected
 ```
 
-A failing test name should tell you what behavior broke without reading the test body.
-
 ### One behavioral assertion per test
 
-Verify one contract per test. Multiple `assert` statements are fine if they verify aspects of the **same behavior** (e.g., status code AND response body of one API call). Don't test two independent behaviors in one test.
+Verify one contract per test. Multiple `assert` statements are fine if they verify aspects of the **same behavior**.
 
 ### Arrange-Act-Assert, strictly
 
 ```
-// Arrange — set up preconditions
-// Act — ONE call to the public interface
-// Assert — verify the observable outcome
+// Arrange — set up preconditions (wire deps from test-health registry)
+// Act — ONE call to the public interface (the boundary)
+// Assert — verify the observable outcome (trunk + subtree leaves)
 ```
-
-No assertions in Arrange. No mutations in Assert. One logical Act.
 
 ### Test the sad path harder than the happy path
 
-Happy paths get tested by manual usage and QA. The bugs live in:
-
-- Error handling paths
-- Boundary conditions
-- Unexpected input combinations
-- State after partial failures
-- Resource cleanup after errors
-
-Allocate test effort accordingly. A 60/40 split toward sad-path/edge-case tests is usually right.
+A 60/40 split toward sad-path/edge-case tests is usually right.
 
 ### No test interdependence
 
-Each test sets up its own world and tears it down. No test depends on another test's side effects, execution order, or shared mutable state. If setup is expensive, share immutable fixtures — never mutable state.
+Each test sets up its own world and tears it down. Never share mutable state.
 
 ---
 
@@ -281,38 +337,18 @@ After writing the suite, validate against the North Star.
 
 ### Reimplementation check
 
-For each test, ask: *"If I deleted the source and only had this test, what behavior would it specify?"*
+For each test: *"If I deleted the source and only had this test, what behavior would it specify?"*
 
-- If the answer is *"it specifies that method X is called with argument Y"* → **implementation-coupled**. Rewrite.
-- If the answer is *"it specifies that input A produces output B"* → **behavioral**. Keep.
+- *"it specifies that method X is called with argument Y"* → **implementation-coupled**. Rewrite.
+- *"it specifies that input A produces output B"* → **behavioral**. Keep.
 
 ### Coverage gap check
 
-Walk the contract catalog from Phase 2. Every contract must have at least one test. Any behaviors you discovered during implementation that aren't in the catalog? Add tests for them.
+Walk the contract catalog. Every contract must have at least one test. If test-health showed assertion points (injected dependencies in the call tree), verify you have subtree assertions for each.
 
-### Mutation thought experiment
+### Blocker check
 
-For each core behavior, imagine a subtle bug:
-
-- Off-by-one in a loop
-- Wrong comparison operator (`<` vs `<=`)
-- Swapped function arguments
-- Missing null/error check
-- Dropped error variant
-
-Would a test catch it? If not, add one.
-
-### Fragility check
-
-Imagine these refactors:
-
-- Extracting a helper function
-- Renaming an internal variable
-- Splitting one struct into two collaborating structs
-- Changing a data structure (HashMap → BTreeMap)
-- Reordering independent operations
-
-Would any test break? If so, that test asserts on internals. Rewrite it to assert on output.
+If test-health reported any `blocked` or `unknown` dependencies, verify you flagged them in your output rather than working around them with mocks.
 
 ---
 
@@ -320,9 +356,10 @@ Would any test break? If so, that test asserts on internals. Rewrite it to asser
 
 Structure the test suite deliverable as:
 
-1. **Discovery summary** — The public interface, boundaries, key behaviors you found
-2. **Contract catalog** — Plain-English behavioral contracts per entry point
-3. **Test code** — Organized by behavioral area, using the project's existing test framework, conventions, and directory structure
-4. **Validation notes** — Any remaining gaps, risks, or areas where coverage could be stronger
+1. **Structural analysis** — Test-health boundaries, readiness verdicts, blockers (if available)
+2. **Discovery summary** — The public interface, boundaries, key behaviors you found
+3. **Contract catalog** — Plain-English behavioral contracts per entry point
+4. **Test code** — Organized by behavioral area, using the project's existing test framework, conventions, and directory structure. Wired with test substitutes from the registry.
+5. **Validation notes** — Any remaining gaps, risks, or areas where coverage could be stronger. Include any blockers surfaced by test-health.
 
 Match the style, naming conventions, and file structure of existing tests in the codebase. Do not introduce new test frameworks or dependencies unless the existing ones are clearly insufficient.

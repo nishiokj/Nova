@@ -4,7 +4,7 @@
  * Translates the agent's internal event format to the TUI-compatible format.
  */
 
-import type { AgentEvent, AgentEventType } from 'types';
+import type { AgentEvent } from 'types';
 import type {
   BridgeEvent,
   ProgressEventData,
@@ -102,6 +102,7 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
             } satisfies ProgressEventData,
           };
       }
+      return null;
     }
 
     case 'tool_call': {

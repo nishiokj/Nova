@@ -85,7 +85,7 @@ export class EventBus implements EventBusProtocol {
   private dispatchEvent(event: AnyEvent): void {
     // Snapshot handlers at dispatch time so subscription changes affect the next event,
     // and we avoid allocating arrays at publish-time.
-    const runId = (event as any).runId ?? event.requestId;
+    const runId = ('runId' in event ? (event as { runId?: string }).runId : undefined) ?? event.requestId;
     const runHandlers = runId ? this.runHandlers.get(runId) : undefined;
 
     // Optimized: fast-path for agent_message/reasoning events (high-frequency streaming)

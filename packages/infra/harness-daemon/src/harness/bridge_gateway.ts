@@ -12,8 +12,9 @@ import type { FullHarnessConfig } from './config.js';
 import type { AuthService } from './auth_service.js';
 import type { LocalProviderManager } from './local_providers.js';
 import type { UnifiedHookRegistry } from 'orchestrator';
-import type { AgentType } from 'agent';
+import type { AgentType, ModelSelection } from 'agent';
 import type { PermissionChecker } from './permissions.js';
+import type { GraphDManager } from 'graphd';
 import { RpcDispatcher } from './rpc_dispatcher.js';
 import { registerRpcHandlers } from './rpc_handlers.js';
 import { RpcMethodHandlers } from './rpc_method_handlers.js';
@@ -42,8 +43,8 @@ export interface HarnessLike {
     reasoning?: string;
     contextWindow?: number;
   } | null): void;
-  getSessionSelectedModel?(sessionKey: string, agentType: string): import('agent').ModelSelection | null;
-  getAllSessionSelectedModels?(sessionKey: string): Map<string, import('agent').ModelSelection>;
+  getSessionSelectedModel?(sessionKey: string, agentType: string): ModelSelection | null;
+  getAllSessionSelectedModels?(sessionKey: string): Map<string, ModelSelection>;
   clearAllSessionSelectedModels?(sessionKey: string): void;
   getSessionHistory?(sessionKey: string): { role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }[];
   getAsyncModeStatus?(): { ok: boolean; issues: string[] };
@@ -57,7 +58,7 @@ export interface HarnessLike {
       reloadPersistentConfig?: boolean;
     }) => unknown;
   } | void;
-  getGraphD?(): any;
+  getGraphD?(): GraphDManager | null;
   closeSession?(sessionKey: string): { success: boolean; error?: string; executingRequestId?: string };
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
   compactContext?(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string };
@@ -253,7 +254,7 @@ export class BridgeGateway {
           return;
         case 'send_text':
         case 'send_media':
-          this.handleSendText(connectionId, commandData, state);
+          void this.handleSendText(connectionId, commandData, state);
           return;
         case 'user_prompt_response':
           this.handleUserPromptResponse(connectionId, commandData, state);

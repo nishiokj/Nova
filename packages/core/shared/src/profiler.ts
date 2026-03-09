@@ -6,6 +6,8 @@
  *   - https://ui.perfetto.dev (drag & drop JSON)
  */
 
+import { writeFileSync } from 'node:fs';
+
 interface TraceEvent {
   name: string;
   cat: string;
@@ -58,8 +60,8 @@ class Profiler {
 
     if (!this.shutdownRegistered) {
       this.shutdownRegistered = true;
-      process.on('SIGINT', () => this.flush());
-      process.on('SIGTERM', () => this.flush());
+      process.on('SIGINT', () => this.flushSync());
+      process.on('SIGTERM', () => this.flushSync());
       process.on('exit', () => this.flushSync());
     }
 
@@ -271,16 +273,7 @@ class Profiler {
     const json = JSON.stringify(output, null, 2);
 
     try {
-      // Use Bun.write if available (Bun runtime), otherwise fs.writeFileSync
-      if (typeof Bun !== 'undefined') {
-        // Bun.write returns a promise, use writeFileSync for sync behavior
-        const fs = require('fs');
-        fs.writeFileSync(this.outputPath, json, 'utf-8');
-      } else {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const fs = require('fs');
-        fs.writeFileSync(this.outputPath, json, 'utf-8');
-      }
+      writeFileSync(this.outputPath, json, 'utf-8');
       console.log(`[profiler] Wrote ${this.events.length} events to ${this.outputPath}`);
     } catch (error) {
       console.error('[profiler] Failed to write profile:', error);

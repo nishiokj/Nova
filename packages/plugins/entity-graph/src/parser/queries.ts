@@ -152,3 +152,102 @@ export const IMPLEMENTS_CLAUSE_QUERY = `
 export const EXPORT_QUERY = `
   (export_statement) @export.def
 `
+
+// --- Test Health Queries ---
+
+/**
+ * Formal parameters of functions and methods.
+ * Captures the parameter name and optional type annotation.
+ */
+export const REQUIRED_PARAM_QUERY = `
+  (required_parameter
+    pattern: (identifier) @param.name
+    type: (type_annotation (_) @param.type)?
+  ) @param.def
+`
+
+/**
+ * Optional parameters: `foo?: string`
+ */
+export const OPTIONAL_PARAM_QUERY = `
+  (optional_parameter
+    pattern: (identifier) @param.name
+    type: (type_annotation (_) @param.type)?
+  ) @param.def
+`
+
+/**
+ * Env var access via member expression: `process.env.VAR_NAME` / `Bun.env.VAR_NAME`
+ */
+export const ENV_MEMBER_QUERY = `
+  (member_expression
+    object: (member_expression
+      object: (identifier) @env.obj
+      property: (property_identifier) @env.prop
+    )
+    property: (property_identifier) @env.var_name
+  ) @env.access
+`
+
+/**
+ * Env var access via subscript: `process.env['VAR_NAME']` / `process.env["VAR_NAME"]`
+ */
+export const ENV_SUBSCRIPT_QUERY = `
+  (subscript_expression
+    object: (member_expression
+      object: (identifier) @env.obj
+      property: (property_identifier) @env.prop
+    )
+    index: (string) @env.var_name
+  ) @env.access
+`
+
+/**
+ * Destructured env vars: `const { VAR_A, VAR_B } = process.env`
+ */
+export const ENV_DESTRUCTURE_QUERY = `
+  (variable_declarator
+    name: (object_pattern
+      (shorthand_property_identifier_pattern) @env.var_name
+    )
+    value: (member_expression
+      object: (identifier) @env.obj
+      property: (property_identifier) @env.prop
+    )
+  ) @env.access
+`
+
+/**
+ * Return type annotations on functions:
+ * `function foo(): ReturnType { ... }`
+ * `const foo = (): ReturnType => { ... }`
+ */
+export const FUNCTION_RETURN_TYPE_QUERY = `
+  (function_declaration
+    name: (identifier) @ret.func_name
+    return_type: (type_annotation (_) @ret.type)
+  )
+`
+
+export const ARROW_RETURN_TYPE_QUERY = `
+  (lexical_declaration
+    (variable_declarator
+      name: (identifier) @ret.func_name
+      value: (arrow_function
+        return_type: (type_annotation (_) @ret.type)
+      )
+    )
+  )
+`
+
+export const METHOD_RETURN_TYPE_QUERY = `
+  (class_declaration
+    name: (type_identifier) @ret.class_name
+    body: (class_body
+      (method_definition
+        name: (property_identifier) @ret.method_name
+        return_type: (type_annotation (_) @ret.type)
+      )
+    )
+  )
+`

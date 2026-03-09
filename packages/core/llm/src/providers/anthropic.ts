@@ -9,6 +9,9 @@ import type {
   TokenUsage,
   StopReason,
   LLMResponse,
+  LLMItem,
+  LLMMessageItem,
+  ContentBlock,
   RespondParams,
   StreamParams,
   LLMExecutionError,
@@ -96,22 +99,21 @@ export class AnthropicProvider implements LLMProviderAdapter {
       }));
   }
 
-  formatMessages(messages: any[]): { role: string; content: string | unknown[] }[] {
+  formatMessages(messages: LLMItem[]): { role: string; content: string | unknown[] }[] {
     return messages
-      .filter((m) => m && m.role !== 'system' && m.content != null)
+      .filter((m): m is LLMMessageItem => m.type === 'message' && m.role !== 'system' && m.content !== null && m.content !== undefined)
       .map((m) => ({
         role: m.role,
         content:
           typeof m.content === 'string'
             ? m.content
-            : Array.isArray(m.content)
-              ? m.content.filter((block: unknown) => block != null).map((block: Record<string, unknown>) => {
+            : m.content.filter((block): block is ContentBlock => block !== null && block !== undefined).map((block) => {
                   if (block.type === 'text') {
-                    return { type: 'text', text: block.text };
+                    return { type: 'text' as const, text: block.text };
                   }
                   if (block.type === 'tool_use') {
                     return {
-                      type: 'tool_use',
+                      type: 'tool_use' as const,
                       id: block.id,
                       name: block.name,
                       input: block.input,
@@ -119,15 +121,14 @@ export class AnthropicProvider implements LLMProviderAdapter {
                   }
                   if (block.type === 'tool_result') {
                     return {
-                      type: 'tool_result',
+                      type: 'tool_result' as const,
                       tool_use_id: block.toolUseId,
                       content: block.content,
                       is_error: block.isError,
                     };
                   }
                   return block;
-                })
-              : [],
+                }),
       }));
   }
 

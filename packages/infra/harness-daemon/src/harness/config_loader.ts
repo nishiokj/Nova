@@ -26,7 +26,6 @@ import {
   type ResolvedAgentConfig,
   type ResolvedLLMConfig,
   type ResolvedFallbackConfig,
-  type LLMProvider,
   type AgentConfigEntry,
   type HarnessConfigFile,
 } from './config.js';

@@ -124,6 +124,8 @@ function syntheticFileEntity(filepath: string): Entity {
     exported: false,
     async: false,
     rawText: null,
+    paramsText: null,
+    returnText: null,
   }
 }
 
