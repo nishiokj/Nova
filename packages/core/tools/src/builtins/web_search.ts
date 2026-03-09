@@ -35,7 +35,7 @@ interface BraveWebResult {
 interface BraveSearchResponse {
   query: { original: string; more_results_available: boolean };
   web?: { results: BraveWebResult[] };
-  mixed?: { main: Array<{ type: string; index?: number }> };
+  mixed?: { main: { type: string; index?: number }[] };
 }
 
 // ============================================
@@ -281,6 +281,8 @@ IMPORTANT: After using search results to answer a question, always include a "So
       count: {
         type: 'number',
         description: 'Number of results to return (1-20, default: 10)',
+        minimum: 1,
+        maximum: 20,
       },
     },
     required: ['query'],

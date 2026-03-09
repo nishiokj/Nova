@@ -100,7 +100,7 @@ export async function executeExpandConversation(
         message_count?: number;
         participants?: unknown[];
       };
-      messages?: Array<{
+      messages?: {
         id: string;
         sender_identity_id?: string;
         subject?: string;
@@ -110,7 +110,7 @@ export async function executeExpandConversation(
         received_at?: string;
         created_at?: string;
         source_timestamp?: string;
-      }>;
+      }[];
       total?: number;
       offset?: number;
       limit?: number;
@@ -193,7 +193,9 @@ export const expandConversationToolOptions: ToolRegistrationOptions = {
       },
       limit: {
         type: 'number',
-        description: `Max messages to return (default: ${DEFAULT_LIMIT})`,
+        description: `Max messages to return (1-200, default: ${DEFAULT_LIMIT})`,
+        minimum: 1,
+        maximum: 200,
       },
       offset: {
         type: 'number',
@@ -201,7 +203,8 @@ export const expandConversationToolOptions: ToolRegistrationOptions = {
       },
       max_chars_per_message: {
         type: 'number',
-        description: `Maximum characters per message (default: ${DEFAULT_MAX_CHARS})`,
+        description: `Maximum characters per message (minimum: 200, default: ${DEFAULT_MAX_CHARS})`,
+        minimum: 200,
       },
       include_subject: {
         type: 'boolean',

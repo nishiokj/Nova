@@ -26,7 +26,7 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
     // Propagate sessionKey for event routing (SSE → dashboard)
     const sessionKey = (event as unknown as Record<string, unknown>).sessionKey;
     if (typeof sessionKey === 'string') {
-      (result.data as Record<string, unknown>).session_key = sessionKey;
+      (result.data!).session_key = sessionKey;
     }
   }
   return result;
@@ -35,7 +35,7 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
 function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
   const { type, data, requestId } = event;
 
-  switch (type as AgentEventType) {
+  switch (type) {
     case 'runtime_script_created': {
       const goalData = data as { goal?: string };
       return {
@@ -370,13 +370,13 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
 
     case 'harness_user_prompt': {
       const promptData = data as {
-        questions: Array<{
+        questions: {
           question: string;
-          options?: Array<string | { label: string; description?: string }>;
+          options?: (string | { label: string; description?: string })[];
           context?: string;
           multiSelect?: boolean;
           questionType?: string;
-        }>;
+        }[];
       };
       const wireData: Record<string, unknown> = {
         request_id: requestId,
@@ -459,7 +459,7 @@ export function createErrorEvent(message: string, fatal = false): BridgeEvent {
  */
 export function createReadyEvent(
   sessionKey: string,
-  history?: Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }>,
+  history?: { role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }[],
   configSummary?: string
 ): BridgeEvent {
   return {

@@ -322,7 +322,7 @@ export class AuthService {
     name?: string | null;
   } {
     const sessionData = this.pendingAuthStates.get(`session:${stateToken}`);
-    if (!sessionData || !sessionData.sessionToken) {
+    if (!sessionData?.sessionToken) {
       return { pending: true };
     }
 
@@ -378,7 +378,7 @@ export class AuthService {
   listProviders(sessionToken: string): {
     success: boolean;
     error?: string;
-    providers?: Array<{ provider: string; configured: boolean; updatedAt?: number }>;
+    providers?: { provider: string; configured: boolean; updatedAt?: number }[];
   } {
     const session = this.store.validateUserSession(sessionToken);
     if (!session) {

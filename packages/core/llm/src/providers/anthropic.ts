@@ -96,7 +96,7 @@ export class AnthropicProvider implements LLMProviderAdapter {
       }));
   }
 
-  formatMessages(messages: any[]): Array<{ role: string; content: string | unknown[] }> {
+  formatMessages(messages: any[]): { role: string; content: string | unknown[] }[] {
     return messages
       .filter((m) => m && m.role !== 'system' && m.content != null)
       .map((m) => ({
@@ -198,13 +198,13 @@ export class AnthropicProvider implements LLMProviderAdapter {
     }
 
     const data = (await response.json()) as {
-      content: Array<{
+      content: {
         type: string;
         text?: string;
         id?: string;
         name?: string;
         input?: Record<string, unknown>;
-      }>;
+      }[];
       stop_reason: string;
       usage: {
         input_tokens: number;
@@ -328,7 +328,7 @@ export class AnthropicProvider implements LLMProviderAdapter {
     const decoder = new TextDecoder();
 
     let fullContent = '';
-    let stopReason: StopReason = 'end_turn';
+    const stopReason: StopReason = 'end_turn';
     let usage: TokenUsage = {
       promptTokens: 0,
       completionTokens: 0,

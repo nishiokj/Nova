@@ -25,6 +25,9 @@ interface GrepMatch {
   content: string;
 }
 
+const DEFAULT_GREP_MAX_RESULTS = 20;
+const MAX_GREP_RESULTS = 50;
+
 /**
  * Convert a glob pattern to a regex for fallback matching.
  * Supports basic patterns like *.ts, **\/*.tsx, etc.
@@ -273,7 +276,10 @@ export async function executeGrep(
   const pattern = args.pattern as string;
   const cwd = context?.workdirOverride ?? process.cwd();
   const searchPath = (args.path as string) ?? '.';
-  const maxResults = (args.maxResults as number) ?? 20;
+  const requestedMaxResults = typeof args.maxResults === 'number' && Number.isFinite(args.maxResults)
+    ? Math.trunc(args.maxResults)
+    : DEFAULT_GREP_MAX_RESULTS;
+  const maxResults = Math.min(MAX_GREP_RESULTS, Math.max(1, requestedMaxResults));
   const caseSensitive = (args.caseSensitive as boolean) ?? false;
   const glob = args.glob as string | undefined;
   const fileType = args.type as string | undefined;
@@ -405,7 +411,8 @@ export const grepToolOptions: ToolRegistrationOptions = {
       },
       maxResults: {
         type: 'number',
-        description: 'Maximum number of matches to return (default: 20)',
+        description: 'Maximum number of matches to return (default: 20, capped at 50)',
+        maximum: 50,
       },
       caseSensitive: {
         type: 'boolean',

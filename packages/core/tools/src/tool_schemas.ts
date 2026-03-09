@@ -16,7 +16,7 @@ import { z } from 'zod';
  */
 export const BashArgsSchema = z.object({
   command: z.string().min(1, 'Command cannot be empty'),
-  timeout: z.number().positive().optional(),
+  timeout: z.number().min(1, 'timeout must be at least 1 second').optional(),
   env: z.record(z.string(), z.string()).optional(),
 });
 
@@ -96,7 +96,7 @@ export const GrepArgsSchema = z.object({
   head_limit: z.number().nonnegative().int().optional(),
   offset: z.number().nonnegative().int().optional(),
   multiline: z.boolean().optional(),
-  maxResults: z.number().positive().int().optional(),
+  maxResults: z.number().positive().int().max(50).optional(),
   caseInsensitive: z.boolean().optional(),
 });
 
@@ -154,11 +154,25 @@ export const PromptUserArgsSchema = z.object({
  */
 export const ExpandConversationArgsSchema = z.object({
   conversation_id: z.string().min(1, 'conversation_id cannot be empty'),
-  limit: z.number().positive().int().optional(),
+  limit: z.number().positive().int().max(200).optional(),
   offset: z.number().nonnegative().int().optional(),
-  max_chars_per_message: z.number().positive().int().optional(),
+  max_chars_per_message: z.number().int().min(200).optional(),
   include_subject: z.boolean().optional(),
   base_url: z.string().optional(),
+});
+
+// ============================================
+// WEB SEARCH TOOL
+// ============================================
+
+/**
+ * Arguments for WebSearch tool execution.
+ */
+export const WebSearchArgsSchema = z.object({
+  query: z.string().min(1, 'query cannot be empty'),
+  allowed_domains: z.array(z.string()).optional(),
+  blocked_domains: z.array(z.string()).optional(),
+  count: z.number().positive().int().max(20).optional(),
 });
 
 // ============================================
@@ -178,6 +192,7 @@ export const TOOL_SCHEMAS: Record<string, z.ZodType> = {
   Skill: SkillArgsSchema,
   PromptUser: PromptUserArgsSchema,
   ExpandConversation: ExpandConversationArgsSchema,
+  WebSearch: WebSearchArgsSchema,
 };
 
 // ============================================
@@ -193,6 +208,7 @@ export type GrepArgs = z.infer<typeof GrepArgsSchema>;
 export type SkillArgs = z.infer<typeof SkillArgsSchema>;
 export type PromptUserArgs = z.infer<typeof PromptUserArgsSchema>;
 export type ExpandConversationArgs = z.infer<typeof ExpandConversationArgsSchema>;
+export type WebSearchArgs = z.infer<typeof WebSearchArgsSchema>;
 
 // ============================================
 // VALIDATION FUNCTIONS

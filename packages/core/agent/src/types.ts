@@ -179,13 +179,13 @@ export interface AgentResultBase {
   };
 }
 
-export type AgentRateLimitInfo = {
+export interface AgentRateLimitInfo {
   provider: string;
   model: string;
   type: string;
   retryAfterMs?: number;
   message: string;
-};
+}
 
 export type AgentResult =
   | (AgentResultBase & {
@@ -235,7 +235,7 @@ export type MutableAgentResult = AgentResultBase & {
  */
 export interface UserPromptQuestion {
   question: string;
-  options?: Array<string | { label: string; description?: string }>;
+  options?: (string | { label: string; description?: string })[];
   context?: string;
   multiSelect?: boolean;
   questionType?: string;
@@ -351,7 +351,7 @@ export type InternalHookEvent =
     }
   | {
       type: 'artifacts_discovered';
-      artifacts: Array<{ sourcePath: string; name: string; kind: string }>;
+      artifacts: { sourcePath: string; name: string; kind: string }[];
       discoveredBy: string;
     }
   | {
@@ -486,7 +486,7 @@ export const noopHookQueue: InternalHookQueue = {
 export interface AgentRegistry {
   has(agentType: string): boolean;
   getConfig(agentType: string): AgentConfig;
-  listToolDefinitions(): Array<{ name: string; description: string; parameters: Record<string, unknown> }>;
+  listToolDefinitions(): { name: string; description: string; parameters: Record<string, unknown> }[];
 }
 
 /**
@@ -496,6 +496,7 @@ export interface AgentRegistry {
 export interface ModelSelectionInfo {
   provider: string;
   model: string;
+  contextWindow: number;
   reasoning?: string;
 }
 

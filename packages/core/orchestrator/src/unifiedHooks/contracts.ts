@@ -46,7 +46,7 @@ export interface PostGitCommitEffectPayload {
 
 export interface UserPromptQuestion {
   question: string;
-  options?: Array<string | { label: string; description?: string }>;
+  options?: (string | { label: string; description?: string })[];
   context?: string;
   multiSelect?: boolean;
   questionType?: 'multiple_choice' | 'multi_select' | 'fill_in_blank' | 'yes_no' | 'free_text';
@@ -57,7 +57,7 @@ export interface UserPromptSubmitEffectPayload {
   workItemId: string;
   prompt: {
     question?: string;
-    options?: Array<string | { label: string; description?: string }>;
+    options?: (string | { label: string; description?: string })[];
     context?: string;
     multiSelect?: boolean;
     questionType?: 'multiple_choice' | 'multi_select' | 'fill_in_blank' | 'yes_no' | 'free_text';
@@ -94,7 +94,7 @@ export type LifecycleEffectPayload =
   | SessionStopEffectPayload
   | NotificationEffectPayload;
 
-type LifecycleEffectPayloadMap = {
+interface LifecycleEffectPayloadMap {
   pre_tool_use: PreToolUseEffectPayload;
   post_tool_use: PostToolUseEffectPayload;
   post_git_commit: PostGitCommitEffectPayload;
@@ -102,7 +102,7 @@ type LifecycleEffectPayloadMap = {
   session_start: SessionStartEffectPayload;
   session_stop: SessionStopEffectPayload;
   notification: NotificationEffectPayload;
-};
+}
 
 type InternalEffectPayloadMap = {
   [E in InternalHookEvent['type']]: Extract<InternalHookEvent, { type: E }>;

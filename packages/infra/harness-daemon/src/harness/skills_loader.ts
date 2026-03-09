@@ -296,7 +296,7 @@ function parseSkillMd(
   content: string,
   defaultId: string,
   sourcePath: string,
-  full: boolean = false
+  full = false
 ): SkillDefinitionStub | SkillDefinition | null {
   const lines = content.split('\n');
   let inFrontmatter = false;
@@ -321,7 +321,7 @@ function parseSkillMd(
   // Simple YAML parsing (key: value)
   const metadata: Record<string, unknown> = {};
   for (const line of frontmatter.split('\n')) {
-    const match = line.match(/^([\w-]+):\s*(.+)$/);
+    const match = /^([\w-]+):\s*(.+)$/.exec(line);
     if (match) {
       const [, key, value] = match;
       // Handle quoted strings

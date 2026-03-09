@@ -205,7 +205,7 @@ function mergeObjectAlternatives(options: JsonSchema[]): JsonSchema {
 
   const explicitAdditionalProperties = options
     .map((option) => option.additionalProperties)
-    .filter((value) => typeof value === 'boolean') as boolean[];
+    .filter((value) => typeof value === 'boolean');
   if (explicitAdditionalProperties.length > 0) {
     merged.additionalProperties = explicitAdditionalProperties.every(Boolean);
   }
@@ -321,7 +321,7 @@ function compileSchema(schema: JsonSchema, mode: SchemaMode): JsonSchema {
 function compileWithCache(mode: SchemaMode, schema: JsonSchema, schemaId?: string): JsonSchema {
   if (schemaId) {
     const cachedById = schemaIdCache[mode].get(schemaId);
-    if (cachedById && cachedById.source === schema) return cachedById.compiled;
+    if (cachedById?.source === schema) return cachedById.compiled;
   }
 
   const cachedByRef = schemaRefCache[mode].get(schema);

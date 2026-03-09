@@ -123,7 +123,7 @@ export class BusServer {
   /** Unsubscribe function for a global EventBus subscription */
   private allEventsUnsubscribe: (() => void) | null = null;
   /** Extra unsubscribers for stream events that are not emitted on subscribeAll. */
-  private allEventsStreamUnsubscribes: Array<() => void> = [];
+  private allEventsStreamUnsubscribes: (() => void)[] = [];
 
   constructor(options: BusServerOptions) {
     this.host = options.host;
@@ -332,7 +332,7 @@ export class BusServer {
 
     // Clean up run subscriptions that this connection was the last subscriber for
     for (const channel of connection.subscriptions) {
-      const runMatch = channel.match(/^run:(.+)$/);
+      const runMatch = /^run:(.+)$/.exec(channel);
       if (runMatch && !this.hasSubscribers(channel)) {
         this.unsubscribeFromRun(runMatch[1]);
       }
@@ -369,7 +369,7 @@ export class BusServer {
         connection.subscriptions.add(message.channel);
 
         // If subscribing to a run channel, subscribe to EventBus for direct forwarding
-        const runMatch = message.channel.match(/^run:(.+)$/);
+        const runMatch = /^run:(.+)$/.exec(message.channel);
         if (runMatch && this.eventBus) {
           this.subscribeToRun(runMatch[1], message.channel);
         }
@@ -383,7 +383,7 @@ export class BusServer {
         connection.subscriptions.delete(message.channel);
 
         // If unsubscribing from a run channel and no other clients need it, unsubscribe from EventBus
-        const runMatch = message.channel.match(/^run:(.+)$/);
+        const runMatch = /^run:(.+)$/.exec(message.channel);
         if (runMatch && !this.hasSubscribers(message.channel)) {
           this.unsubscribeFromRun(runMatch[1]);
         }
@@ -396,8 +396,8 @@ export class BusServer {
       case 'publish':
         try {
           const result = this.onPublish(connection.id, message.channel, message.payload);
-          if (result && typeof (result as Promise<void>).catch === 'function') {
-            (result as Promise<void>).catch((error) => {
+          if (result && typeof (result).catch === 'function') {
+            (result).catch((error) => {
               this.sendError(connection, 'publish_failed', String(error));
             });
           }

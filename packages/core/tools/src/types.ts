@@ -7,6 +7,7 @@
 import type {
   ToolResult,
   ToolDefinition,
+  ToolParameterSchema as CoreToolParameterSchema,
   ToolExecutionError as CoreToolExecutionError,
   RunControlMetadata,
   RunExecutionMetadata,
@@ -53,13 +54,22 @@ export function createExecutionContext(): ToolExecutionContext {
 /**
  * Full tool definition with executor.
  */
+export interface ToolParameterSchema extends CoreToolParameterSchema {
+  minimum?: number;
+  maximum?: number;
+}
+
+type ToolObjectSchema = Omit<ToolDefinition['parameters'], 'properties'> & {
+  properties: Record<string, ToolParameterSchema>;
+};
+
 export interface Tool {
   /** Tool name */
   name: string;
   /** Description for LLM */
   description: string;
   /** Parameter schema */
-  parameters: ToolDefinition['parameters'];
+  parameters: ToolObjectSchema;
   /** Whether to enforce strict schema mode */
   strict?: boolean;
   /** Required parameter names */
@@ -101,7 +111,7 @@ export type ToolExecutor = (
 export interface ToolRegistrationOptions {
   name: string;
   description: string;
-  parameters: ToolDefinition['parameters'];
+  parameters: ToolObjectSchema;
   strict?: boolean;
   required: string[];
   executor: ToolExecutor;

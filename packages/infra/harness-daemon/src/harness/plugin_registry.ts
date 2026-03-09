@@ -61,6 +61,6 @@ export class HarnessPluginRegistry {
 
     const pending = this.loadOptionalModule<T>(spec);
     this.cache.set(spec.moduleName, pending as Promise<unknown | null>);
-    return await pending;
+    return pending;
   }
 }

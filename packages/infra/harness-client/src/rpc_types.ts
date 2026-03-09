@@ -50,7 +50,7 @@ export interface Procedures {
   'auth.verify': { input: { sessionToken: string }; output: { success: boolean; valid?: boolean; user?: { id: string; email: string; name: string | null }; error?: string } };
   'auth.logout': { input: { sessionToken: string }; output: { success: boolean } };
 
-  'providers.list': { input: { sessionToken?: string }; output: { success: boolean; providers?: Array<{ provider: string; configured: boolean; updatedAt?: number }>; error?: string } };
+  'providers.list': { input: { sessionToken?: string }; output: { success: boolean; providers?: { provider: string; configured: boolean; updatedAt?: number }[]; error?: string } };
   'providers.save': { input: { provider: string; apiKey: string; sessionToken?: string }; output: { success: boolean; error?: string } };
   'providers.delete': { input: { provider: string; sessionToken?: string }; output: { success: boolean; error?: string } };
   'providers.test': { input: { provider: string; sessionToken?: string }; output: { success: boolean; valid?: boolean; error?: string } };
@@ -58,9 +58,9 @@ export interface Procedures {
   'session.fork': { input: Record<string, never>; output: { success: boolean; newSessionKey?: string; sourceSessionKey?: string; error?: string } };
   'session.close': { input: Record<string, never>; output: { success: boolean; sessionKey?: string; message?: string; error?: string } };
   'session.delete': { input: { sessionKey?: string; session_key?: string }; output: { success: boolean; deleted: boolean; error?: string } };
-  'session.list': { input: { workingDir?: string; status?: string | string[]; limit?: number }; output: { success: boolean; sessions: Array<{ sessionKey: string; clientType: string; createdAt: number; lastAccessedAt: number; workingDir: string | null; status: string; lastUserMessagePreview?: string | null }>; error?: string } };
+  'session.list': { input: { workingDir?: string; status?: string | string[]; limit?: number }; output: { success: boolean; sessions: { sessionKey: string; clientType: string; createdAt: number; lastAccessedAt: number; workingDir: string | null; status: string; lastUserMessagePreview?: string | null }[]; error?: string } };
 
-  'usage.summary': { input: { status?: string | string[]; limit?: number }; output: { success: boolean; usage?: Array<{ provider: string; model: string; totalTokens: number; sessionCount: number }>; sessions?: Array<{ sessionKey: string; clientType: string; createdAt: number; lastAccessedAt: number; workingDir: string | null; status: string; metadataJson: string | null; metadata?: Record<string, unknown>; lastUserMessagePreview?: string | null; goal?: string | null; currentWorkItemId?: string | null; currentObjective?: string | null }>; error?: string } };
+  'usage.summary': { input: { status?: string | string[]; limit?: number }; output: { success: boolean; usage?: { provider: string; model: string; totalTokens: number; sessionCount: number }[]; sessions?: { sessionKey: string; clientType: string; createdAt: number; lastAccessedAt: number; workingDir: string | null; status: string; metadataJson: string | null; metadata?: Record<string, unknown>; lastUserMessagePreview?: string | null; goal?: string | null; currentWorkItemId?: string | null; currentObjective?: string | null }[]; error?: string } };
 
   'context.compact': { input: Record<string, never>; output: Record<string, unknown> };
   'model.set': { input: { agent_type?: string; provider?: string; model?: string; reasoning?: string; reset?: boolean }; output: Record<string, unknown> };

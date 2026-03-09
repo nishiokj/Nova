@@ -254,6 +254,7 @@ export interface ResolvedLLMConfig {
   displayProvider: string; // Original provider name for error messages
   model: string;
   maxTokens: number;
+  contextWindow: number;
   temperature?: number;
   baseUrl?: string;
   reasoning?: { effort: ReasoningEffort };

@@ -68,7 +68,7 @@ interface CacheEntry {
 const CONCEPT_INTENTS = new Set(['decision', 'preference', 'principle', 'tradeoff', 'recall']);
 
 function extractUserMessages(ctx: ContextWindow, limit = 3): string[] {
-  return (ctx.getItemsByType('message') as MessageItem[])
+  return (ctx.getItemsByType('message'))
     .filter(m => m.role === 'user')
     .map(m => {
       if (typeof m.content === 'string') return m.content;

@@ -22,7 +22,7 @@ import type {
 import { RpcClient } from './rpc_client.js';
 import type { ProcedureMethod } from './rpc_types.js';
 
-export * from './types.js'
+export type * from './types.js'
 export * from './rpc_types.js';
 export { RpcClient, RpcCallError } from './rpc_client.js';
 export type { Attachment } from './types.js';
@@ -260,7 +260,7 @@ export class HarnessClient extends EventEmitter {
 
     // Handle ready event - subscribe to session channel
     if (event.type === 'ready') {
-      const data = (event.data ?? {}) as ReadyData;
+      const data = (event.data ?? {});
       if (data.session_key && data.session_key !== this.sessionKey) {
         if (this.sessionKey) {
           this.bus.unsubscribe(sessionChannel(this.sessionKey));
@@ -272,7 +272,7 @@ export class HarnessClient extends EventEmitter {
 
     // Handle response event - unsubscribe from run channel
     if (event.type === 'response') {
-      const data = (event.data ?? {}) as ResponseData;
+      const data = (event.data ?? {});
       const requestId = typeof data.request_id === 'string' ? data.request_id : '';
       if (requestId && this.activeRuns.has(requestId)) {
         this.activeRuns.delete(requestId);

@@ -174,13 +174,13 @@ export function eventToDict(event: AgentEvent): Record<string, unknown> {
 export interface RuntimeScriptCreatedData {
   goal: string;
   workItemCount: number;
-  workItems: Array<{
+  workItems: {
     workId: string;
     objective: string;
     delta?: string;
     agent: AgentType;
     dependencies: string[];
-  }>;
+  }[];
   systemContext: {
     packageManagers: string[];
     frameworks: string[];
@@ -380,7 +380,7 @@ export interface MemoryInjectionTrainingSignal {
     raw: string;
     state_summary: string;
   };
-  candidate_list: Array<{
+  candidate_list: {
     doc_id: string;
     chunk_id: string | null;
     source_type: 'file' | 'symbol' | 'summary' | 'tool_output' | 'web';
@@ -393,8 +393,8 @@ export interface MemoryInjectionTrainingSignal {
     token_size: number;
     freshness: string | null;
     scope: string | null;
-  }>;
-  selected_set: Array<{
+  }[];
+  selected_set: {
     doc_id: string;
     chunk_id: string | null;
     source_type: 'file' | 'symbol' | 'summary' | 'tool_output' | 'web';
@@ -407,7 +407,7 @@ export interface MemoryInjectionTrainingSignal {
     token_size: number;
     freshness: string | null;
     scope: string | null;
-  }>;
+  }[];
   budget: {
     max_tokens: number;
     k: number;

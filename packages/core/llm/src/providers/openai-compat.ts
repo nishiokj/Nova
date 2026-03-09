@@ -300,14 +300,14 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     });
   }
 
-  formatMessages(messages: any[], systemPrompt?: string): Array<Record<string, unknown>> {
-    const result: Array<Record<string, unknown>> = [];
+  formatMessages(messages: any[], systemPrompt?: string): Record<string, unknown>[] {
+    const result: Record<string, unknown>[] = [];
 
     if (systemPrompt) {
       result.push({ role: 'system', content: systemPrompt });
     }
 
-    const functionCalls: Array<{ callId: string; name: string; argumentsStr: string }> = [];
+    const functionCalls: { callId: string; name: string; argumentsStr: string }[] = [];
     // Track pending reasoning content to attach to the next assistant message (GLM-4.7)
     let pendingReasoningContent = '';
 
@@ -387,7 +387,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       if (!Array.isArray(msg.content)) continue;
 
       const textParts: string[] = [];
-      const toolCalls: Array<Record<string, unknown>> = [];
+      const toolCalls: Record<string, unknown>[] = [];
 
       for (const block of msg.content) {
         if (!block) continue;
@@ -552,7 +552,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       }
     }
 
-    const formattedMessages = body.messages as Array<Record<string, unknown>>;
+    const formattedMessages = body.messages as Record<string, unknown>[];
     const messageTypes = formattedMessages.map(m => {
       if (m.role === 'tool') return 'tool';
       if (m.role === 'assistant' && m.tool_calls) return 'assistant+tools';
@@ -580,7 +580,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (resolved.apiKey) {
-      headers['Authorization'] = `Bearer ${resolved.apiKey}`;
+      headers.Authorization = `Bearer ${resolved.apiKey}`;
     }
 
     const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
@@ -611,23 +611,23 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       object: string;
       created: number;
       model: string;
-      choices: Array<{
+      choices: {
         index: number;
         message: {
           role: string;
           content: string | null;
           reasoning_content?: string | null; // GLM-4.7 thinking trace
-          tool_calls?: Array<{
+          tool_calls?: {
             id: string;
             type: string;
             function: {
               name: string;
               arguments: string;
             };
-          }>;
+          }[];
         };
         finish_reason: string;
-      }>;
+      }[];
       usage: {
         prompt_tokens: number;
         completion_tokens: number;
@@ -817,7 +817,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
 
     const streamHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
     if (resolved.apiKey) {
-      streamHeaders['Authorization'] = `Bearer ${resolved.apiKey}`;
+      streamHeaders.Authorization = `Bearer ${resolved.apiKey}`;
     }
 
     // Profile request serialization
@@ -864,7 +864,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       totalTokens: 0,
     };
     const toolCalls: ToolCall[] = [];
-    const toolCallBuilders: Map<number, { id: string; name: string; arguments: string }> = new Map();
+    const toolCallBuilders = new Map<number, { id: string; name: string; arguments: string }>();
     let model = resolved.model;
     let buffer = '';
     let eventCount = 0;
@@ -894,13 +894,13 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
               id?: string;
               object?: string;
               model?: string;
-              choices?: Array<{
+              choices?: {
                 index: number;
                 delta: {
                   role?: string;
                   content?: string;
                   reasoning_content?: string; // GLM-4.7 thinking trace
-                  tool_calls?: Array<{
+                  tool_calls?: {
                     index: number;
                     id?: string;
                     type?: string;
@@ -908,10 +908,10 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
                       name?: string;
                       arguments?: string;
                     };
-                  }>;
+                  }[];
                 };
                 finish_reason?: string;
-              }>;
+              }[];
               usage?: {
                 prompt_tokens: number;
                 completion_tokens: number;
@@ -1255,11 +1255,11 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     return calls;
   }
 
-  private parseJsonToolCallsFromBody(body: string): Array<{ name: string; arguments: Record<string, unknown> }> {
+  private parseJsonToolCallsFromBody(body: string): { name: string; arguments: Record<string, unknown> }[] {
     const trimmed = this.stripMarkdownFence(body.trim());
     if (!trimmed) return [];
 
-    const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+    const calls: { name: string; arguments: Record<string, unknown> }[] = [];
     const single = this.tryParseJsonObject(trimmed);
     if (single) {
       const parsed = this.parseJsonToolCall(single);
@@ -1282,8 +1282,8 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     return calls;
   }
 
-  private parseFunctionTagToolCalls(content: string): Array<{ name: string; arguments: Record<string, unknown> }> {
-    const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+  private parseFunctionTagToolCalls(content: string): { name: string; arguments: Record<string, unknown> }[] {
+    const calls: { name: string; arguments: Record<string, unknown> }[] = [];
     const fnRegex = /<function=([A-Za-z0-9_.\-\/]+)>\s*([\s\S]*?)\s*<\/function>/gi;
     let match: RegExpExecArray | null;
 

@@ -527,7 +527,7 @@ export class PermissionChecker {
     const ruleRegex = /^(Bash|Write|Edit)\((.+)\)$/;
 
     for (const pattern of patterns) {
-      const match = pattern.match(ruleRegex);
+      const match = ruleRegex.exec(pattern);
       if (match) {
         rules.push({
           tool: match[1] as PermissionedTool,

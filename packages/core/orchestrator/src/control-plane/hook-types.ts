@@ -9,8 +9,8 @@ export interface StateView {
   readonly agentType: string;
   readonly iteration: number;
   readonly metrics: Readonly<ExecutionMetrics>;
-  readonly recentMessages: ReadonlyArray<Message>;
-  readonly filesModified: ReadonlyArray<string>;
+  readonly recentMessages: readonly Message[];
+  readonly filesModified: readonly string[];
   readonly objective: string;
   readonly realignCount: number;
 }

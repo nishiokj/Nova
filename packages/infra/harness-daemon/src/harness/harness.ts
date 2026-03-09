@@ -28,14 +28,15 @@ import { execSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { createAdapter, hasCodexCredentials, type ProviderKeyService } from 'llm';
 import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
-import { ToolRegistry } from 'tools';
+import type { ToolRegistry } from 'tools';
 import { createEvent, getProviderEnvVar, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
-import { ContextWindow } from 'context';
+import type { ContextWindow } from 'context';
 import { profiler } from 'shared';
 import { GraphDManager, createGraphDConfig, type GraphDSession } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
-import { LogSubscriber, createLogSubscriber } from '../subscribers/log_subscriber.js';
+import type { LogSubscriber} from '../subscribers/log_subscriber.js';
+import { createLogSubscriber } from '../subscribers/log_subscriber.js';
 import { createTraceSubscriber, extractCommitSha, isGitCommitCommand } from '../subscribers/trace_subscriber.js';
 import type { TraceSubscriber } from '../subscribers/trace_subscriber.js';
 import path from 'path';
@@ -90,16 +91,16 @@ import {
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
 
-type EntityGraphConfig = {
+interface EntityGraphConfig {
   sourceRoot: string;
   include?: string[];
   exclude?: string[];
   leaseDurationSec?: number;
   startupScan?: boolean;
   leaseWaitTimeoutMs?: number;
-};
+}
 
-type EntityGraphHooks = {
+interface EntityGraphHooks {
   preToolUse(agentId: string, toolName: string, args: Record<string, unknown>): Promise<{
     action: 'allow' | 'block';
     message?: string;
@@ -110,23 +111,23 @@ type EntityGraphHooks = {
     context?: string;
   }>;
   onFilesModified(paths: string[]): Promise<void>;
-};
+}
 
-type EntityGraphInstance = {
+interface EntityGraphInstance {
   initialize(): Promise<void>;
   getHooks(): EntityGraphHooks;
-};
+}
 
-type MemoryPluginModule = {
+interface MemoryPluginModule {
   createMemoryInjector?: (config: { baseUrl: string; timeout: number }) => MemoryInjector;
   createEntityGraph?: (options: {
     databaseUrl: string;
     config: EntityGraphConfig;
     postgresOptions?: Record<string, unknown>;
   }) => EntityGraphInstance;
-};
+}
 
-type SessionGetResponse = { session?: GraphDSession; error?: string };
+interface SessionGetResponse { session?: GraphDSession; error?: string }
 
 export interface CloseSessionResult {
   success: boolean;
@@ -273,7 +274,7 @@ function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentC
  */
 class AsyncEventQueue {
   private queue: BridgeEvent[] = [];
-  private resolvers: Array<(value: IteratorResult<BridgeEvent, void>) => void> = [];
+  private resolvers: ((value: IteratorResult<BridgeEvent, void>) => void)[] = [];
   private done = false;
 
   push(event: BridgeEvent): void {
@@ -528,14 +529,14 @@ export class AgentHarness {
   getDebugMemoryInfo(): {
     sessionCount: number;
     maxSessions: number;
-    sessions: Array<{
+    sessions: {
       sessionKey: string;
       contextItemCount: number;
       contextEstimatedTokens: number;
       workItemsCreatedCount: number;
       lastAccessMs: number;
       isExecuting: boolean;
-    }>;
+    }[];
   } {
     const sessions = [];
     for (const [sessionKey, state] of this.sessions.entries()) {
@@ -744,7 +745,7 @@ export class AgentHarness {
     for (const stub of stubs) {
       if (!stub.enabled) continue;
       const definition = getHookDefinition(hooksDir, stub.id);
-      if (!definition || !definition.enabled) continue;
+      if (!definition?.enabled) continue;
 
       const effectEvent = this.mapConfiguredHookTriggerToEffectEvent(definition.trigger);
       if (!effectEvent) continue;
@@ -810,7 +811,7 @@ export class AgentHarness {
     }
   ): Promise<{
     status: 'completed' | 'blocked';
-    outcomes: Array<{ hookId: string; source: string; outcome: { kind: string; [key: string]: unknown } }>;
+    outcomes: { hookId: string; source: string; outcome: { kind: string; [key: string]: unknown } }[];
     blockedBy?: { hookId: string; source: string; reason: string };
   }> {
     try {
@@ -824,7 +825,7 @@ export class AgentHarness {
       );
       return {
         status: result.status,
-        outcomes: result.outcomes as unknown as Array<{ hookId: string; source: string; outcome: { kind: string; [key: string]: unknown } }>,
+        outcomes: result.outcomes as unknown as { hookId: string; source: string; outcome: { kind: string; [key: string]: unknown } }[],
         blockedBy: result.blockedBy,
       };
     } catch (error) {
@@ -1186,18 +1187,47 @@ export class AgentHarness {
   }
 
   private isSelectionAccessible(
-    selection: { provider?: string; model?: string } | null | undefined,
+    selection: { provider?: string; model?: string; contextWindow?: number } | null | undefined,
     hiddenModels: Set<string>
   ): selection is ModelSelection {
     const model = selection?.model?.trim();
     const provider = selection?.provider?.trim();
-    if (!model || !provider) {
+    const contextWindow = Math.trunc(selection?.contextWindow ?? NaN);
+    if (!model || !provider || !Number.isFinite(contextWindow) || contextWindow <= 0) {
       return false;
     }
     if (hiddenModels.has(model.toLowerCase())) {
       return false;
     }
     return this.hasApiKey(provider);
+  }
+
+  private normalizeModelSelection(
+    selection: { provider?: string; model?: string; reasoning?: string; contextWindow?: number } | null | undefined
+  ): ModelSelection | null {
+    const model = selection?.model?.trim();
+    const provider = selection?.provider?.trim();
+    if (!model || !provider) {
+      return null;
+    }
+
+    const modelEntry = this.config.models.available.find((entry) =>
+      entry.id.trim().toLowerCase() === model.toLowerCase()
+      && entry.provider?.trim().toLowerCase() === provider.toLowerCase()
+    );
+    const contextWindow = Math.trunc(modelEntry?.context_window ?? NaN);
+    if (!modelEntry?.provider || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+      return null;
+    }
+
+    return {
+      provider: modelEntry.provider,
+      model: modelEntry.id,
+      contextWindow,
+      ...(typeof selection?.reasoning === 'string' && selection.reasoning.trim().length > 0
+        ? { reasoning: selection.reasoning }
+        : {}),
+    };
   }
 
   private pruneInaccessibleSessionSelections(
@@ -1255,7 +1285,7 @@ export class AgentHarness {
       return null;
     }
     const provider = (agentConfig.llm.displayProvider || agentConfig.llm.provider)?.trim();
-    const selection = provider ? { provider, model } : null;
+    const selection = provider ? { provider, model, contextWindow: agentConfig.llm.contextWindow } : null;
     if (!this.isSelectionAccessible(selection, hiddenModels)) {
       return null;
     }
@@ -1268,8 +1298,12 @@ export class AgentHarness {
       const modelEntry = this.config.models.available.find(
         (entry) => entry.id.trim().toLowerCase() === defaultModel.toLowerCase()
       );
-      if (modelEntry?.provider && this.hasApiKey(modelEntry.provider)) {
-        return { provider: modelEntry.provider, model: modelEntry.id };
+      if (modelEntry?.provider && modelEntry.context_window && this.hasApiKey(modelEntry.provider)) {
+        return {
+          provider: modelEntry.provider,
+          model: modelEntry.id,
+          contextWindow: Math.trunc(modelEntry.context_window),
+        };
       }
     }
 
@@ -1279,7 +1313,14 @@ export class AgentHarness {
     if (!firstVisible?.provider) {
       return null;
     }
-    return { provider: firstVisible.provider, model: firstVisible.id };
+    if (!firstVisible.context_window) {
+      return null;
+    }
+    return {
+      provider: firstVisible.provider,
+      model: firstVisible.id,
+      contextWindow: Math.trunc(firstVisible.context_window),
+    };
   }
 
   private seedDefaultModelSelections(sessionKey: string, store: SessionStore, hiddenModels: Set<string>): void {
@@ -1338,7 +1379,7 @@ export class AgentHarness {
       return;
     }
 
-    const modelSelectionsMap = this.graphd.getUserPreference<Record<string, { provider: string; model: string; reasoning?: string }>>(
+    const modelSelectionsMap = this.graphd.getUserPreference<Record<string, { provider: string; model: string; reasoning?: string; contextWindow?: number }>>(
       'user_prefs:model_selections'
     );
     if (!modelSelectionsMap) {
@@ -1347,19 +1388,13 @@ export class AgentHarness {
 
     let applied = 0;
     let removed = 0;
-    const filteredSelections: Record<string, { provider: string; model: string; reasoning?: string }> = {};
+    const filteredSelections: Record<string, ModelSelection> = {};
     for (const [agentType, selection] of Object.entries(modelSelectionsMap)) {
-      if (!this.isSelectionAccessible(selection, hiddenModels)) {
+      const normalizedSelection = this.normalizeModelSelection(selection);
+      if (!this.isSelectionAccessible(normalizedSelection, hiddenModels)) {
         removed += 1;
         continue;
       }
-      const normalizedSelection = {
-        provider: selection.provider.trim(),
-        model: selection.model.trim(),
-        ...(typeof selection.reasoning === 'string' && selection.reasoning.trim().length > 0
-          ? { reasoning: selection.reasoning }
-          : {}),
-      };
       filteredSelections[agentType] = normalizedSelection;
       store.setModelSelection(agentType, normalizedSelection);
       applied += 1;
@@ -1381,10 +1416,20 @@ export class AgentHarness {
     }
   }
 
-  setSessionSelectedModel(sessionKey: string, agentType: string, selectedModel: ModelSelection | null): void {
+  setSessionSelectedModel(sessionKey: string, agentType: string, selectedModel: {
+    provider: string;
+    model: string;
+    reasoning?: string;
+    contextWindow?: number;
+  } | null): void {
     const store = this.getOrCreateSessionStore(sessionKey);
     if (selectedModel) {
-      store.setModelSelection(agentType, selectedModel);
+      const normalizedSelection = this.normalizeModelSelection(selectedModel);
+      if (!normalizedSelection) {
+        store.clearModelSelection(agentType);
+        return;
+      }
+      store.setModelSelection(agentType, normalizedSelection);
       return;
     }
     store.clearModelSelection(agentType);
@@ -2342,7 +2387,7 @@ export class AgentHarness {
    * Get message history for a session.
    * Returns conversation history that should be displayed in TUI.
    */
-  getSessionHistory(sessionKey: string): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }> {
+  getSessionHistory(sessionKey: string): { role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }[] {
     const store = this.ensureSessionHydrated(sessionKey, { includeUserPreferences: false });
     return store.getMessageHistory();
   }
@@ -2401,7 +2446,7 @@ export class AgentHarness {
    */
   compactContext(sessionKey: string): { success: boolean; itemsRemoved: number; bytesRecovered: number; error?: string } {
     const state = this.sessions.get(sessionKey);
-    if (!state || !state.store.getCachedContextSnapshot()) {
+    if (!state?.store.getCachedContextSnapshot()) {
       return { success: false, itemsRemoved: 0, bytesRecovered: 0, error: 'No context found for session' };
     }
 

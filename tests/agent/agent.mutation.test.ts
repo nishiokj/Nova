@@ -168,7 +168,7 @@ function createAgent(
   return new Agent(config, {
     llm,
     toolRegistry,
-    llmConfig: { provider: 'openai', model: 'mock-model', apiKey: 'test-key' },
+    llmConfig: { provider: 'openai', model: 'mock-model', apiKey: 'test-key', contextWindow: 200_000 },
     ...runtimeOverrides,
   });
 }
@@ -1695,6 +1695,42 @@ describe('Agent Mutation Tests', () => {
 
       expect(result1.localContext).toBeDefined();
       expect(result1.localContext.sessionKey).toContain('standard');
+    });
+
+    it('uses the model context window for local work context snapshots', async () => {
+      const llm = createMockLLM([
+        createResponse({ action: 'done', response: 'done', goalStateReached: true }),
+      ]);
+      const agent = createAgent(llm, createToolRegistry(), {}, {
+        llmConfig: {
+          provider: 'codex',
+          model: 'gpt-5.3-codex-spark',
+          apiKey: 'test-key',
+          contextWindow: 64_000,
+        },
+      });
+
+      const result = await runAgent(agent);
+
+      expect(result.localContext.maxTokens).toBe(64_000);
+    });
+
+    it('uses the explicit request context window when the model is unknown', async () => {
+      const llm = createMockLLM([
+        createResponse({ action: 'done', response: 'done', goalStateReached: true }),
+      ]);
+      const agent = createAgent(llm, createToolRegistry(), {}, {
+        llmConfig: {
+          provider: 'openai',
+          model: 'unknown-model',
+          apiKey: 'test-key',
+          contextWindow: 8192,
+        },
+      });
+
+      const result = await runAgent(agent);
+
+      expect(result.localContext.maxTokens).toBe(8192);
     });
   });
 });

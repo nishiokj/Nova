@@ -105,6 +105,7 @@ function createAgent(
       provider: 'openai',
       model: 'mock-model',
       apiKey: 'test-key',
+      contextWindow: 200_000,
     },
     ...runtimeOverrides,
   });

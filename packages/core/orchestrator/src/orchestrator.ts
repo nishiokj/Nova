@@ -10,7 +10,7 @@
 import { Effect, Fiber } from 'effect';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
-import { ContextWindow } from 'context';
+import type { ContextWindow } from 'context';
 import type {
   EventEmitCallback,
   UserPromptInfo,
@@ -224,7 +224,7 @@ export interface OrchestratorLogger {
 /**
  * Result of a termination condition check.
  */
-type TerminationCheckResult = {
+interface TerminationCheckResult {
   /** Terminal result to return, or null if execution should continue */
   terminal: OrchestratorResult | null;
   /** Whether execution should continue (hook blocked) */
@@ -233,13 +233,13 @@ type TerminationCheckResult = {
   newItem?: WorkItem;
   /** Work item to re-enqueue (for plan revision) */
   itemToRequeue?: WorkItem;
-};
+}
 
-type WorkExecutionResult = {
+interface WorkExecutionResult {
   workId: string;
   item: WorkItem;
   result: AgentResult;
-};
+}
 
 type StopHookDecisionEventType =
   | 'goal_state_reached'
@@ -310,7 +310,7 @@ interface TerminationPolicy {
     runtime?: OrchestratorRuntime;
     goal: string;
     now: number;
-  }): Effect.Effect<{ terminal: OrchestratorResult | null; shouldContinue: boolean }, never>;
+  }): Effect.Effect<{ terminal: OrchestratorResult | null; shouldContinue: boolean }>;
   checkResult(params: {
     result: AgentResult;
     workId: string;
@@ -322,7 +322,7 @@ interface TerminationPolicy {
     goal: string;
     cwd: string;
     now: number;
-  }): Effect.Effect<TerminationCheckResult, never>;
+  }): Effect.Effect<TerminationCheckResult>;
 }
 
 type SyntheticResultTerminationReason = Extract<TerminationReason, 'goal_state_reached' | 'agent_error' | 'user_stopped'>;
@@ -353,15 +353,15 @@ export class Orchestrator {
 
   // Work queue state for DAG-based execution
   private workQueue: WorkItem[] = [];
-  private completedWork: Map<string, AgentResult> = new Map();
-  private initialWorkId: string = '';
-  private workItemContexts: Map<string, ContextWindow> = new Map();
+  private completedWork = new Map<string, AgentResult>();
+  private initialWorkId = '';
+  private workItemContexts = new Map<string, ContextWindow>();
 
   // Realign counter to prevent infinite loops when bounds are exceeded
   // After config.maxRealigns, we force termination instead of continuing
-  private realignCount: number = 0;
-  private hookMetadata: Map<string, unknown> = new Map();
-  private hookAuditLog: Array<{ timestamp: number; source: string; event: string; details: Record<string, unknown> }> = [];
+  private realignCount = 0;
+  private hookMetadata = new Map<string, unknown>();
+  private hookAuditLog: { timestamp: number; source: string; event: string; details: Record<string, unknown> }[] = [];
   private hookTerminationReason: TerminationReason | null = null;
   private effectHookExecutor?: (
     event: InternalHookEvent,
@@ -482,7 +482,7 @@ export class Orchestrator {
     hookContext?: InternalHookContext;
     contextWindow: ContextWindow;
     signal?: AbortSignal;
-  }): Effect.Effect<void, never> {
+  }): Effect.Effect<void> {
     const timeoutMs = this.config.hookTimeoutMs;
     const start = Date.now();
 
@@ -549,10 +549,10 @@ export class Orchestrator {
   execute(
     context: ContextWindow,
     goal: string,
-    agentType: string = 'standard',
+    agentType = 'standard',
     cwd: string,
     runtime?: OrchestratorRuntime
-  ): Effect.Effect<OrchestratorResult, never> {
+  ): Effect.Effect<OrchestratorResult> {
     const startedAt = Date.now();
     return Effect.acquireUseRelease(
       Effect.sync(() => runtime?.onStart?.(context)),
@@ -921,7 +921,7 @@ export class Orchestrator {
     context: ContextWindow;
     cwd: string;
     iteration: number;
-  }): Effect.Effect<WorkExecutionResult, never> {
+  }): Effect.Effect<WorkExecutionResult> {
     return Effect.gen(this, function* () {
       const { workId, inProgress, context, cwd, iteration } = params;
       const { item, agent, abortController } = inProgress;
@@ -978,11 +978,11 @@ export class Orchestrator {
   }
 
   private executeInProgressWorkItems(params: {
-    entries: Array<[string, InProgressWork]>;
+    entries: [string, InProgressWork][];
     context: ContextWindow;
     cwd: string;
     iteration: number;
-  }): Effect.Effect<WorkExecutionResult[], never> {
+  }): Effect.Effect<WorkExecutionResult[]> {
     const { entries, context, cwd, iteration } = params;
     if (entries.length === 0) {
       return Effect.succeed([]);
@@ -996,7 +996,7 @@ export class Orchestrator {
   }
 
   private executeInProgressWorkItemsWithRuntimeControl(params: {
-    entries: Array<[string, InProgressWork]>;
+    entries: [string, InProgressWork][];
     context: ContextWindow;
     cwd: string;
     iteration: number;
@@ -1017,7 +1017,7 @@ export class Orchestrator {
     });
   }
 
-  private monitorControlQueue(runtime: OrchestratorRuntime, state: ExecutionState): Effect.Effect<never, never> {
+  private monitorControlQueue(runtime: OrchestratorRuntime, state: ExecutionState): Effect.Effect<never> {
     return Effect.gen(this, function* () {
       while (true) {
         yield* this.syncRuntimeControlState(runtime);
@@ -1847,7 +1847,7 @@ export class Orchestrator {
     ctx: HookContext,
     context: ContextWindow,
     runtime?: OrchestratorRuntime
-  ): Effect.Effect<ControlHookExecutionResult<DecisionFor<E>>, never> {
+  ): Effect.Effect<ControlHookExecutionResult<DecisionFor<E>>> {
     const registry = runtime?.hookRegistry;
     if (!registry) {
       return Effect.succeed({
@@ -2007,7 +2007,7 @@ export class Orchestrator {
     context: ContextWindow;
     runtime: OrchestratorRuntime;
     mapper: (decision: DecisionFor<E>) => StopHookResult;
-  }): Effect.Effect<StopHookResult | null, never> {
+  }): Effect.Effect<StopHookResult | null> {
     const { event, hookContext, context, runtime, mapper } = params;
     return Effect.gen(this, function* () {
       const hookResult = yield* this.runControlHooks<E>(event, hookContext, context, runtime);
@@ -2015,7 +2015,7 @@ export class Orchestrator {
     });
   }
 
-  private callStopHook(params: CallStopHookParams): Effect.Effect<StopHookResult | null, never> {
+  private callStopHook(params: CallStopHookParams): Effect.Effect<StopHookResult | null> {
     const { context, terminationReason, response, iteration, agentType, runtime, userPrompt, agentResult, workId, objective, totalLlmCalls, totalToolCalls, controlEventType } = params;
     if (!runtime?.hookRegistry) return Effect.succeed(null);
 
@@ -2051,7 +2051,7 @@ export class Orchestrator {
 
     if (!event) return Effect.succeed(null);
 
-    const runHook = (): Effect.Effect<StopHookResult | null, never> => {
+    const runHook = (): Effect.Effect<StopHookResult | null> => {
       switch (event.type) {
         case 'goal_state_reached':
           return this.runMappedStopHookDecision<'goal_state_reached'>({
@@ -2323,7 +2323,7 @@ export class Orchestrator {
    * This method encapsulates the state machine logic for determining whether
    * execution should stop or continue based on the agent's result.
    */
-  private checkTerminationConditions(params: CheckTerminationParams): Effect.Effect<TerminationCheckResult, never> {
+  private checkTerminationConditions(params: CheckTerminationParams): Effect.Effect<TerminationCheckResult> {
     return Effect.gen(this, function* () {
       const { result, workId } = params;
 
@@ -2445,7 +2445,7 @@ export class Orchestrator {
       fallbackResponse?: string;
       error?: string;
     },
-  ): Effect.Effect<TerminationCheckResult, never> {
+  ): Effect.Effect<TerminationCheckResult> {
     return Effect.gen(this, function* () {
       const { result, workId, item, iteration, totalLlmCalls, totalToolCalls, now, startTime, context, agentType, goal, runtime } = params;
 
@@ -2489,7 +2489,7 @@ export class Orchestrator {
   /**
    * Handle user_input_required termination - unique: interruption check.
    */
-  private handleUserInputRequired(params: CheckTerminationParams): Effect.Effect<TerminationCheckResult, never> {
+  private handleUserInputRequired(params: CheckTerminationParams): Effect.Effect<TerminationCheckResult> {
     return Effect.gen(this, function* () {
       const { result, workId, item, iteration, totalLlmCalls, totalToolCalls, now, startTime, context, agentType, runtime } = params;
 
@@ -2544,7 +2544,7 @@ export class Orchestrator {
   private handleContinuableError(
     params: CheckTerminationParams,
     reason: TerminationReason,
-  ): Effect.Effect<TerminationCheckResult, never> {
+  ): Effect.Effect<TerminationCheckResult> {
     return Effect.gen(this, function* () {
       const { result, workId, item, iteration, totalLlmCalls, totalToolCalls, now, startTime, context, agentType, goal, runtime } = params;
 
@@ -2621,7 +2621,7 @@ export class Orchestrator {
   /**
    * Handle orchestrator-level tool call bounds exceeded - unique: harvestCompletedWork fallback.
    */
-  private handleOrchestratorToolCallBounds(params: CheckTerminationParams): Effect.Effect<TerminationCheckResult, never> {
+  private handleOrchestratorToolCallBounds(params: CheckTerminationParams): Effect.Effect<TerminationCheckResult> {
     return Effect.gen(this, function* () {
       const { result, workId, item, iteration, totalLlmCalls, totalToolCalls, now, startTime, context, agentType, goal, runtime } = params;
 

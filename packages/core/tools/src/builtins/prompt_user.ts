@@ -23,7 +23,7 @@ export interface PromptUserOption {
  */
 export interface PromptUserQuestion {
   question: string;
-  options?: Array<string | PromptUserOption>;
+  options?: (string | PromptUserOption)[];
   context?: string;
   multiSelect?: boolean;
   questionType?: 'multiple_choice' | 'multi_select' | 'fill_in_blank' | 'yes_no' | 'free_text';

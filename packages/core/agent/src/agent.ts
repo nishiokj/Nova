@@ -142,6 +142,7 @@ function mapRawArtifact(a: RawArtifact, discoveredBy: string, workItemId?: strin
 export interface ModelSelection {
   provider: string;
   model: string;
+  contextWindow: number;
   reasoning?: string;
 }
 
@@ -171,6 +172,14 @@ export class Agent {
     const sessionDir = path.dirname(globalContext.filePath);
     const safe = (v: string) => this.sanitizeContextPathSegment(v);
     return path.join(sessionDir, 'work-contexts', `${safe(this.requestId || 'request')}__${safe(this.config.type || 'agent')}__${safe(workItemId || 'work')}.md`);
+  }
+
+  private resolveLocalContextMaxTokens(): number {
+    const contextWindow = Math.trunc(this.llmConfig.contextWindow);
+    if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+      throw new Error(`Context window missing for model '${this.llmConfig.model}'`);
+    }
+    return contextWindow;
   }
 
   constructor(config: AgentConfig, runtime: {
@@ -355,7 +364,7 @@ export class Agent {
     iteration: number,
     maxIterations: number
   ): Effect.Effect<{
-    messages: Array<Record<string, unknown>>;
+    messages: Record<string, unknown>[];
     tools: ToolDefinition[] | undefined;
     toolChoice: 'none' | 'auto' | 'required' | undefined;
   }> {
@@ -440,7 +449,7 @@ export class Agent {
 
     // When streaming, responseText may be stripped. Use structuredOutput.response as fallback.
     const structuredResponseDirect = typeof structuredOutput?.response === 'string'
-      ? (structuredOutput.response as string)
+      ? (structuredOutput.response)
       : '';
 
     const shouldInferUserPrompt = action !== 'done' || structuredOutput?.goalStateReached !== true;
@@ -540,13 +549,13 @@ export class Agent {
     }
 
     const coveredPaths = new Set(localContext.getArtifacts().map((artifact) => artifact.sourcePath));
-    const synthesizedArtifacts: Array<{
+    const synthesizedArtifacts: {
       sourcePath: string;
       kind: ArtifactKind;
       name: string;
       discoveredBy: string;
       insight: string;
-    }> = [];
+    }[] = [];
 
     for (const sourcePath of localReadFiles) {
       if (coveredPaths.has(sourcePath)) {
@@ -735,7 +744,7 @@ export class Agent {
    * Agent reads from globalContext, writes to its own localContext.
    * GlobalContext is never mutated.
    */
-  run(params: AgentRunParams): Effect.Effect<AgentResult, never> {
+  run(params: AgentRunParams): Effect.Effect<AgentResult> {
     return Effect.gen(this, function* () {
       const { globalContext, workItem, cwd, signal, runControl } = params;
       const runAsyncId = profiler.asyncBegin(`agent.run:${this.config.type}`, 'agent');
@@ -744,7 +753,7 @@ export class Agent {
       const localContextFilePath = this.resolveLocalContextFilePath(globalContext, workItem.workId);
       const localContext = new ContextWindow(
         `${globalContext.sessionKey}:${this.config.type}:${workItem.workId}`,
-        globalContext.maxTokens,
+        this.resolveLocalContextMaxTokens(),
         localContextFilePath
       );
 
@@ -798,7 +807,7 @@ export class Agent {
 
       // Explorer produced no artifacts despite reading files — mark incomplete
       // but preserve the response content which is still valuable.
-      if (this.config.type === 'explorer' && result.filesRead.length > 0 && result.artifacts!.length === 0) {
+      if (this.config.type === 'explorer' && result.filesRead.length > 0 && result.artifacts.length === 0) {
         result.isIncomplete = true;
       }
 
@@ -999,7 +1008,7 @@ export class Agent {
         );
       }
 
-      const content = (response.content ?? '') as string;
+      const content = (response.content ?? '');
       const toolCalls = response.toolCalls ?? [];
       if (toolCalls.length > 0) {
         consecutiveNoActionNoToolResponses = 0;
@@ -1181,7 +1190,7 @@ export class Agent {
 
     // Always capture all assistant responses even without a terminal action.
     if (!result.response) {
-      const messages = localContext.getItemsByType('message') as Array<{ role: string; content: string | unknown[] }>;
+      const messages = localContext.getItemsByType('message') as { role: string; content: string | unknown[] }[];
       const assistantContents = messages
         .filter(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.length > 0)
         .map(m => m.content as string);
@@ -1202,8 +1211,8 @@ export class Agent {
 
       // Last resort: summarize tool calls made if we have any
       if (!result.response) {
-        const toolCalls = localContext.getItemsByType('function_call') as Array<{ name: string }>;
-        const toolOutputs = localContext.getItemsByType('function_call_output') as Array<{ output: string; isError?: boolean }>;
+        const toolCalls = localContext.getItemsByType('function_call') as { name: string }[];
+        const toolOutputs = localContext.getItemsByType('function_call_output') as { output: string; isError?: boolean }[];
         if (toolCalls.length > 0) {
           const toolNames = toolCalls.map(t => t.name);
           const successfulOutputs = toolOutputs.filter(o => !o.isError && o.output);
@@ -1494,9 +1503,9 @@ export class Agent {
     workItem: WorkItem,
     globalContext: ContextWindow,
     localContext: ContextWindow
-  ): Array<Record<string, unknown>> {
+  ): Record<string, unknown>[] {
     // Use LLMItem[] for type safety during construction
-    const messages: Array<LLMItem | Record<string, unknown>> = [
+    const messages: (LLMItem | Record<string, unknown>)[] = [
       { type: 'message', role: 'system', content: systemPrompt },
     ];
 
@@ -1594,7 +1603,7 @@ export class Agent {
   private addAssistantMessage(
     context: ContextWindow,
     content: string,
-    toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
+    toolCalls: { id: string; name: string; arguments: Record<string, unknown> }[],
     workItemId?: string
   ): void {
     if (toolCalls.length > 0) {
@@ -1677,7 +1686,7 @@ export class Agent {
     isAgentTool: boolean;
     toolResult: ToolResult;
     toolDurationMs: number;
-  }, never> {
+  }> {
     const toolStartTime = Date.now();
     return Effect.gen(this, function* () {
       const { call, canonicalName, isAgentTool } = prepared;
@@ -1744,7 +1753,7 @@ export class Agent {
    * Process tool calls.
    */
   private processToolCalls(
-    toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
+    toolCalls: { id: string; name: string; arguments: Record<string, unknown> }[],
     globalContext: ContextWindow,
     localContext: ContextWindow,
     localReadFiles: Set<string>,
@@ -1756,12 +1765,12 @@ export class Agent {
     signal?: AbortSignal,
     runControl?: AgentRunParams['runControl']
   ): Effect.Effect<void, Error> {
-    type ToolCall = { id: string; name: string; arguments: Record<string, unknown> };
-    type PreparedCall = {
+    interface ToolCall { id: string; name: string; arguments: Record<string, unknown> }
+    interface PreparedCall {
       call: ToolCall;
       canonicalName: string;
       isAgentTool: boolean;
-    };
+    }
     type PlannedStep =
       | { type: 'parallel'; calls: PreparedCall[] }
       | { type: 'single'; call: PreparedCall }
@@ -2031,7 +2040,7 @@ export class Agent {
     cwd: string,
     signal?: AbortSignal,
     runControl?: AgentRunParams['runControl']
-  ): Effect.Effect<ToolResult, never> {
+  ): Effect.Effect<ToolResult> {
     return Effect.gen(this, function* () {
       if (!this.agentRegistry) {
         return errorResult(call.name, 'Agent tool registry not available', 0);
@@ -2144,16 +2153,16 @@ export class Agent {
 
     let enhancedResponse = subResult.response;
     if (!enhancedResponse && subResult.localContext) {
-      const toolOutputs = subResult.localContext.getItemsByType('function_call_output') as Array<{
+      const toolOutputs = subResult.localContext.getItemsByType('function_call_output') as {
         output: string;
         isError?: boolean;
         callId?: string;
-      }>;
-      const toolCalls = subResult.localContext.getItemsByType('function_call') as Array<{
+      }[];
+      const toolCalls = subResult.localContext.getItemsByType('function_call') as {
         name: string;
         callId?: string;
         arguments?: Record<string, unknown>;
-      }>;
+      }[];
 
       if (toolOutputs.length > 0) {
         const successfulOutputs = toolOutputs.filter(o => !o.isError && o.output);
@@ -2194,7 +2203,7 @@ export class Agent {
     }
 
     const artifacts = subResult.structuredOutput?.artifacts;
-    let extractedArtifacts: RawArtifact[] = [];
+    const extractedArtifacts: RawArtifact[] = [];
 
     try {
       if (Array.isArray(artifacts) && artifacts.length > 0) {
@@ -2479,7 +2488,7 @@ export class Agent {
     const candidates = [parsed, ...this.extractJsonCandidates(content)];
     for (const candidate of candidates) {
       if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
-      const normalized = this.normalizeActionOutputCandidate(candidate as Record<string, unknown>, schemaId);
+      const normalized = this.normalizeActionOutputCandidate(candidate, schemaId);
       if (normalized) {
         // Preserve artifacts from original output — they are stripped by .strict()
         // Zod validation but still needed for extractArtifactsFromOutput.
@@ -2511,7 +2520,7 @@ export class Agent {
       const hasArtifacts = Array.isArray(candidate.artifacts) && candidate.artifacts.length > 0;
       if (!hasAction && !hasArtifacts) continue;
 
-      const normalized = this.normalizeActionOutputCandidate(candidate as Record<string, unknown>, 'explorer');
+      const normalized = this.normalizeActionOutputCandidate(candidate, 'explorer');
       if (!normalized) continue;
 
       // Salvage valid artifacts — keep any that have the 3 required fields
@@ -2678,8 +2687,8 @@ export class Agent {
    * Emit llm_call event.
    */
   private emitLlmCall(
-    response: { content?: string; toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>; usage?: { totalTokens: number; promptTokens: number; completionTokens: number; cachedTokens?: number; reasoningTokens?: number }; model?: string },
-    messages: Array<Record<string, unknown>>,
+    response: { content?: string; toolCalls?: { name: string; arguments: Record<string, unknown> }[]; usage?: { totalTokens: number; promptTokens: number; completionTokens: number; cachedTokens?: number; reasoningTokens?: number }; model?: string },
+    messages: Record<string, unknown>[],
     durationMs: number,
     tools: ToolDefinition[],
     maxWindowSize: number,
@@ -2717,26 +2726,26 @@ export class Agent {
     }, workItemId));
   }
 
-  private getPromptPreview(messages: Array<Record<string, unknown>>): string {
+  private getPromptPreview(messages: Record<string, unknown>[]): string {
     const first = messages[0] as { role?: string; content?: string } | undefined;
     return first?.role === 'system' && typeof first.content === 'string' ? first.content.slice(0, 16000) : '';
   }
 
-  private buildToolCallPreview(toolCalls: Array<{ name: string }>): string {
+  private buildToolCallPreview(toolCalls: { name: string }[]): string {
     return toolCalls.length ? `[Tools: ${toolCalls.map(tc => tc.name).join(', ')}]` : '';
   }
 
   private synthesizePartialResponse(localContext: ContextWindow, existingResponse: string): string {
     if (existingResponse?.trim()) return existingResponse;
 
-    const messages = localContext.getItemsByType('message') as Array<{ role: string; content: string | unknown[] }>;
+    const messages = localContext.getItemsByType('message') as { role: string; content: string | unknown[] }[];
     const last = messages.filter(m => m.role === 'assistant').at(-1);
     if (last) {
       const content = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
       if (content?.trim()) return content;
     }
 
-    const outputs = (localContext.getItemsByType('function_call_output') as Array<{ name?: string; output: string; isError?: boolean }>)
+    const outputs = (localContext.getItemsByType('function_call_output') as { name?: string; output: string; isError?: boolean }[])
       .filter(o => !o.isError);
     if (outputs.length > 0) {
       const summary = outputs.slice(-3).map(o => `${o.name ?? 'tool'}: ${o.output.slice(0, 500)}`).join('\n\n');

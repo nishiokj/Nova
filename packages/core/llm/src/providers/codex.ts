@@ -135,7 +135,7 @@ export class CodexProvider implements LLMProviderAdapter {
     // NOTE: ChatGPT backend does NOT support max_output_tokens or temperature params
     const body: Record<string, unknown> = {
       model: config.model,
-      input: this.formatInput(nonSystemMessages as unknown as Array<Record<string, unknown>>),
+      input: this.formatInput(nonSystemMessages as unknown as Record<string, unknown>[]),
       // ChatGPT backend requires these exact settings for OAuth
       stream: true,
       store: false,
@@ -489,7 +489,7 @@ export class CodexProvider implements LLMProviderAdapter {
                     ?? (((usageData.input_tokens as number) ?? 0) + ((usageData.output_tokens as number) ?? 0)),
                 };
               }
-              model = (responseObj.model as string) ?? model;
+              model = (responseObj.model!) ?? model;
             }
           } catch {
             parseErrorCount++;
@@ -620,13 +620,13 @@ export class CodexProvider implements LLMProviderAdapter {
   // HELPERS
   // ============================================
 
-  private formatInput(messages: Array<Record<string, unknown>>): ResponsesInput[] {
+  private formatInput(messages: Record<string, unknown>[]): ResponsesInput[] {
     const input: ResponsesInput[] = [];
 
     for (const msg of messages) {
       if (!msg || typeof msg !== 'object') continue;
 
-      const item = msg as Record<string, unknown>;
+      const item = msg;
       const role = item.role as string | undefined;
       const type = item.type as string | undefined;
 
@@ -648,7 +648,7 @@ export class CodexProvider implements LLMProviderAdapter {
             // Keep raw patch text as-is.
           }
         } else if (name === 'apply_patch' && typeof args === 'object' && args !== null) {
-          const argsObj = args as Record<string, unknown>;
+          const argsObj = args;
           if (typeof argsObj.input === 'string') {
             args = argsObj.input;
           }
@@ -663,7 +663,7 @@ export class CodexProvider implements LLMProviderAdapter {
             try { argsObj = JSON.parse(argsObj); } catch { /* leave as-is */ }
           }
           if (typeof argsObj === 'object' && argsObj !== null) {
-            args = JSON.stringify(translateNovaArgsToCodex(rawName, argsObj as Record<string, unknown>));
+            args = JSON.stringify(translateNovaArgsToCodex(rawName, argsObj));
           }
         }
 
@@ -830,7 +830,7 @@ export class CodexProvider implements LLMProviderAdapter {
     return this.pickFirstString(block.text, block.value, block.content) ?? '';
   }
 
-  private normalizeOutputItems(output: unknown): Array<Record<string, unknown>> {
+  private normalizeOutputItems(output: unknown): Record<string, unknown>[] {
     if (Array.isArray(output)) {
       return output.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object');
     }
@@ -859,7 +859,7 @@ export class CodexProvider implements LLMProviderAdapter {
       const itemType = item.type as string | undefined;
 
       if (itemType === 'message') {
-        const contentBlocks = item.content as Array<Record<string, unknown>> | string | undefined;
+        const contentBlocks = item.content as Record<string, unknown>[] | string | undefined;
         if (typeof contentBlocks === 'string') {
           content += contentBlocks;
           continue;
@@ -925,7 +925,7 @@ export class CodexProvider implements LLMProviderAdapter {
         continue;
       }
 
-      const explicitCalls = item.tool_calls as Array<Record<string, unknown>> | undefined;
+      const explicitCalls = item.tool_calls as Record<string, unknown>[] | undefined;
       if (Array.isArray(explicitCalls)) {
         for (const call of explicitCalls) {
           if (!call || typeof call !== 'object') continue;
@@ -940,7 +940,7 @@ export class CodexProvider implements LLMProviderAdapter {
       }
 
       if (item.type !== 'message') continue;
-      const contentBlocks = item.content as Array<Record<string, unknown>> | Record<string, unknown> | undefined;
+      const contentBlocks = item.content as Record<string, unknown>[] | Record<string, unknown> | undefined;
       if (contentBlocks && typeof contentBlocks === 'object' && !Array.isArray(contentBlocks)) {
         const block = contentBlocks;
         if (this.isFunctionCallItemType(block.type)) {
@@ -1020,11 +1020,11 @@ interface StreamEvent {
     value?: string;
     text?: string;
     refusal?: string;
-    content?: Array<Record<string, unknown>> | Record<string, unknown> | string;
+    content?: Record<string, unknown>[] | Record<string, unknown> | string;
     json?: Record<string, unknown>;
     output?: Record<string, unknown>;
     parsed?: Record<string, unknown>;
-    tool_calls?: Array<Record<string, unknown>>;
+    tool_calls?: Record<string, unknown>[];
   };
   response?: Record<string, unknown> & {
     id?: string;

@@ -113,8 +113,8 @@ class FakeHarness {
     return true;
   }
 
-  getSessionSelectedModel(_sessionKey: string, _agentType: string): { provider: string; model: string } {
-    return { provider: 'openai', model: 'test-model' };
+  getSessionSelectedModel(_sessionKey: string, _agentType: string): { provider: string; model: string; contextWindow: number } {
+    return { provider: 'openai', model: 'test-model', contextWindow: 128_000 };
   }
 
   getDebugMemoryInfo(): {

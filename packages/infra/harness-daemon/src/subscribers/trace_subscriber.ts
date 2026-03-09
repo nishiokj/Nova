@@ -104,7 +104,7 @@ export class TraceSubscriber {
     data: ToolCallData,
     normalizedToolName: 'Write' | 'Edit'
   ): void {
-    const args = data.arguments as Record<string, unknown>;
+    const args = data.arguments;
     const filePath = this.resolveRelativePath(args);
     if (!filePath) return;
 
@@ -247,7 +247,7 @@ export function createTraceSubscriber(
  * - "[detached HEAD abc1234] Commit message"
  */
 export function extractCommitSha(bashOutput: string): string | null {
-  const match = bashOutput.match(/\[[\w\s/-]+\s+([a-f0-9]{7,40})\]/);
+  const match = /\[[\w\s/-]+\s+([a-f0-9]{7,40})\]/.exec(bashOutput);
   return match?.[1] ?? null;
 }
 

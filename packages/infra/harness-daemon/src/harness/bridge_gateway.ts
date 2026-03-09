@@ -10,8 +10,8 @@ import type { AgentRunHandle, AgentRunResult, BridgeEvent } from './types.js';
 import { createErrorEvent } from './event_translator.js';
 import type { FullHarnessConfig } from './config.js';
 import type { AuthService } from './auth_service.js';
-import { LocalProviderManager } from './local_providers.js';
-import { type UnifiedHookRegistry } from 'orchestrator';
+import type { LocalProviderManager } from './local_providers.js';
+import type { UnifiedHookRegistry } from 'orchestrator';
 import type { AgentType } from 'agent';
 import type { PermissionChecker } from './permissions.js';
 import { RpcDispatcher } from './rpc_dispatcher.js';
@@ -36,11 +36,16 @@ export interface HarnessLike {
   resetCircuitBreaker?(): void;
   hasApiKey(provider: string): boolean;
   getLocalProviders?(): LocalProviderManager | null;
-  setSessionSelectedModel?(sessionKey: string, agentType: string, selectedModel: import('agent').ModelSelection | null): void;
+  setSessionSelectedModel?(sessionKey: string, agentType: string, selectedModel: {
+    provider: string;
+    model: string;
+    reasoning?: string;
+    contextWindow?: number;
+  } | null): void;
   getSessionSelectedModel?(sessionKey: string, agentType: string): import('agent').ModelSelection | null;
   getAllSessionSelectedModels?(sessionKey: string): Map<string, import('agent').ModelSelection>;
   clearAllSessionSelectedModels?(sessionKey: string): void;
-  getSessionHistory?(sessionKey: string): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }>;
+  getSessionHistory?(sessionKey: string): { role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }[];
   getAsyncModeStatus?(): { ok: boolean; issues: string[] };
   ensureSessionHydrated?(sessionKey: string, options?: { workingDir?: string; dangerousMode?: boolean; includeUserPreferences?: boolean }): {
     getPermissionState?: () => unknown;
@@ -60,14 +65,14 @@ export interface HarnessLike {
   getDebugMemoryInfo?(): {
     sessionCount: number;
     maxSessions: number;
-    sessions: Array<{
+    sessions: {
       sessionKey: string;
       contextItemCount: number;
       contextEstimatedTokens: number;
       workItemsCreatedCount: number;
       lastAccessMs: number;
       isExecuting: boolean;
-    }>;
+    }[];
   };
   setSessionAsyncModeEnabled?(sessionKey: string, enabled: boolean): void;
   // Session-level exclusive operation management (prevents concurrent ops from multiple connections)
@@ -393,13 +398,13 @@ export class BridgeGateway {
       return;
     }
 
-    let text = String(data?.text ?? '');
+    const text = String(data?.text ?? '');
     if (!text.trim()) {
       this.sendError(connectionId, 'Empty message');
       return;
     }
 
-    const commandMatch = text.trim().match(/^\/?(fork|stop|pause|resume)\b(?:\s+(.+))?$/i);
+    const commandMatch = /^\/?(fork|stop|pause|resume)\b(?:\s+(.+))?$/i.exec(text.trim());
     if (commandMatch) {
       const action = commandMatch[1].toLowerCase();
       const commandArg = typeof commandMatch[2] === 'string' ? commandMatch[2].trim() : '';
@@ -504,7 +509,7 @@ export class BridgeGateway {
       ? candidateRequestId
       : generateRequestId();
     const rawTier = typeof data?.tier === 'string' ? data.tier.trim() : '';
-    const tier = rawTier && rawTier !== 'auto' ? (rawTier as AgentType) : undefined;
+    const tier = rawTier && rawTier !== 'auto' ? (rawTier) : undefined;
 
     state.activeRequestId = clientRequestId;
 
@@ -650,7 +655,7 @@ export class BridgeGateway {
             }
           }
 
-          const eventType = (event as BridgeEvent).type ?? 'unknown';
+          const eventType = (event).type ?? 'unknown';
           profiler.begin(`stream.publish:${eventType}`, 'stream');
           this.bus.publish(channel, event);
           profiler.end(`stream.publish:${eventType}`, 'stream');

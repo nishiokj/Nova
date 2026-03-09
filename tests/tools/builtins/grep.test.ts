@@ -381,6 +381,21 @@ describe('executeGrep', () => {
       expect(result.metadata?.matchCount).toBe(20);
       expect(result.metadata?.truncated).toBe(true);
     });
+
+    it('should cap maxResults at 50', async () => {
+      const lines = Array(80).fill('pattern').join('\n');
+      await writeFile(join(tempDir, 'capped.ts'), lines);
+
+      const result = await executeGrep({
+        pattern: 'pattern',
+        maxResults: 200,
+      }, { workdirOverride: tempDir });
+
+      expect(result.isSuccess).toBe(true);
+      expect(result.metadata?.matchCount).toBe(50);
+      expect(result.metadata?.truncated).toBe(true);
+      expect(result.output).toContain('[truncated at 50 results]');
+    });
   });
 
   describe('Context handling', () => {

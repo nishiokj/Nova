@@ -29,7 +29,7 @@ export const stderrLogger: HarnessLogger = {
  * File-based logger for TUI compatibility.
  * Writes to logs/harness.log since console is captured by TUI.
  */
-export function createFileLogger(logDir: string = 'logs'): HarnessLogger & { close: () => void } {
+export function createFileLogger(logDir = 'logs'): HarnessLogger & { close: () => void } {
   const logPath = path.join(logDir, 'harness.log');
   try {
     fs.mkdirSync(logDir, { recursive: true });

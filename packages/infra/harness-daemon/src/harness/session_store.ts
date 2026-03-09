@@ -116,7 +116,7 @@ export class SessionStore {
 
   // Execution tracking: prevents race conditions when user sends messages during agent execution
   private executingRequestId: string | null = null;
-  private queuedUserMessages: Array<{ requestId: string; message: string }> = [];
+  private queuedUserMessages: { requestId: string; message: string }[] = [];
   private executionControlQueue: RuntimeControlQueue | null = null;
   private executionRuntime: ManagedRuntime.ManagedRuntime<never, never> | null = null;
   private executionRunControl: RunControlMetadata = { state: 'running' };
@@ -244,7 +244,7 @@ export class SessionStore {
   }
 
   private compactHydratedContextIfNeeded(source: 'disk' | 'graphd'): void {
-    if (!this.context || !this.context.isNearFull(0.5)) {
+    if (!this.context?.isNearFull(0.5)) {
       return;
     }
 
@@ -320,7 +320,7 @@ export class SessionStore {
    * Get message history for TUI rehydration.
    * This returns the conversation history that should be displayed in the TUI.
    */
-  getMessageHistory(): Array<{ role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }> {
+  getMessageHistory(): { role: 'user' | 'agent' | 'system'; content: string; timestamp: number; requestId?: string }[] {
     const context = this.getContext();
     return context.getMessageHistory();
   }
@@ -653,7 +653,7 @@ export class SessionStore {
    * Mark execution as complete and return any queued user messages.
    * Messages should be injected into context before next agent turn.
    */
-  endExecution(): Array<{ requestId: string; message: string }> {
+  endExecution(): { requestId: string; message: string }[] {
     this.executionCompletionResolver?.();
     this.executionCompletionResolver = null;
     this.executionCompletion = null;
@@ -689,7 +689,7 @@ export class SessionStore {
   /**
    * Drain queued messages (clears the queue).
    */
-  drainQueuedMessages(): Array<{ requestId: string; message: string }> {
+  drainQueuedMessages(): { requestId: string; message: string }[] {
     const queued = this.queuedUserMessages;
     this.queuedUserMessages = [];
     return queued;
@@ -698,7 +698,7 @@ export class SessionStore {
   /**
    * Get queued messages without clearing them (for inspection).
    */
-  getQueuedMessages(): ReadonlyArray<{ requestId: string; message: string }> {
+  getQueuedMessages(): readonly { requestId: string; message: string }[] {
     return this.queuedUserMessages;
   }
 

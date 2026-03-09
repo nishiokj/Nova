@@ -20,7 +20,7 @@ import { assertNever } from 'types';
  * Helper to convert work items to deferred work format.
  */
 function mapWorkItemsToDeferredWork(
-  workItems: Array<{
+  workItems: {
     id?: string;
     goal: string;
     objective: string;
@@ -29,7 +29,7 @@ function mapWorkItemsToDeferredWork(
     targetPaths?: string[];
     bounds?: { maxToolCalls?: number; maxLlmCalls?: number; maxDurationMs?: number };
     semantic?: unknown;
-  }>
+  }[]
 ): DeferredWorkItem[] {
   return workItems.map(item => ({
     id: item.id,

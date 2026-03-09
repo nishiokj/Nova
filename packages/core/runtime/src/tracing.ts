@@ -18,11 +18,11 @@ export interface RuntimeTraceEvent {
 }
 
 export interface RuntimeTracer {
-  readonly events: Ref.Ref<ReadonlyArray<RuntimeTraceEvent>>;
+  readonly events: Ref.Ref<readonly RuntimeTraceEvent[]>;
 }
 
 export function makeRuntimeTracer(): Effect.Effect<RuntimeTracer> {
-  return Ref.make<ReadonlyArray<RuntimeTraceEvent>>([]).pipe(
+  return Ref.make<readonly RuntimeTraceEvent[]>([]).pipe(
     Effect.map((events) => ({ events }))
   );
 }
@@ -36,7 +36,7 @@ export function emitRuntimeTrace(
 
 export function readRuntimeTrace(
   tracer: RuntimeTracer
-): Effect.Effect<ReadonlyArray<RuntimeTraceEvent>> {
+): Effect.Effect<readonly RuntimeTraceEvent[]> {
   return Ref.get(tracer.events);
 }
 

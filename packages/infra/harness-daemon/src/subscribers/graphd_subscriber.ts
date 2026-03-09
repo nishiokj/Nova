@@ -31,7 +31,7 @@ export class GraphDSubscriber {
   private graphd: GraphDManager;
   private config: Required<GraphDSubscriberConfig>;
   private unsubscribeAll: (() => void) | null = null;
-  private streamUnsubscribes: Array<() => void> = [];
+  private streamUnsubscribes: (() => void)[] = [];
   private eventBatch: AgentEvent<unknown>[] = [];
   private pendingEvents: AgentEvent<unknown>[] = [];
   private flushScheduled = false;
@@ -234,6 +234,8 @@ export class GraphDSubscriber {
         });
         break;
       }
+      default:
+        break;
     }
   }
 
@@ -264,7 +266,7 @@ export class GraphDSubscriber {
     if (this.eventBatch.length === 0) return;
 
     try {
-      const bySession = new Map<string, Array<Record<string, unknown>>>();
+      const bySession = new Map<string, Record<string, unknown>[]>();
       for (const event of this.eventBatch) {
         if (!event.sessionKey) continue;
         const list = bySession.get(event.sessionKey) ?? [];

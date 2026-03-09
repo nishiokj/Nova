@@ -46,8 +46,8 @@ export class StreamingJsonExtractor {
       // Look for "response" followed by : and opening "
       // Handle variations: "response": " or "response" : " or "response":"
       const pattern = /"response"\s*:\s*"/;
-      const match = this.buffer.match(pattern);
-      if (match && match.index !== undefined) {
+      const match = pattern.exec(this.buffer);
+      if (match?.index !== undefined) {
         this.state = 'in_string';
         // Start parsing from after the opening quote
         const startPos = match.index + match[0].length;

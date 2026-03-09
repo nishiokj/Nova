@@ -173,6 +173,7 @@ export interface LLMRequestConfig {
   provider?: LLMProvider;
   apiKey?: string;
   maxTokens?: number;
+  contextWindow: number;
   temperature?: number;
   baseUrl?: string; // Optional override for custom API endpoints
   /** User-facing provider name for error messages (e.g., 'cerebras' when provider is 'openai-compat') */

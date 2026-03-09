@@ -412,7 +412,7 @@ function detectContentFlags(mimeType: string, content: string): ContentFlags {
 }
 
 function extractPrimaryHtml(html: string): { html: string; source: string } {
-  const candidates: Array<{ source: string; regex: RegExp; group: number }> = [
+  const candidates: { source: string; regex: RegExp; group: number }[] = [
     { source: 'article', regex: /<article[^>]*>([\s\S]*?)<\/article>/i, group: 1 },
     { source: 'main', regex: /<main[^>]*>([\s\S]*?)<\/main>/i, group: 1 },
     {

@@ -25,6 +25,7 @@ import {
   type ToolRegistrationOptions,
   type ToolExecutionContext,
 } from 'tools/types.js';
+import { validateToolArgs } from 'tools';
 import { successResult, type ToolResult } from 'types';
 
 describe('shouldSkipDir', () => {
@@ -513,6 +514,53 @@ describe('createExecutionContext', () => {
     const context2 = createExecutionContext();
 
     expect(context1).not.toBe(context2);
+  });
+});
+
+describe('tool argument schema alignment', () => {
+  it('rejects Bash timeouts below the enforced minimum', () => {
+    const result = validateToolArgs('Bash', {
+      command: 'echo hi',
+      timeout: 0.5,
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects ExpandConversation limits above the enforced maximum', () => {
+    const result = validateToolArgs('ExpandConversation', {
+      conversation_id: '01TEST',
+      limit: 201,
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects ExpandConversation message caps below the enforced minimum', () => {
+    const result = validateToolArgs('ExpandConversation', {
+      conversation_id: '01TEST',
+      max_chars_per_message: 199,
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects WebSearch counts above the enforced maximum', () => {
+    const result = validateToolArgs('WebSearch', {
+      query: 'context windows',
+      count: 21,
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts WebSearch counts within the advertised range', () => {
+    const result = validateToolArgs('WebSearch', {
+      query: 'context windows',
+      count: 20,
+    });
+
+    expect(result.success).toBe(true);
   });
 });
 

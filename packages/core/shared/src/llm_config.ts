@@ -17,6 +17,7 @@ export interface ModelSelectionInput {
   provider: string;
   model: string;
   reasoning?: string;
+  contextWindow: number;
 }
 
 /**
@@ -44,11 +45,17 @@ export function buildLLMRequestConfig(
 ): LLMRequestConfig {
   const canonicalProvider: LLMProvider = getCanonicalProvider(modelSelection.provider);
   const baseUrl = getProviderBaseUrl(modelSelection.provider);
+  const contextWindow = Math.trunc(modelSelection.contextWindow);
+
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+    throw new Error(`Context window missing for model '${modelSelection.model}'`);
+  }
 
   return {
     provider: canonicalProvider,
     model: modelSelection.model,
     maxTokens: llmParams.maxTokens,
+    contextWindow,
     temperature: llmParams.temperature,
     displayProvider: modelSelection.provider,
     ...(baseUrl ? { baseUrl } : {}),

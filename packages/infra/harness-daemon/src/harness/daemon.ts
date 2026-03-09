@@ -82,7 +82,7 @@ export class HarnessDaemon {
     process.stderr.write(`[harness-daemon] No clients connected, will shutdown in ${this.idleTimeoutMs / 1000}s\n`);
 
     this.idleTimer = setTimeout(() => {
-      if (this.bus && this.bus.getConnectionCount() === 0) {
+      if (this.bus?.getConnectionCount() === 0) {
         process.stderr.write('[harness-daemon] Idle timeout reached, shutting down\n');
         this.shutdownRequested = true;
         void this.stop().then(() => process.exit(0));

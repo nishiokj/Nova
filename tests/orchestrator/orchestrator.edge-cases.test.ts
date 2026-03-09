@@ -149,7 +149,7 @@ function createOrchestrator(params: {
     undefined,
     params.agentRegistry ?? createAgentRegistry(),
     undefined,
-    () => ({ provider: 'openai', model: 'mock-model' })
+    () => ({ provider: 'openai', model: 'mock-model', contextWindow: 200_000 })
   );
 }
 
