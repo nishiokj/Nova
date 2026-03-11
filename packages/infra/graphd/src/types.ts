@@ -97,8 +97,8 @@ export function moduleEdgeToDict(e: ModuleEdge): Record<string, unknown> {
 
 export function dictToModuleEdge(row: Record<string, unknown>): ModuleEdge {
   return {
-    srcPath: String(row.src_path || row.srcPath),
-    dstPath: String(row.dst_path || row.dstPath),
+    srcPath: String(row.src_path ?? row.srcPath),
+    dstPath: String(row.dst_path ?? row.dstPath),
     kind: String(row.kind),
     confidence: Number(row.confidence ?? 0.95),
   };
@@ -196,7 +196,7 @@ export function dictToDerivedEdge(row: Record<string, unknown>): DerivedEdge {
     dst: String(row.dst),
     kind: String(row.kind),
     confidence: Number(row.confidence ?? 0.7),
-    provenance: String(row.provenance || ''),
+    provenance: typeof row.provenance === 'string' ? row.provenance : '',
     expiresAt: Number(row.expires_at ?? row.expiresAt ?? 0),
   };
 }

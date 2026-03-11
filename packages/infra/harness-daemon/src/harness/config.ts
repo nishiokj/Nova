@@ -61,7 +61,7 @@ export const AgentLLMConfigSchema = z.object({
 }).superRefine((value, ctx) => {
   if (!value.model && !value.role) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: 'custom',
       message: 'llm.model or llm.role is required',
     });
   }

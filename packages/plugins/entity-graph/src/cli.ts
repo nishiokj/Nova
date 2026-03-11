@@ -8,11 +8,13 @@
 
 import postgres from 'postgres'
 import path from 'path'
+import { execSync } from 'child_process'
 import { SCHEMA_DDL } from './schema.js'
 import { TestHealthModule } from './test-health.js'
 import { boundaries, callTreeFrom, depsOf, envVarsInTree } from './queries.js'
 import type { BoundaryInfo, DependencyInfo, EnvVarInfo, GapReport, ReadinessVerdict } from './test-health.js'
 import type { Entity } from './types.js'
+import type { BoundaryCandidate, BoundaryDossier } from './skeptic/types.js'
 
 // --- Arg Parsing ---
 
@@ -164,6 +166,66 @@ function formatGaps(report: GapReport): string {
   return lines.join('\n')
 }
 
+function formatSkepticTargets(candidates: BoundaryCandidate[]): string {
+  const lines: string[] = []
+  const header =
+    `${padRight('SCORE', 7)} ${padRight('READY', 8)} ${padRight('RECENT', 7)} `
+    + `${padRight('TESTS', 7)} ${padRight('FAN-IN', 7)} BOUNDARY`
+  lines.push(header)
+
+  for (const candidate of candidates) {
+    lines.push(
+      `${padRight(String(candidate.riskScore), 7)} ${padRight(candidate.readiness, 8)} `
+      + `${padRight(candidate.recent ? 'yes' : 'no', 7)} ${padRight(String(candidate.testFileCount), 7)} `
+      + `${padRight(String(candidate.fanIn), 7)} ${candidate.boundaryId}`
+    )
+
+    if (candidate.reasons.length > 0) {
+      lines.push(`  reasons: ${candidate.reasons.join(', ')}`)
+    }
+  }
+
+  if (candidates.length === 0) {
+    lines.push('No boundary candidates found.')
+  }
+
+  return lines.join('\n')
+}
+
+function formatSkepticDossier(dossier: BoundaryDossier): string {
+  const lines: string[] = []
+  lines.push(`BOUNDARY: ${dossier.boundary.boundaryId}`)
+  lines.push(`score=${dossier.boundary.riskScore} readiness=${dossier.boundary.readiness} tests=${dossier.testFiles.length} fan-in=${dossier.boundary.fanIn}`)
+  lines.push('')
+  lines.push(`Call tree nodes: ${dossier.callTree.totalNodes}`)
+  lines.push(`Reachable seams: ${dossier.seamCoverage.reachableSeams}  overridden: ${dossier.seamCoverage.overriddenSeams}`)
+  lines.push(`Semantic assertions: ${dossier.seamCoverage.semanticAssertions}  mock assertions: ${dossier.seamCoverage.mockInteractionAssertions}`)
+  lines.push('')
+
+  if (dossier.testCases.length > 0) {
+    lines.push('TEST CASES:')
+    for (const testCase of dossier.testCases) {
+      const kinds = testCase.assertionKinds.join(', ') || 'none'
+      const direct = testCase.touchesBoundaryDirectly ? 'direct' : testCase.touchesBoundaryModule ? 'module-only' : 'indirect'
+      lines.push(`  ${testCase.file}:${testCase.lineStart} ${testCase.name} [${testCase.confidence}/${direct}]`)
+      lines.push(`    assertions: ${kinds}`)
+    }
+    lines.push('')
+  }
+
+  if (dossier.assertionGaps.length > 0) {
+    lines.push('GAPS:')
+    for (const gap of dossier.assertionGaps) {
+      lines.push(`  - ${gap}`)
+    }
+  } else {
+    lines.push('GAPS:')
+    lines.push('  - No concrete dossier gaps detected.')
+  }
+
+  return lines.join('\n')
+}
+
 function formatInit(report: GapReport, deps: Map<string, DependencyInfo[]>, envVars: Map<string, EnvVarInfo[]>): string {
   const lines: string[] = []
 
@@ -216,6 +278,20 @@ function formatInit(report: GapReport, deps: Map<string, DependencyInfo[]>, envV
   lines.push('  - "**/*.test.ts"')
   lines.push('  - "**/*.spec.ts"')
   lines.push('  - "**/__tests__/**/*.ts"')
+  lines.push('')
+  lines.push('skeptic:')
+  lines.push('  runner:')
+  lines.push('    command: ["bunx", "vitest", "run"]')
+  lines.push('    test_name_flag: "-t"')
+  lines.push('    timeout_sec: 60')
+  lines.push('    env: {}')
+  lines.push('  mutation:')
+  lines.push('    worktree_dir: ".tmp/test-skeptic"')
+  lines.push('    max_mutants_per_boundary: 2')
+  lines.push('    max_boundaries_per_run: 5')
+  lines.push('  selection:')
+  lines.push('    prefer_recent: true')
+  lines.push('    min_fan_in: 1')
 
   return lines.join('\n')
 }
@@ -267,6 +343,26 @@ async function runGaps(module: TestHealthModule, filepath?: string, json?: boole
   }
 }
 
+async function runIndex(module: TestHealthModule, opts: {
+  repoRoot: string
+  filepath?: string
+  maxDepth?: number
+}): Promise<void> {
+  let commit = ''
+  try {
+    commit = execSync('git rev-parse HEAD', { cwd: opts.repoRoot, encoding: 'utf-8' }).trim()
+  } catch { /* not a git repo */ }
+
+  const index = await module.buildIndex({
+    repoRoot: opts.repoRoot,
+    commit,
+    filepath: opts.filepath,
+    maxDepth: opts.maxDepth,
+  })
+
+  process.stdout.write(JSON.stringify(index, null, 2) + '\n')
+}
+
 async function runInit(module: TestHealthModule, json?: boolean): Promise<void> {
   const report = await module.gaps()
   const deps = new Map<string, DependencyInfo[]>()
@@ -290,6 +386,34 @@ async function runInit(module: TestHealthModule, json?: boolean): Promise<void> 
   }
 }
 
+async function runSkepticTargets(
+  module: TestHealthModule,
+  selector?: string,
+  maxDepth?: number,
+  json?: boolean,
+): Promise<void> {
+  const targets = await module.skepticTargets(selector, { maxDepth })
+  if (json) {
+    process.stdout.write(JSON.stringify(targets, null, 2) + '\n')
+  } else {
+    process.stdout.write(formatSkepticTargets(targets) + '\n')
+  }
+}
+
+async function runSkepticDossier(
+  module: TestHealthModule,
+  boundaryId: string,
+  maxDepth?: number,
+  json?: boolean,
+): Promise<void> {
+  const dossier = await module.skepticDossier(boundaryId, { maxDepth })
+  if (json) {
+    process.stdout.write(JSON.stringify(dossier, null, 2) + '\n')
+  } else {
+    process.stdout.write(formatSkepticDossier(dossier) + '\n')
+  }
+}
+
 // --- Usage ---
 
 function usage(): string {
@@ -302,7 +426,10 @@ function usage(): string {
     '  test-health tree <entity-id>             Show call tree from a boundary',
     '  test-health env <entity-id>              Check environment readiness',
     '  test-health gaps [filepath]              Show untested/blocked boundaries',
+    '  test-health index [filepath]             Build project index (JSON)',
     '  test-health init                         Generate test-health.yaml skeleton',
+    '  test-health skeptic-targets [selector]   Rank skeptic boundary candidates',
+    '  test-health skeptic-dossier <entity-id>  Build a skeptic dossier for one boundary',
     '',
     'Options:',
     '  --json                    Output as JSON',
@@ -317,6 +444,8 @@ function usage(): string {
     '  test-health tree function:src/orders/process.ts:processOrder --max-depth 5',
     '  test-health gaps --json',
     '  test-health init',
+    '  test-health skeptic-targets recent --json',
+    '  test-health skeptic-dossier function:src/orders/process.ts:processOrder --json',
   ].join('\n')
 }
 
@@ -341,7 +470,7 @@ async function main(): Promise<void> {
   const json = flags.json === 'true'
   const maxDepth = flags['max-depth'] ? parseInt(flags['max-depth'], 10) : undefined
 
-  const sql = postgres(dbUrl, { max: 2 })
+  const sql = postgres(dbUrl, { max: 2, onnotice: () => {} })
 
   try {
     // Ensure schema exists
@@ -368,8 +497,18 @@ async function main(): Promise<void> {
       case 'gaps':
         await runGaps(module, positional[0], json)
         break
+      case 'index':
+        await runIndex(module, { repoRoot: sourceRoot, filepath: positional[0], maxDepth })
+        break
       case 'init':
         await runInit(module, json)
+        break
+      case 'skeptic-targets':
+        await runSkepticTargets(module, positional[0], maxDepth, json)
+        break
+      case 'skeptic-dossier':
+        if (!positional[0]) { process.stderr.write('Error: skeptic-dossier requires an entity ID\n'); process.exit(1) }
+        await runSkepticDossier(module, positional[0], maxDepth, json)
         break
       default:
         process.stderr.write(`Unknown command: ${command}\n`)

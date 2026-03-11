@@ -10,12 +10,14 @@
  * - Constants and defaults
  */
 
+import { describe, it, expect } from 'vitest';
 import {
   shouldSkipDir,
   shouldSkipFile,
   isDangerousCommand,
   createTool,
   createExecutionContext,
+  toToolExecutionError,
   DEFAULT_EXCLUDE_DIRS,
   DEFAULT_EXCLUDE_EXTENSIONS,
   DANGEROUS_PATTERNS,
@@ -645,8 +647,8 @@ describe('Constants', () => {
       expect(DEFAULT_TOOL_CONFIG.enabledTools).toContain('Grep');
     });
 
-    it('should enable conversation expansion tool', () => {
-      expect(DEFAULT_TOOL_CONFIG.enabledTools).toContain('ExpandConversation');
+    it('should enable patch application tool', () => {
+      expect(DEFAULT_TOOL_CONFIG.enabledTools).toContain('apply_patch');
     });
 
     it('should have bash timeout of 30 seconds', () => {
@@ -655,6 +657,214 @@ describe('Constants', () => {
 
     it('should have max output of 100000', () => {
       expect(DEFAULT_TOOL_CONFIG.maxOutputLength).toBe(100000);
+    });
+  });
+});
+
+// ============================================
+// toToolExecutionError
+// ============================================
+
+describe('toToolExecutionError', () => {
+  describe('already-typed errors (objects with type + message)', () => {
+    it('returns the object as-is when no metadata is provided', () => {
+      const existing = { type: 'timeout' as const, message: 'took too long' };
+      const result = toToolExecutionError(existing);
+
+      expect(result).toBe(existing); // identity - same reference
+    });
+
+    it('preserves all original fields on pass-through', () => {
+      const existing = {
+        type: 'cancelled' as const,
+        message: 'user cancelled',
+        cause: new Error('abort'),
+        metadata: { tool: 'Bash' },
+      };
+      const result = toToolExecutionError(existing);
+
+      expect(result.type).toBe('cancelled');
+      expect(result.message).toBe('user cancelled');
+      expect(result.cause).toBeInstanceOf(Error);
+      expect(result.metadata).toEqual({ tool: 'Bash' });
+    });
+
+    it('merges metadata into existing error when metadata is provided', () => {
+      const existing = {
+        type: 'execution_error' as const,
+        message: 'boom',
+        metadata: { tool: 'Read' },
+      };
+      const result = toToolExecutionError(existing, 'unknown', { retries: 3 });
+
+      expect(result.type).toBe('execution_error');
+      expect(result.message).toBe('boom');
+      expect(result.metadata).toEqual({ tool: 'Read', retries: 3 });
+    });
+
+    it('creates metadata on the merged result when the existing error had no metadata', () => {
+      const existing = { type: 'timeout' as const, message: 'slow' };
+      const result = toToolExecutionError(existing, 'unknown', { elapsed: 5000 });
+
+      expect(result.metadata).toEqual({ elapsed: 5000 });
+    });
+
+    it('does not return same reference when metadata is merged', () => {
+      const existing = { type: 'execution_error' as const, message: 'x' };
+      const result = toToolExecutionError(existing, 'unknown', { k: 'v' });
+
+      expect(result).not.toBe(existing);
+    });
+
+    it('metadata from caller overwrites same-key metadata from existing error', () => {
+      const existing = {
+        type: 'execution_error' as const,
+        message: 'x',
+        metadata: { source: 'old', keep: true },
+      };
+      const result = toToolExecutionError(existing, 'unknown', { source: 'new' });
+
+      expect(result.metadata).toEqual({ source: 'new', keep: true });
+    });
+  });
+
+  describe('Error instances', () => {
+    it('wraps Error with fallback type and message', () => {
+      const err = new Error('file not found');
+      const result = toToolExecutionError(err);
+
+      expect(result.type).toBe('execution_error');
+      expect(result.message).toBe('file not found');
+      expect(result.cause).toBe(err);
+    });
+
+    it('uses the provided fallbackType instead of default', () => {
+      const err = new Error('nope');
+      const result = toToolExecutionError(err, 'timeout');
+
+      expect(result.type).toBe('timeout');
+    });
+
+    it('attaches metadata to the wrapped error', () => {
+      const err = new Error('oops');
+      const result = toToolExecutionError(err, 'execution_error', { tool: 'Write' });
+
+      expect(result.metadata).toEqual({ tool: 'Write' });
+    });
+
+    it('preserves Error subclass as cause', () => {
+      const err = new TypeError('not a number');
+      const result = toToolExecutionError(err);
+
+      expect(result.cause).toBeInstanceOf(TypeError);
+      expect(result.message).toBe('not a number');
+    });
+
+    it('handles Error with empty message', () => {
+      const err = new Error('');
+      const result = toToolExecutionError(err);
+
+      expect(result.message).toBe('');
+      expect(result.type).toBe('execution_error');
+    });
+
+    it('sets metadata to undefined when not provided', () => {
+      const err = new Error('x');
+      const result = toToolExecutionError(err);
+
+      expect(result.metadata).toBeUndefined();
+    });
+  });
+
+  describe('primitive and exotic values (fallback branch)', () => {
+    it('converts string to message via String()', () => {
+      const result = toToolExecutionError('raw string error');
+
+      expect(result.type).toBe('execution_error');
+      expect(result.message).toBe('raw string error');
+      expect(result.cause).toBe('raw string error');
+    });
+
+    it('converts number to message', () => {
+      const result = toToolExecutionError(42);
+
+      expect(result.message).toBe('42');
+      expect(result.cause).toBe(42);
+    });
+
+    it('converts null to message', () => {
+      const result = toToolExecutionError(null);
+
+      expect(result.message).toBe('null');
+      expect(result.cause).toBeNull();
+    });
+
+    it('converts undefined to message', () => {
+      const result = toToolExecutionError(undefined);
+
+      expect(result.message).toBe('undefined');
+      expect(result.cause).toBeUndefined();
+    });
+
+    it('converts boolean false to message', () => {
+      const result = toToolExecutionError(false);
+
+      expect(result.message).toBe('false');
+      expect(result.cause).toBe(false);
+    });
+
+    it('uses provided fallbackType for primitives', () => {
+      const result = toToolExecutionError('oops', 'validation_error');
+
+      expect(result.type).toBe('validation_error');
+    });
+
+    it('attaches metadata to primitive errors', () => {
+      const result = toToolExecutionError(0, 'unknown', { step: 'init' });
+
+      expect(result.metadata).toEqual({ step: 'init' });
+    });
+
+    it('converts object without type/message through the fallback path', () => {
+      const obj = { code: 500, detail: 'internal' };
+      const result = toToolExecutionError(obj);
+
+      // Not an Error instance, and missing type+message -> fallback
+      expect(result.type).toBe('execution_error');
+      expect(result.message).toBe(String(obj));
+      expect(result.cause).toBe(obj);
+    });
+
+    it('treats object with only type (no message) as a non-typed error', () => {
+      const partial = { type: 'timeout' };
+      const result = toToolExecutionError(partial);
+
+      // 'in' check for 'message' fails -> falls through to primitive path
+      expect(result.message).toBe(String(partial));
+      expect(result.cause).toBe(partial);
+    });
+
+    it('treats object with only message (no type) as a non-typed error', () => {
+      const partial = { message: 'bad' };
+      const result = toToolExecutionError(partial);
+
+      expect(result.message).toBe(String(partial));
+      expect(result.cause).toBe(partial);
+    });
+  });
+
+  describe('default fallbackType parameter', () => {
+    it('defaults to execution_error when omitted', () => {
+      const result = toToolExecutionError(new Error('x'));
+      expect(result.type).toBe('execution_error');
+    });
+
+    it('accepts every valid ToolExecutionError type as fallback', () => {
+      const types = ['cancelled', 'paused', 'timeout', 'validation_error', 'execution_error', 'unknown'] as const;
+      for (const t of types) {
+        const result = toToolExecutionError('err', t);
+        expect(result.type).toBe(t);
+      }
     });
   });
 });

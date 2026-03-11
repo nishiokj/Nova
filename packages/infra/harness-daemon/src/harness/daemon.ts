@@ -5,7 +5,6 @@
  * - WebSocket bus for client connections (TUI, external integrations via harness-client)
  */
 
-import { pathToFileURL } from 'url';
 import path from 'path';
 import { existsSync } from 'fs';
 import { createHarnessFromEnv, type AgentHarness } from './harness.js';
@@ -30,7 +29,7 @@ const DEFAULT_IDLE_TIMEOUT_MS = 5_000;
 
 function detectProjectRoot(startDir: string): string {
   let dir = startDir;
-  while (true) {
+  for (;;) {
     const candidate = path.join(dir, 'config', 'harness_config.json');
     if (existsSync(candidate)) {
       return dir;
@@ -114,7 +113,7 @@ export class HarnessDaemon {
       await this.harness.start();
 
       // Capture auth config from loaded harness config
-      this.authConfig = this.harness.getAuthConfig?.() ?? null;
+      this.authConfig = this.harness.getAuthConfig() ?? null;
     }
 
     // Initialize auth service from config (optional - depends on config.auth section)
@@ -230,9 +229,9 @@ export async function runHarnessDaemon(): Promise<void> {
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runHarnessDaemon().catch((error) => {
-    process.stderr.write(`[harness-daemon] fatal error: ${error}\n`);
+if (import.meta.main) {
+  runHarnessDaemon().catch((error: unknown) => {
+    process.stderr.write(`[harness-daemon] fatal error: ${String(error)}\n`);
     process.exit(1);
   });
 }

@@ -65,7 +65,7 @@ function formatFields(fields: Record<string, unknown>): string {
       const indented = json.split("\n").join("\n    ");
       return `  ${key}: ${indented}`;
     }
-    return `  ${key}: ${String(val)}`;
+    return `  ${key}: ${typeof val === 'string' ? val : JSON.stringify(val)}`;
   });
 
   return "\n" + parts.join("\n");
@@ -267,9 +267,9 @@ export function createLogger(config: LoggerConfig): Logger {
  * No-op logger for testing or when logging should be disabled.
  */
 export const nullLogger: Logger = {
-  debug: () => {},
-  info: () => {},
-  warn: () => {},
-  error: () => {},
-  close: () => {},
+  debug: () => { /* noop */ },
+  info: () => { /* noop */ },
+  warn: () => { /* noop */ },
+  error: () => { /* noop */ },
+  close: () => { /* noop */ },
 };

@@ -12,7 +12,7 @@ export interface OptionalPluginSpec {
  * Keeps plugin-loading policy out of harness feature code.
  */
 export class HarnessPluginRegistry {
-  private readonly cache = new Map<string, Promise<unknown | null>>();
+  private readonly cache = new Map<string, Promise<unknown>>();
 
   constructor(private readonly logger: HarnessLogger) {}
 
@@ -22,7 +22,7 @@ export class HarnessPluginRegistry {
     if (code !== 'ERR_MODULE_NOT_FOUND' && code !== 'MODULE_NOT_FOUND') {
       return false;
     }
-    const message = error instanceof Error ? error.message : String(error);
+    const message = getErrorMessage(error);
     return (
       message.includes(`'${moduleName}'`) ||
       message.includes(`"${moduleName}"`) ||
@@ -60,7 +60,7 @@ export class HarnessPluginRegistry {
     }
 
     const pending = this.loadOptionalModule<T>(spec);
-    this.cache.set(spec.moduleName, pending as Promise<unknown | null>);
+    this.cache.set(spec.moduleName, pending as Promise<unknown>);
     return pending;
   }
 }

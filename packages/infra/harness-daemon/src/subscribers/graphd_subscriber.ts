@@ -108,7 +108,7 @@ export class GraphDSubscriber {
       }
     }
 
-    if (this.pendingEvents.length > 0 && !this.flushScheduled && !this.closed) {
+    if (this.pendingEvents.length > 0 && !this.closed) {
       this.flushScheduled = true;
       queueMicrotask(() => this.flushPending());
     }
@@ -130,7 +130,7 @@ export class GraphDSubscriber {
       }
       this.deriveWorkflowState(event);
     } catch (error) {
-      console.error(`[GraphDSubscriber] Failed to persist event: ${error}`);
+      console.error(`[GraphDSubscriber] Failed to persist event: ${String(error)}`);
     }
   }
 
@@ -144,7 +144,7 @@ export class GraphDSubscriber {
       ? Math.floor(event.timestamp / 1000)
       : event.timestamp;
 
-    const formattedData = this.camelToSnake(event.data ?? {});
+    const formattedData = this.camelToSnake((event.data ?? {}) as Record<string, unknown>);
 
     return {
       type: event.type,
@@ -234,7 +234,31 @@ export class GraphDSubscriber {
         });
         break;
       }
-      default:
+      // Events that don't affect workflow state — no DB writes needed
+      case 'tool_call':
+      case 'hook_call':
+      case 'llm_call':
+      case 'llm_error':
+      case 'rate_limit':
+      case 'agent_bounds_hit':
+      case 'agent_message':
+      case 'agent_reasoning':
+      case 'artifact_discovered':
+      case 'agent_progress':
+      case 'memory_injected':
+      case 'permission_request':
+      case 'git_commit':
+      case 'files_modified':
+      case 'harness_response':
+      case 'harness_status':
+      case 'harness_error':
+      case 'harness_user_prompt':
+      case 'run_control_requested':
+      case 'run_control_applied':
+      case 'run_control_rejected':
+      case 'orchestration_started':
+      case 'iteration_completed':
+      case 'observer_decision':
         break;
     }
   }
@@ -249,7 +273,7 @@ export class GraphDSubscriber {
       if (value && typeof value === 'object' && !Array.isArray(value)) {
         result[snakeKey] = this.camelToSnake(value as Record<string, unknown>);
       } else if (Array.isArray(value)) {
-        result[snakeKey] = value.map((item) =>
+        result[snakeKey] = (value as unknown[]).map((item: unknown) =>
           item && typeof item === 'object' ? this.camelToSnake(item as Record<string, unknown>) : item
         );
       } else {
@@ -286,7 +310,7 @@ export class GraphDSubscriber {
 
       this.eventBatch = [];
     } catch (error) {
-      console.error(`[GraphDSubscriber] Failed to flush batch: ${error}`);
+      console.error(`[GraphDSubscriber] Failed to flush batch: ${String(error)}`);
     }
   }
 

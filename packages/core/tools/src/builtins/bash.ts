@@ -34,10 +34,10 @@ export function executeBashEffect(
 ): Effect.Effect<ToolResult, ToolExecutionError> {
   const command = args.command as string;
   const cwd = context?.workdirOverride ?? process.cwd();
-  const timeoutMs = Math.max(1000, ((args.timeout as number) ?? 30) * 1000);
+  const timeoutMs = Math.max(1000, (typeof args.timeout === 'number' ? args.timeout : 30) * 1000);
   // Environment is not cached - each call uses fresh values from process.env and context
   // This scales safely across multiple users/requests (no shared state)
-  const env = ((args.env as Record<string, string>) ?? {
+  const env = (typeof args.env === 'object' && args.env !== null ? args.env : {
     ...process.env,
     ...context?.envOverrides,
   }) as NodeJS.ProcessEnv;

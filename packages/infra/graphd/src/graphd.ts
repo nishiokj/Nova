@@ -81,11 +81,11 @@ export async function runGraphDServer(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-  await new Promise(() => {});
+  await new Promise(() => { /* keep alive */ });
 }
 
 if (import.meta.main) {
-  runGraphDServer().catch((error) => {
+  runGraphDServer().catch((error: unknown) => {
     console.error('[graphd] fatal error:', error);
     process.exit(1);
   });

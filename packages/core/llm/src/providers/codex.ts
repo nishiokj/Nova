@@ -102,16 +102,12 @@ export class CodexProvider implements LLMProviderAdapter {
           Stream.fromAsyncIterable(
             {
               [Symbol.asyncIterator]: async function* () {
-                while (true) {
-                  const next = await generator.next();
-                  if (next.done) {
-                    if (next.value) {
-                      params.onComplete?.(next.value);
-                    }
-                    return;
-                  }
+                let next = await generator.next();
+                while (!next.done) {
                   yield next.value;
+                  next = await generator.next();
                 }
+                params.onComplete?.(next.value);
               },
             },
             (error) => toLLMExecutionError(error, 'codex', context.config.model)
@@ -329,9 +325,9 @@ export class CodexProvider implements LLMProviderAdapter {
 
     try {
       resetStreamIdleTimeout();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      let readResult = await reader.read();
+      while (!readResult.done) {
+        const { value } = readResult;
         resetStreamIdleTimeout();
 
         const chunk = decoder.decode(value, { stream: true });
@@ -479,25 +475,24 @@ export class CodexProvider implements LLMProviderAdapter {
                 }
               }
 
-              const usageData = responseObj.usage as Record<string, unknown> | undefined;
+              const usageData = responseObj.usage;
               if (usageData) {
                 usage = {
-                  promptTokens: (usageData.input_tokens as number) ?? 0,
-                  completionTokens: (usageData.output_tokens as number) ?? 0,
+                  promptTokens: usageData.input_tokens,
+                  completionTokens: usageData.output_tokens,
                   totalTokens:
-                    (usageData.total_tokens as number)
-                    ?? (((usageData.input_tokens as number) ?? 0) + ((usageData.output_tokens as number) ?? 0)),
+                    usageData.total_tokens
+                    ?? (usageData.input_tokens + usageData.output_tokens),
                 };
               }
-              model = (responseObj.model!) ?? model;
+              model = responseObj.model ?? model;
             }
           } catch {
             parseErrorCount++;
-            if (!parseErrorSample) {
-              parseErrorSample = data.slice(0, 400);
-            }
+            parseErrorSample ??= data.slice(0, 400);
           }
         }
+        readResult = await reader.read();
       }
 
       // Flush decoder remainder and process any final frame.
@@ -524,9 +519,7 @@ export class CodexProvider implements LLMProviderAdapter {
             }
           } catch {
             parseErrorCount++;
-            if (!parseErrorSample) {
-              parseErrorSample = data.slice(0, 400);
-            }
+            parseErrorSample ??= data.slice(0, 400);
           }
         }
       }
@@ -550,14 +543,12 @@ export class CodexProvider implements LLMProviderAdapter {
           }
         } catch {
           parseErrorCount++;
-          if (!parseErrorSample) {
-            parseErrorSample = tailData.slice(0, 400);
-          }
+          parseErrorSample ??= tailData.slice(0, 400);
         }
       }
     } catch (streamError) {
       const rawCause = streamError instanceof Error ? streamError : new Error(String(streamError));
-      const abortReason = abortController.signal.reason;
+      const abortReason = abortController.signal.reason as unknown;
       const abortReasonMessage = abortReason instanceof Error
         ? abortReason.message
         : (typeof abortReason === 'string' ? abortReason : undefined);
@@ -624,8 +615,6 @@ export class CodexProvider implements LLMProviderAdapter {
     const input: ResponsesInput[] = [];
 
     for (const msg of messages) {
-      if (!msg || typeof msg !== 'object') continue;
-
       const item = msg;
       const role = item.role as string | undefined;
       const type = item.type as string | undefined;
@@ -641,13 +630,13 @@ export class CodexProvider implements LLMProviderAdapter {
         if (name === 'apply_patch' && typeof args === 'string') {
           try {
             const parsed = JSON.parse(args) as Record<string, unknown>;
-            if (parsed && typeof parsed.input === 'string') {
+            if (typeof parsed.input === 'string') {
               args = parsed.input;
             }
           } catch {
             // Keep raw patch text as-is.
           }
-        } else if (name === 'apply_patch' && typeof args === 'object' && args !== null) {
+        } else if (name === 'apply_patch' && typeof args === 'object') {
           const argsObj = args;
           if (typeof argsObj.input === 'string') {
             args = argsObj.input;
@@ -658,11 +647,11 @@ export class CodexProvider implements LLMProviderAdapter {
         // in conversation history (e.g. path → file_path for read_file).
         // getItemsForLLM() emits arguments as JSON strings, so parse first.
         if (rawName && NOVA_TO_CODEX[rawName] && name !== 'apply_patch') {
-          let argsObj = args;
+          let argsObj: string | Record<string, unknown> | undefined = args;
           if (typeof argsObj === 'string') {
-            try { argsObj = JSON.parse(argsObj); } catch { /* leave as-is */ }
+            try { argsObj = JSON.parse(argsObj) as Record<string, unknown>; } catch { /* leave as-is */ }
           }
-          if (typeof argsObj === 'object' && argsObj !== null) {
+          if (typeof argsObj === 'object') {
             args = JSON.stringify(translateNovaArgsToCodex(rawName, argsObj));
           }
         }
@@ -715,7 +704,7 @@ export class CodexProvider implements LLMProviderAdapter {
     try {
       return JSON.stringify(value);
     } catch {
-      return String(value);
+      return '[non-serializable]';
     }
   }
 
@@ -723,7 +712,7 @@ export class CodexProvider implements LLMProviderAdapter {
     if (!args) return {};
     if (typeof args === 'string') {
       try {
-        const parsed = JSON.parse(args);
+        const parsed = JSON.parse(args) as unknown;
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           return parsed as Record<string, unknown>;
         }
@@ -855,7 +844,6 @@ export class CodexProvider implements LLMProviderAdapter {
 
     let content = '';
     for (const item of output) {
-      if (!item || typeof item !== 'object') continue;
       const itemType = item.type as string | undefined;
 
       if (itemType === 'message') {
@@ -912,8 +900,6 @@ export class CodexProvider implements LLMProviderAdapter {
     const toolCalls: ToolCall[] = [];
 
     for (const item of output) {
-      if (!item || typeof item !== 'object') continue;
-
       if (this.isFunctionCallItemType(item.type)) {
         const callId = this.pickFirstString(item.call_id, item.id, item.tool_call_id);
         const name = this.pickFirstString(item.name);
@@ -928,7 +914,6 @@ export class CodexProvider implements LLMProviderAdapter {
       const explicitCalls = item.tool_calls as Record<string, unknown>[] | undefined;
       if (Array.isArray(explicitCalls)) {
         for (const call of explicitCalls) {
-          if (!call || typeof call !== 'object') continue;
           const callId = this.pickFirstString(call.call_id, call.id, call.tool_call_id);
           const name = this.pickFirstString(call.name);
           if (!callId || !name) continue;

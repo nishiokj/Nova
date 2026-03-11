@@ -92,7 +92,7 @@ export function loadBehavioralRules(logger: HarnessLogger = stderrLogger): strin
       logger.info(`[config] Loaded behavioral rules from ${cwdPath}`);
       return content;
     } catch (e) {
-      logger.warning(`[config] Failed to read behavioral rules from ${cwdPath}: ${e}`);
+      logger.warning(`[config] Failed to read behavioral rules from ${cwdPath}: ${String(e)}`);
     }
   }
 
@@ -104,7 +104,7 @@ export function loadBehavioralRules(logger: HarnessLogger = stderrLogger): strin
       logger.info(`[config] Loaded behavioral rules from package: ${packagePath}`);
       return content;
     } catch (e) {
-      logger.warning(`[config] Failed to read behavioral rules from package ${packagePath}: ${e}`);
+      logger.warning(`[config] Failed to read behavioral rules from package ${packagePath}: ${String(e)}`);
     }
   }
 
@@ -141,20 +141,20 @@ export function loadConfigFile(configPath?: string, logger: HarnessLogger = stde
   // Helper to validate config with Zod
   const validateConfig = (content: string, path: string): HarnessConfigFile | null => {
     try {
-      const json = JSON.parse(content);
+      const json: unknown = JSON.parse(content);
       const result = HarnessConfigFileSchema.safeParse(json);
       if (!result.success) {
         const issues = result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ');
         logger.warning(`[config] Invalid config at ${path}: ${issues}`);
         return null;
       }
-      if (!result.data.agents || Object.keys(result.data.agents).length === 0) {
+      if (Object.keys(result.data.agents).length === 0) {
         logger.warning(`[config] Config at ${path} has no agents; ignoring and falling back`);
         return null;
       }
       return result.data;
     } catch (e) {
-      logger.warning(`[config] Failed to parse JSON at ${path}: ${e}`);
+      logger.warning(`[config] Failed to parse JSON at ${path}: ${String(e)}`);
       return null;
     }
   };
@@ -405,7 +405,7 @@ function resolveAgentConfig(
   }
   const modelProvider = modelDefinition.provider;
   let configProvider = resolvedProvider ?? modelProvider;
-  if (modelProvider && resolvedProvider && resolvedProvider !== modelProvider) {
+  if (resolvedProvider && resolvedProvider !== modelProvider) {
     _log.warning(
       `[config] Agent '${agentType}' model '${resolvedModel}' is registered under provider ` +
       `'${modelProvider}', ignoring provider '${resolvedProvider}'.`
@@ -468,11 +468,10 @@ export function getAgentConfig(
   config: FullHarnessConfig,
   agentType: string
 ): ResolvedAgentConfig {
-  const agentConfig = config.agents[agentType];
-  if (agentConfig) {
-    return agentConfig;
+  if (!(agentType in config.agents)) {
+    throw new Error(`Agent config not found: ${agentType}`);
   }
-  throw new Error(`Agent config not found: ${agentType}`);
+  return config.agents[agentType];
 }
 
 // ============================================
@@ -550,7 +549,7 @@ export function createConfigFromFile(
       const resolved = resolveAgentConfig(agentType, entry, fileConfig.models?.default ?? undefined);
       agents[agentType] = resolved;
     } catch (e) {
-      _log.warning(`[config] Failed to resolve agent '${agentType}': ${e}`);
+      _log.warning(`[config] Failed to resolve agent '${agentType}': ${String(e)}`);
     }
   }
 

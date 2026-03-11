@@ -85,8 +85,12 @@ const EXTENSION_TO_LANG: Record<string, string> = {
   '.py': 'python',
   '.js': 'javascript',
   '.jsx': 'javascript',
+  '.mjs': 'javascript',
+  '.cjs': 'javascript',
   '.ts': 'typescript',
   '.tsx': 'typescript',
+  '.mts': 'typescript',
+  '.cts': 'typescript',
   '.json': 'json',
   '.yml': 'yaml',
   '.yaml': 'yaml',
@@ -133,16 +137,18 @@ export function isTestPath(filePath: string): boolean {
     return true;
   }
 
+  // Check for __tests__ directory (React/Jest convention)
+  if (normalizedPath.includes('/__tests__/') || normalizedPath.startsWith('__tests__/')) {
+    return true;
+  }
+
   // Check for test file patterns
   const base = path.basename(normalizedPath);
   return (
     base.startsWith('test_') ||
     base.endsWith('_test.py') ||
     base.endsWith('_spec.py') ||
-    base.endsWith('.test.ts') ||
-    base.endsWith('.test.js') ||
-    base.endsWith('.spec.ts') ||
-    base.endsWith('.spec.js')
+    /\.(?:test|spec)\.(?:[jt]sx?|[mc][jt]s)$/.test(base)
   );
 }
 
@@ -197,10 +203,15 @@ export function generateSessionKey(clientType = 'tui'): string {
 /**
  * Parse client type from session key.
  * Format: {client_type}_{timestamp}_{uuid8}
+ * The client type may itself contain underscores, so we parse from the right:
+ * the last segment is the uuid8, second-to-last is the timestamp, everything
+ * before that is the client type.
  */
 export function parseClientType(sessionKey: string): string {
   const parts = sessionKey.split('_');
-  return parts[0] ?? 'unknown';
+  if (parts.length < 3) return parts[0] ?? 'unknown';
+  // Last two segments are timestamp and uuid8
+  return parts.slice(0, -2).join('_');
 }
 
 // ============================================

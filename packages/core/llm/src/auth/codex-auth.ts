@@ -25,6 +25,15 @@ const TOKEN_PATH = join(homedir(), '.config', 'nova', 'codex-auth.json');
 const LEGACY_TOKEN_PATH = join(homedir(), '.codex', 'auth.json');
 const KNOWN_TOKEN_PATHS = [TOKEN_PATH, LEGACY_TOKEN_PATH] as const;
 
+/** Shape of the JSON body returned by the OAuth token endpoint. */
+interface OAuthTokenResponse {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+  scope?: string;
+  id_token?: string;
+}
+
 type JsonRecord = Record<string, unknown>;
 
 function asRecord(value: unknown): JsonRecord | null {
@@ -161,11 +170,9 @@ export class CodexTokenManager implements TokenManager {
     }
 
     // Need refresh - dedupe concurrent refresh calls
-    if (!this.refreshPromise) {
-      this.refreshPromise = this.refreshTokens().finally(() => {
-        this.refreshPromise = null;
-      });
-    }
+    this.refreshPromise ??= this.refreshTokens().finally(() => {
+      this.refreshPromise = null;
+    });
 
     return this.refreshPromise;
   }
@@ -192,12 +199,12 @@ export class CodexTokenManager implements TokenManager {
         return null;
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as OAuthTokenResponse;
       const newTokens: CodexTokens = {
         access_token: data.access_token,
         refresh_token: data.refresh_token ?? this.tokens.refresh_token,
         token_type: 'Bearer',
-        expires_at: Math.floor(Date.now() / 1000) + (data.expires_in ?? 3600),
+        expires_at: Math.floor(Date.now() / 1000) + (Number(data.expires_in) || 3600),
         scope: data.scope,
       };
 
@@ -274,7 +281,7 @@ function parseJwt(token: string): Record<string, unknown> {
   const parts = token.split('.');
   if (parts.length !== 3) throw new Error('Invalid JWT format');
   const payload = Buffer.from(parts[1], 'base64url').toString('utf-8');
-  return JSON.parse(payload);
+  return JSON.parse(payload) as Record<string, unknown>;
 }
 
 /**
@@ -316,7 +323,10 @@ export async function exchangeCodeForTokens(
     throw new Error(`Token exchange failed: ${response.status} - ${error}`);
   }
 
-  const data = await response.json();
+  const data = (await response.json()) as OAuthTokenResponse;
+  if (!data.refresh_token) {
+    throw new Error('Token exchange response missing refresh_token');
+  }
 
   // Extract account ID from id_token if present
   const chatgptAccountId = data.id_token ? extractAccountId(data.id_token) : undefined;
@@ -325,7 +335,7 @@ export async function exchangeCodeForTokens(
     access_token: data.access_token,
     refresh_token: data.refresh_token,
     token_type: 'Bearer',
-    expires_at: Math.floor(Date.now() / 1000) + (data.expires_in ?? 3600),
+    expires_at: Math.floor(Date.now() / 1000) + (Number(data.expires_in) || 3600),
     scope: data.scope,
     chatgpt_account_id: chatgptAccountId,
   };
@@ -338,8 +348,6 @@ export async function exchangeCodeForTokens(
 let tokenManagerInstance: CodexTokenManager | null = null;
 
 export function getCodexTokenManager(): CodexTokenManager {
-  if (!tokenManagerInstance) {
-    tokenManagerInstance = new CodexTokenManager();
-  }
+  tokenManagerInstance ??= new CodexTokenManager();
   return tokenManagerInstance;
 }

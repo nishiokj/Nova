@@ -100,7 +100,7 @@ export class ConfiguredEffectHooksRunner {
     }
 
     const env = this.buildEnv(action.env ?? {}, context);
-    const args = (action.args ?? []).map((arg) => arg.replace(/\$(\w+)/g, (_, name) => env[name] ?? ''));
+    const args = (action.args ?? []).map((arg) => arg.replace(/\$(\w+)/g, (_, name: string) => env[name]));
 
     try {
       const result = await this.execScript(interpreter, scriptPath, args, env, timeout, this.workingDir, signal);
@@ -131,7 +131,7 @@ export class ConfiguredEffectHooksRunner {
     if (trimmed.startsWith('{')) {
       try {
         const parsed = JSON.parse(trimmed) as HookResult;
-        if (parsed.action === 'allow' || parsed.action === 'block' || parsed.action === 'modify') {
+        if (['allow', 'block', 'modify'].includes(parsed.action)) {
           return parsed;
         }
       } catch {
@@ -215,8 +215,8 @@ export class ConfiguredEffectHooksRunner {
         }
       }
 
-      proc.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-      proc.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
+      proc.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
 
       proc.on('close', (code) => {
         clearTimeout(timer);
@@ -270,8 +270,8 @@ export class ConfiguredEffectHooksRunner {
         }
       }
 
-      proc.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-      proc.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
+      proc.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
 
       proc.on('close', (code) => {
         clearTimeout(timer);

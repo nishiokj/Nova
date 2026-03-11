@@ -26,7 +26,8 @@ export function translateAgentEvent(event: AgentEvent): BridgeEvent | null {
     // Propagate sessionKey for event routing (SSE → dashboard)
     const sessionKey = (event as unknown as Record<string, unknown>).sessionKey;
     if (typeof sessionKey === 'string') {
-      (result.data!).session_key = sessionKey;
+      result.data ??= {};
+      result.data.session_key = sessionKey;
     }
   }
   return result;
@@ -42,7 +43,7 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
         type: 'status',
         data: {
           state: 'sending',
-          message: `Planning: ${goalData.goal?.slice(0, 50) || 'request'}...`,
+          message: `Planning: ${goalData.goal?.slice(0, 50) ?? 'request'}...`,
           level: 'info',
           kind: 'planning',
         } satisfies StatusEventData,
@@ -86,7 +87,7 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
             type: 'progress',
             data: {
               request_id: requestId,
-              message: `Failed: ${itemData.error || objective || 'work item failed'}`,
+              message: `Failed: ${itemData.error ?? objective ?? 'work item failed'}`,
               level: 'error',
               kind: 'work',
             } satisfies ProgressEventData,
@@ -96,7 +97,7 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
             type: 'progress',
             data: {
               request_id: requestId,
-              message: `Skipped: ${itemData.reason || objective || 'work item skipped'}`,
+              message: `Skipped: ${itemData.reason ?? objective ?? 'work item skipped'}`,
               level: 'warning',
               kind: 'work',
             } satisfies ProgressEventData,
@@ -119,11 +120,11 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
       const level: EventLevel = !isCompleted ? 'info' : toolData.success ? 'success' : 'error';
       let message: string;
       if (!isCompleted) {
-        message = `Using ${toolData.toolName || 'tool'}...`;
+        message = `Using ${toolData.toolName ?? 'tool'}...`;
       } else {
         const status = toolData.success ? 'OK' : 'ERR';
         const duration = toolData.durationMs !== undefined ? ` (${toolData.durationMs}ms)` : '';
-        message = `${status} ${toolData.toolName || 'tool'}${duration}`;
+        message = `${status} ${toolData.toolName ?? 'tool'}${duration}`;
       }
 
       // Include tool arguments for structured display (Edit tool gets full args for diff rendering)
@@ -181,7 +182,7 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
 
     case 'goal_not_achieved': {
       const goalData = data as { goal?: string; reason?: string; failed?: number };
-      const reason = goalData.reason || 'unknown';
+      const reason = goalData.reason ?? 'unknown';
       return {
         type: 'status',
         data: {
@@ -262,7 +263,7 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
         type: 'progress',
         data: {
           request_id: requestId,
-          message: `Found: ${artData.artifact?.name || 'artifact'} (${artData.artifact?.kind || 'unknown'})`,
+          message: `Found: ${artData.artifact.name ?? 'artifact'} (${artData.artifact.kind ?? 'unknown'})`,
           level: 'info',
           kind: 'thinking',
         } satisfies ProgressEventData,
@@ -276,7 +277,7 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
         category?: string;
         count?: { current: number; total?: number; label: string };
       };
-      let message = progressData.message || 'Processing...';
+      let message = progressData.message ?? 'Processing...';
       if (progressData.count) {
         const { current, total, label } = progressData.count;
         message = total
@@ -306,12 +307,12 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
       return {
         type: 'permission_request',
         data: {
-          request_id: permData.requestId || requestId,
-          tool: permData.tool || 'Bash',
-          target: permData.target || '',
-          suggested_pattern: permData.suggestedPattern || '',
-          working_directory: permData.workingDirectory || '',
-          description: permData.description || '',
+          request_id: permData.requestId ?? requestId,
+          tool: permData.tool ?? 'Bash',
+          target: permData.target ?? '',
+          suggested_pattern: permData.suggestedPattern ?? '',
+          working_directory: permData.workingDirectory ?? '',
+          description: permData.description ?? '',
         },
       };
     }
@@ -395,7 +396,20 @@ function translateAgentEventCore(event: AgentEvent): BridgeEvent | null {
       };
     }
 
-    default:
+    // Events that are internal/infra and not forwarded to TUI
+    case 'files_modified':
+    case 'memory_injected':
+    case 'git_commit':
+    case 'hook_call':
+    case 'rate_limit':
+    case 'agent_bounds_hit':
+    case 'run_control_requested':
+    case 'run_control_applied':
+    case 'run_control_rejected':
+    case 'orchestration_started':
+    case 'iteration_started':
+    case 'iteration_completed':
+    case 'observer_decision':
       return null;
   }
 }

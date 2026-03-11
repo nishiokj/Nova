@@ -61,9 +61,28 @@ Compute this path at the start of every invocation. Write your mutations to `<he
 
 ---
 
-## Phase 0: Check for Health Report
+## Phase 0: Read the Project Index and Health Report
 
-Before attacking, check if a health report exists at `<health_dir>/report.json`.
+### 0.1 Load the project index
+
+Check for `<health_dir>/project-index.json`.
+
+**If it exists**, read it. The index gives you the mechanical map of every attack surface:
+
+- **`boundaries[]`** — your mutation targets. Each has file, line ranges, signature, and fan-in.
+- **`fanIn`** per boundary — high fan-in = high impact targets. Bugs there affect many callers.
+- **`testFiles`** per boundary — the specific test files you need to survive. Read these to understand the defense.
+- **`callTree`** per boundary — the behavioral surface you can attack. Deep trees have more behavioral nuance to exploit.
+- **`readiness`** per boundary — `ready` with `hasTests === true` means the test suite claims coverage. That's your target. Find the gaps.
+- **`deps` and `envVars`** — understand what's wired vs. mocked. Mutations behind mocks are pointless (tests can't see them).
+
+Use this to select targets surgically instead of broad reconnaissance.
+
+**If it doesn't exist**, proceed with manual reconnaissance in Step 1.
+
+### 0.2 Check for health report
+
+Check if a health report exists at `<health_dir>/report.json`.
 
 **If it exists**, read it. This tells you where the test suite is already strong and where it's weak:
 
@@ -81,7 +100,9 @@ When invoked with `/red-team <target>`:
 
 ### Step 1: Reconnaissance
 
-Read the target source code. Understand every public entry point, every branch, every error path. You need to know this code better than the person who wrote the tests.
+**If you have the project index**, it provides the structural map — boundaries, line ranges, call trees, and which test files exercise each entry point. Focus your reconnaissance on reading the actual source code to understand behavioral nuances the index can't capture: error handling subtleties, rounding behaviors, sequencing assumptions, implicit invariants.
+
+**If no index**, read the target source code from scratch. Understand every public entry point, every branch, every error path. You need to know this code better than the person who wrote the tests.
 
 ### Step 2: Study the Defenses
 

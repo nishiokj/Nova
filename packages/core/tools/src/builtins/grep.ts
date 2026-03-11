@@ -275,12 +275,12 @@ export async function executeGrep(
 ): Promise<ToolResult> {
   const pattern = args.pattern as string;
   const cwd = context?.workdirOverride ?? process.cwd();
-  const searchPath = (args.path as string) ?? '.';
+  const searchPath = typeof args.path === 'string' ? args.path : '.';
   const requestedMaxResults = typeof args.maxResults === 'number' && Number.isFinite(args.maxResults)
     ? Math.trunc(args.maxResults)
     : DEFAULT_GREP_MAX_RESULTS;
   const maxResults = Math.min(MAX_GREP_RESULTS, Math.max(1, requestedMaxResults));
-  const caseSensitive = (args.caseSensitive as boolean) ?? false;
+  const caseSensitive = typeof args.caseSensitive === 'boolean' ? args.caseSensitive : false;
   const glob = args.glob as string | undefined;
   const fileType = args.type as string | undefined;
 

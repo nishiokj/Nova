@@ -91,13 +91,13 @@ export function validatePatch(patch: StatePatch): ValidationResult {
         return { valid: false, error: 'enqueue_work requires at least one item' };
       }
       for (const item of patch.items) {
-        if (!item.goal?.trim()) {
+        if (!item.goal.trim()) {
           return { valid: false, error: 'enqueue_work item missing goal' };
         }
-        if (!item.objective?.trim()) {
+        if (!item.objective.trim()) {
           return { valid: false, error: 'enqueue_work item missing objective' };
         }
-        if (!item.agent?.trim()) {
+        if (!item.agent.trim()) {
           return { valid: false, error: 'enqueue_work item missing agent' };
         }
       }
@@ -107,32 +107,22 @@ export function validatePatch(patch: StatePatch): ValidationResult {
       if (!patch.workIds.length) {
         return { valid: false, error: 'cancel_work requires at least one workId' };
       }
-      if (patch.workIds.some((workId) => !workId?.trim())) {
+      if (patch.workIds.some((workId) => !workId.trim())) {
         return { valid: false, error: 'cancel_work workIds must be non-empty strings' };
       }
-      if (!patch.cancellation.reason?.trim()) {
+      if (!patch.cancellation.reason.trim()) {
         return { valid: false, error: 'cancel_work requires a reason' };
-      }
-      if (
-        patch.cancellation.scope !== 'queued' &&
-        patch.cancellation.scope !== 'in_progress' &&
-        patch.cancellation.scope !== 'all'
-      ) {
-        return { valid: false, error: 'cancel_work scope must be queued, in_progress, or all' };
       }
       return { valid: true };
 
     case 'inject_message':
-      if (!patch.content?.trim()) {
+      if (!patch.content.trim()) {
         return { valid: false, error: 'inject_message requires non-empty content' };
-      }
-      if (patch.role !== 'system' && patch.role !== 'user') {
-        return { valid: false, error: 'inject_message role must be system or user' };
       }
       return { valid: true };
 
     case 'inject_guidance':
-      if (!patch.content?.trim()) {
+      if (!patch.content.trim()) {
         return { valid: false, error: 'inject_guidance requires non-empty content' };
       }
       return { valid: true };
@@ -144,21 +134,15 @@ export function validatePatch(patch: StatePatch): ValidationResult {
       return { valid: true };
 
     case 'set_termination':
-      if (!patch.reason) {
-        return { valid: false, error: 'set_termination requires a reason' };
-      }
       return { valid: true };
 
     case 'set_metadata':
-      if (!patch.key?.trim()) {
+      if (!patch.key.trim()) {
         return { valid: false, error: 'set_metadata requires a key' };
       }
       return { valid: true };
 
     case 'append_audit_log':
-      if (!patch.entry) {
-        return { valid: false, error: 'append_audit_log requires an entry' };
-      }
       if (!patch.entry.event) {
         return { valid: false, error: 'audit log entry missing event' };
       }

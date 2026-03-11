@@ -44,7 +44,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function tryParseJson(value: string): Record<string, unknown> | null {
   try {
-    const parsed = JSON.parse(value);
+    const parsed: unknown = JSON.parse(value);
     return isRecord(parsed) ? parsed : null;
   } catch {
     return null;
@@ -54,7 +54,7 @@ function tryParseJson(value: string): Record<string, unknown> | null {
 function extractJsonFromFence(value: string): Record<string, unknown> | null {
   const fenceMatch = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(value);
   if (!fenceMatch) return null;
-  const candidate = fenceMatch[1]?.trim();
+  const candidate = fenceMatch[1].trim();
   if (!candidate) return null;
   return tryParseJson(candidate) ?? findFirstJsonObject(candidate);
 }

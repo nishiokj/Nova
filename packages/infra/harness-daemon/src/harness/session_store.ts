@@ -50,8 +50,9 @@ Acknowledge the interruption and adjust your approach accordingly.`;
 
 function resolveContextFilePath(workingDir: string, sessionKey: string): string {
   const date = new Date().toISOString().split('T')[0];
-  const configuredRoot = process.env.AGENTLAB_SESSION_CONTEXT_ROOT?.trim()
-    || process.env.HAIKU_SESSIONS_ROOT?.trim();
+  const toNonEmpty = (s: string | undefined): string | undefined => s?.length ? s : undefined;
+  const configuredRoot = toNonEmpty(process.env.AGENTLAB_SESSION_CONTEXT_ROOT?.trim())
+    ?? process.env.HAIKU_SESSIONS_ROOT?.trim();
   const sessionsRoot = configuredRoot
     ? (path.isAbsolute(configuredRoot) ? configuredRoot : path.resolve(workingDir, configuredRoot))
     : path.join(workingDir, '.haiku', 'sessions');
@@ -283,7 +284,7 @@ export class SessionStore {
 
     try {
       const session = this.graphd.sessionGet(this.sessionKey);
-      const metadata = session?.metadata as Record<string, unknown> | undefined;
+      const metadata = session.metadata as Record<string, unknown> | undefined;
 
       if (metadata) {
         this.hydrateSessionState(metadata);
@@ -384,7 +385,7 @@ export class SessionStore {
     const modelSelections = metadata.model_selections as Record<string, ModelSelection> | undefined;
     if (modelSelections) {
       for (const [agentType, selection] of Object.entries(modelSelections)) {
-        if (selection?.provider && selection?.model) {
+        if (selection.provider && selection.model) {
           this.modelSelections.set(agentType, selection);
         }
       }

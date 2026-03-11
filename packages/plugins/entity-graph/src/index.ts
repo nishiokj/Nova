@@ -32,15 +32,17 @@ import {
   boundaries as queryBoundaries,
   envVarsInTree,
   depsOf,
+  indexedTestFactsForFiles,
   testFilesFor,
 } from './queries.js'
-import type { BlastRadiusEntry, CallTreeRow, BoundaryRow, EnvVarRow, DepRow } from './queries.js'
+import type { BlastRadiusEntry, CallTreeRow, BoundaryRow, EnvVarRow, DepRow, IndexedTestFactsBundle } from './queries.js'
 import { reviewDiff } from './pr-review/review.js'
 import type { PRReview } from './pr-review/types.js'
 import { cleanExpiredLeases } from './leasing.js'
 import { createEntityGraphHooks } from './hooks.js'
 import { TestHealthModule } from './test-health.js'
 import type { BoundaryInfo, ReadinessVerdict, GapReport } from './test-health.js'
+import type { BoundaryCandidate, BoundaryDossier, SkepticConfig } from './skeptic/types.js'
 
 export class EntityGraph {
   private sql: Sql
@@ -186,6 +188,29 @@ export class EntityGraph {
     return testFilesFor(this.sql, entityId)
   }
 
+  async indexedTestFactsForFiles(filepaths: string[]): Promise<IndexedTestFactsBundle> {
+    return indexedTestFactsForFiles(this.sql, filepaths)
+  }
+
+  async skepticTargets(
+    selector?: string,
+    opts?: {
+      maxDepth?: number
+      recentPaths?: string[]
+    },
+  ): Promise<BoundaryCandidate[]> {
+    return this.testHealth.skepticTargets(selector, opts)
+  }
+
+  async skepticDossier(
+    boundaryId: string,
+    opts?: {
+      maxDepth?: number
+    },
+  ): Promise<BoundaryDossier> {
+    return this.testHealth.skepticDossier(boundaryId, opts)
+  }
+
   /**
    * Run the full PR review pipeline from a unified diff string.
    */
@@ -221,6 +246,16 @@ export type {
   EnvRead,
   ConstructorDep,
   FunctionDep,
+  TestAssertionKind,
+  TestMockKind,
+  TestSeamOverrideKind,
+  TestCaseCallKind,
+  IndexedTestCase,
+  IndexedTestCaseImport,
+  IndexedTestCaseCall,
+  IndexedTestCaseAssertion,
+  IndexedTestCaseMock,
+  IndexedTestCaseSeamOverride,
   Sql,
 } from './types.js'
 
@@ -242,9 +277,10 @@ export {
   boundaries,
   envVarsInTree,
   depsOf,
+  indexedTestFactsForFiles,
   testFilesFor,
 } from './queries.js'
-export type { BlastRadiusEntry, CallTreeRow, BoundaryRow, EnvVarRow, DepRow } from './queries.js'
+export type { BlastRadiusEntry, CallTreeRow, BoundaryRow, EnvVarRow, DepRow, IndexedTestFactsBundle } from './queries.js'
 
 // --- PR Review ---
 export { parseDiff, parseHunkHeader } from './pr-review/diff.js'
@@ -276,4 +312,13 @@ export type {
   EnvVarInfo,
   ReadinessVerdict,
   GapReport,
+  ProjectIndex,
+  IndexBoundary,
+  IndexDep,
+  IndexEnvVar,
+  IndexCallTree,
+  IndexCallTreeNode,
 } from './test-health.js'
+export { selectBoundaryCandidates, hydrateBoundaryCandidate } from './skeptic/selection.js'
+export { buildBoundaryDossier } from './skeptic/boundary_dossier.js'
+export type { BoundaryCandidate, BoundaryDossier, SkepticConfig } from './skeptic/types.js'

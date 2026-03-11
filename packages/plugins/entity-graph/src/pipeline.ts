@@ -80,9 +80,16 @@ export async function persistParseResult(sql: Sql, result: ParseResult): Promise
 
     if (ids.length > 0) {
       const idList = ids.map((_, i) => `$${i + 1}`).join(',')
+      const testCaseIds = await tx.unsafe<{ id: string }[]>(
+        `SELECT id FROM entity_graph.test_cases WHERE filepath = $1`,
+        [result.filepath],
+      )
+      const caseIds = testCaseIds.map(row => row.id)
+      const caseIdList = caseIds.map((_, i) => `$${i + 1}`).join(',')
+
       // Pipeline edge table deletes — both source and target sides
       // Also wipe test-health tables (env_reads, constructor_deps, function_deps)
-      await Promise.all([
+      const deletes: Promise<unknown>[] = [
         tx.unsafe(`DELETE FROM entity_graph.imports WHERE importer_id IN (${idList})`, ids),
         tx.unsafe(`DELETE FROM entity_graph.imports WHERE imported_id IN (${idList})`, ids),
         tx.unsafe(`DELETE FROM entity_graph.calls WHERE caller_id IN (${idList})`, ids),
@@ -98,9 +105,22 @@ export async function persistParseResult(sql: Sql, result: ParseResult): Promise
         tx.unsafe(`DELETE FROM entity_graph.env_reads WHERE entity_id IN (${idList})`, ids),
         tx.unsafe(`DELETE FROM entity_graph.constructor_deps WHERE class_id IN (${idList})`, ids),
         tx.unsafe(`DELETE FROM entity_graph.function_deps WHERE function_id IN (${idList})`, ids),
-      ])
+      ]
+
+      if (caseIds.length > 0) {
+        deletes.push(
+          tx.unsafe(`DELETE FROM entity_graph.test_case_imports WHERE test_case_id IN (${caseIdList})`, caseIds),
+          tx.unsafe(`DELETE FROM entity_graph.test_case_calls WHERE test_case_id IN (${caseIdList})`, caseIds),
+          tx.unsafe(`DELETE FROM entity_graph.test_case_assertions WHERE test_case_id IN (${caseIdList})`, caseIds),
+          tx.unsafe(`DELETE FROM entity_graph.test_case_mocks WHERE test_case_id IN (${caseIdList})`, caseIds),
+          tx.unsafe(`DELETE FROM entity_graph.test_case_seam_overrides WHERE test_case_id IN (${caseIdList})`, caseIds),
+        )
+      }
+
+      await Promise.all(deletes)
     }
     await tx.unsafe(`DELETE FROM entity_graph.entities WHERE filepath = $1`, [result.filepath])
+    await tx.unsafe(`DELETE FROM entity_graph.test_cases WHERE filepath = $1`, [result.filepath])
 
     // 2. Bulk insert entities — single multi-row VALUES statement
     if (result.entities.length > 0) {
@@ -202,6 +222,107 @@ export async function persistParseResult(sql: Sql, result: ParseResult): Promise
       ))
     }
 
+    if (result.testCases.length > 0) {
+      const values = result.testCases
+        .map((_, i) => `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`)
+        .join(',')
+      const params = result.testCases.flatMap(testCase => [
+        testCase.id,
+        testCase.filepath,
+        testCase.name,
+        testCase.lineStart,
+        testCase.lineEnd,
+      ])
+      healthInserts.push(tx.unsafe(
+        `INSERT INTO entity_graph.test_cases (id, filepath, name, line_start, line_end) VALUES ${values}`,
+        params,
+      ))
+    }
+
+    if (result.testCaseImports.length > 0) {
+      const values = result.testCaseImports
+        .map((_, i) => `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`)
+        .join(',')
+      const params = result.testCaseImports.flatMap(item => [
+        item.testCaseId,
+        item.localName,
+        item.importedName,
+        item.resolvedPath,
+        item.isProd,
+      ])
+      healthInserts.push(tx.unsafe(
+        `INSERT INTO entity_graph.test_case_imports (test_case_id, local_name, imported_name, resolved_path, is_prod) VALUES ${values}`,
+        params,
+      ))
+    }
+
+    if (result.testCaseCalls.length > 0) {
+      const values = result.testCaseCalls
+        .map((_, i) => `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`)
+        .join(',')
+      const params = result.testCaseCalls.flatMap(item => [
+        item.testCaseId,
+        item.kind,
+        item.symbol,
+        item.resolvedPath,
+        item.line,
+      ])
+      healthInserts.push(tx.unsafe(
+        `INSERT INTO entity_graph.test_case_calls (test_case_id, kind, symbol, resolved_path, line) VALUES ${values}`,
+        params,
+      ))
+    }
+
+    if (result.testCaseAssertions.length > 0) {
+      const values = result.testCaseAssertions
+        .map((_, i) => `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`)
+        .join(',')
+      const params = result.testCaseAssertions.flatMap(item => [
+        item.testCaseId,
+        item.kind,
+        item.targetSymbol,
+        item.resolvedPath,
+        item.line,
+      ])
+      healthInserts.push(tx.unsafe(
+        `INSERT INTO entity_graph.test_case_assertions (test_case_id, kind, target_symbol, resolved_path, line) VALUES ${values}`,
+        params,
+      ))
+    }
+
+    if (result.testCaseMocks.length > 0) {
+      const values = result.testCaseMocks
+        .map((_, i) => `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`)
+        .join(',')
+      const params = result.testCaseMocks.flatMap(item => [
+        item.testCaseId,
+        item.kind,
+        item.api,
+        item.target,
+        item.line,
+      ])
+      healthInserts.push(tx.unsafe(
+        `INSERT INTO entity_graph.test_case_mocks (test_case_id, kind, api, target, line) VALUES ${values}`,
+        params,
+      ))
+    }
+
+    if (result.testCaseSeamOverrides.length > 0) {
+      const values = result.testCaseSeamOverrides
+        .map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`)
+        .join(',')
+      const params = result.testCaseSeamOverrides.flatMap(item => [
+        item.testCaseId,
+        item.kind,
+        item.target,
+        item.line,
+      ])
+      healthInserts.push(tx.unsafe(
+        `INSERT INTO entity_graph.test_case_seam_overrides (test_case_id, kind, target, line) VALUES ${values}`,
+        params,
+      ))
+    }
+
     if (healthInserts.length > 0) await Promise.all(healthInserts)
   })
 }
@@ -239,8 +360,23 @@ export async function deleteFileContribution(sql: Sql, filepath: string): Promis
     ])
   }
 
+  const testCaseIds = await sql<{ id: string }[]>`
+    SELECT id FROM entity_graph.test_cases WHERE filepath = ${filepath}
+  `
+  const caseIds = testCaseIds.map(r => r.id)
+  if (caseIds.length > 0) {
+    await Promise.all([
+      sql`DELETE FROM entity_graph.test_case_imports WHERE test_case_id = ANY(${caseIds})`,
+      sql`DELETE FROM entity_graph.test_case_calls WHERE test_case_id = ANY(${caseIds})`,
+      sql`DELETE FROM entity_graph.test_case_assertions WHERE test_case_id = ANY(${caseIds})`,
+      sql`DELETE FROM entity_graph.test_case_mocks WHERE test_case_id = ANY(${caseIds})`,
+      sql`DELETE FROM entity_graph.test_case_seam_overrides WHERE test_case_id = ANY(${caseIds})`,
+    ])
+  }
+
   // Delete the entities themselves
   await sql`DELETE FROM entity_graph.entities WHERE filepath = ${filepath}`
+  await sql`DELETE FROM entity_graph.test_cases WHERE filepath = ${filepath}`
 }
 
 /** Number of files to parse + persist concurrently during full scan */

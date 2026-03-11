@@ -6,8 +6,6 @@
  * for exported/async flags and ownership relationships.
  */
 
-import { statSync } from 'fs'
-import path from 'path'
 import type { Language, Node, Tree } from 'web-tree-sitter'
 import { Query } from 'web-tree-sitter'
 import type { Entity, Edge, ParseResult, EntityKind, EnvRead, ConstructorDep, FunctionDep } from '../types.js'
@@ -30,6 +28,8 @@ import {
   ENV_SUBSCRIPT_QUERY,
   ENV_DESTRUCTURE_QUERY,
 } from './queries.js'
+import { extractTestFacts } from './test-facts.js'
+import { resolveImportSource, stripQuotes } from './shared.js'
 
 // --- Helpers ---
 
@@ -77,64 +77,12 @@ function isAsync(node: Node): boolean {
 }
 
 /**
- * Strip quotes from a string literal node's text.
- */
-function stripQuotes(text: string): string {
-  if ((text.startsWith("'") && text.endsWith("'")) ||
-      (text.startsWith('"') && text.endsWith('"'))) {
-    return text.slice(1, -1)
-  }
-  return text
-}
-
-/**
  * Get raw text for an entity, truncated to avoid storing huge class bodies.
  */
 function getRawText(node: Node, maxLen = 2000): string | null {
   const text = node.text
   if (text.length <= maxLen) return text
   return text.slice(0, maxLen) + '...'
-}
-
-// --- Import Resolution ---
-
-const RESOLVE_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx']
-
-/**
- * Resolve a module specifier to a file path relative to sourceRoot.
- * Returns null for bare specifiers (external packages) or unresolvable paths.
- */
-function resolveImportSource(
-  specifier: string,
-  currentFilepath: string,
-  sourceRoot: string
-): string | null {
-  // Bare specifiers are external packages
-  if (!specifier.startsWith('.') && !specifier.startsWith('/')) {
-    return null
-  }
-
-  const currentDir = path.dirname(path.resolve(sourceRoot, currentFilepath))
-  const base = path.resolve(currentDir, specifier)
-
-  // Try exact file, then with extensions, then as directory with index file
-  const candidates = [
-    base,
-    ...RESOLVE_EXTENSIONS.map(ext => base + ext),
-    ...RESOLVE_EXTENSIONS.map(ext => path.join(base, `index${ext}`)),
-  ]
-
-  for (const candidate of candidates) {
-    try {
-      if (statSync(candidate).isFile()) {
-        return path.relative(sourceRoot, candidate)
-      }
-    } catch {
-      continue
-    }
-  }
-
-  return null
 }
 
 /**
@@ -203,12 +151,13 @@ export function extract(
   const envReads: EnvRead[] = []
   const constructorDeps: ConstructorDep[] = []
   const functionDeps: FunctionDep[] = []
-  const entitySet = new Set<string>() // dedup by ID
 
   // Import symbol map for cross-file call resolution: symbolName → resolvedFilePath
   const importSymbolMap = new Map<string, string>()
 
   const rootNode = tree.rootNode
+  const testFacts = extractTestFacts(rootNode, filepath, sourceRoot)
+  const entitySet = new Set<string>() // dedup by ID
 
   // --- File entity (always created) ---
   const fileId = entityId('file', filepath, filepath)
@@ -540,7 +489,20 @@ export function extract(
   // --- Extract env var reads ---
   extractEnvReads(tsLanguage, rootNode, filepath, entitySet, envReads)
 
-  return { filepath, entities, edges, envReads, constructorDeps, functionDeps }
+  return {
+    filepath,
+    entities,
+    edges,
+    envReads,
+    constructorDeps,
+    functionDeps,
+    testCases: testFacts.testCases,
+    testCaseImports: testFacts.testCaseImports,
+    testCaseCalls: testFacts.testCaseCalls,
+    testCaseAssertions: testFacts.testCaseAssertions,
+    testCaseMocks: testFacts.testCaseMocks,
+    testCaseSeamOverrides: testFacts.testCaseSeamOverrides,
+  }
 }
 
 /**

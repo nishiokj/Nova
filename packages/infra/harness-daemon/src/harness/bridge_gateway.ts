@@ -57,7 +57,7 @@ export interface HarnessLike {
       writesNoDeletes?: boolean;
       reloadPersistentConfig?: boolean;
     }) => unknown;
-  } | void;
+  } | undefined;
   getGraphD?(): GraphDManager | null;
   closeSession?(sessionKey: string): { success: boolean; error?: string; executingRequestId?: string };
   forkSession?(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string };
@@ -327,7 +327,7 @@ export class BridgeGateway {
     }
 
     this.harness.ensureSessionHydrated?.(sessionKey, {
-      workingDir: state.workingDir ?? this.workingDir,
+      workingDir: state.workingDir,
       includeUserPreferences: true,
     });
 
@@ -335,7 +335,7 @@ export class BridgeGateway {
     this.sendEvent(connectionId, readyEvent, sessionChannel(sessionKey));
 
     // Emit model_changed for standard tabs + any additional persisted agent types.
-    const selections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+    const selections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map<string, ModelSelection>();
     const agentTypes = new Set<string>(['standard', 'explorer', 'coding', ...selections.keys()]);
     for (const agentType of agentTypes) {
       const selection = selections.get(agentType) ?? null;
@@ -379,9 +379,9 @@ export class BridgeGateway {
 
     // Check 'standard' agent type selection - this is the main/default that must be set
     let activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
-    if (!activeSelection?.model || !activeSelection?.provider) {
+    if (!activeSelection?.model || !activeSelection.provider) {
       activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
-      if (!activeSelection?.model || !activeSelection?.provider) {
+      if (!activeSelection?.model || !activeSelection.provider) {
         this.sendError(connectionId, 'No model selected. Use /models to choose one before sending a message.');
         return;
       }
@@ -399,7 +399,7 @@ export class BridgeGateway {
       return;
     }
 
-    const text = String(data?.text ?? '');
+    const text = typeof data?.text === 'string' ? data.text : '';
     if (!text.trim()) {
       this.sendError(connectionId, 'Empty message');
       return;
@@ -444,7 +444,7 @@ export class BridgeGateway {
           reason: commandArg || 'Stop requested from bridge command',
           requestedBy: 'user',
           timeoutMs: 30_000,
-        }).catch((error) => {
+        }).catch((error: unknown) => {
           this.sendMetadataResponse(connectionId, 'control_plane_stop', {
             success: false,
             error: error instanceof Error ? error.message : String(error),
@@ -464,7 +464,7 @@ export class BridgeGateway {
           reason: commandArg || 'Pause requested from bridge command',
           requestedBy: 'user',
           timeoutMs: 30_000,
-        }).catch((error) => {
+        }).catch((error: unknown) => {
           this.sendMetadataResponse(connectionId, 'control_plane_stop', {
             success: false,
             error: error instanceof Error ? error.message : String(error),
@@ -483,7 +483,7 @@ export class BridgeGateway {
           action: 'resume',
           reason: commandArg || 'Resume requested from bridge command',
           requestedBy: 'user',
-        }).catch((error) => {
+        }).catch((error: unknown) => {
           this.sendMetadataResponse(connectionId, 'control_plane_stop', {
             success: false,
             error: error instanceof Error ? error.message : String(error),
@@ -544,7 +544,7 @@ export class BridgeGateway {
       : null;
     const workingDir = requestWorkingDir ?? state.workingDir ?? this.workingDir;
 
-    const requestId = String(data?.request_id ?? state.activeRequestId ?? '');
+    const requestId = typeof data?.request_id === 'string' ? data.request_id : (typeof state.activeRequestId === 'string' ? state.activeRequestId : '');
     const answer = data?.answer ?? data?.response;
     if (!requestId) {
       this.sendError(connectionId, 'Missing request_id');
@@ -656,7 +656,7 @@ export class BridgeGateway {
             }
           }
 
-          const eventType = (event).type ?? 'unknown';
+          const eventType = event.type;
           profiler.begin(`stream.publish:${eventType}`, 'stream');
           this.bus.publish(channel, event);
           profiler.end(`stream.publish:${eventType}`, 'stream');

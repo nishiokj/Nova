@@ -120,7 +120,7 @@ export function runUnifiedDecisionHooks<E extends DecisionEventType>(
     let hasCriticalFailure = false;
 
     for (const priority of priorities) {
-      const group = groups.get(priority)!;
+      const group = groups.get(priority) ?? [];
       const results = yield* Effect.forEach(
         group,
         (hook) => executeDecisionHookWithPolicy(hook, event, context),
@@ -131,9 +131,7 @@ export function runUnifiedDecisionHooks<E extends DecisionEventType>(
         audit.push(result.audit);
 
         if (isSuccess(result.outcome)) {
-          if (decision === null) {
-            decision = result.outcome.decision;
-          }
+          decision ??= result.outcome.decision;
           if (result.outcome.patches) {
             patches.push(...result.outcome.patches);
           }
@@ -237,7 +235,7 @@ export function runUnifiedEffectHooks<E extends EffectEventType>(
     let blockedBy: UnifiedEffectExecutionResult<E>['blockedBy'];
 
     for (const priority of priorities) {
-      const group = groups.get(priority)!;
+      const group = groups.get(priority) ?? [];
       const results = yield* Effect.forEach(
         group,
         (hook) => executeEffectHookWithPolicy(hook, event, context),
@@ -333,9 +331,9 @@ function executeDecisionHookWithPolicy<E extends DecisionEventType>(
     const policyBackoffMs = getBackoffMs(hook.policy);
 
     let retriesAttempted = 0;
-    let outcome: HookOutcome<DecisionFor<E>> = failed('unknown error');
+    let outcome!: HookOutcome<DecisionFor<E>>;
 
-    while (true) {
+    for (;;) {
       outcome = yield* executeDecisionHookAttemptEffect(hook, event, context);
 
       if (isSuccess(outcome) || isSkip(outcome)) {
@@ -390,7 +388,7 @@ function executeEffectHookWithPolicy<E extends EffectEventType>(
 
     let retriesAttempted = 0;
 
-    while (true) {
+    for (;;) {
       const attempt = yield* executeEffectHookAttemptEffect(hook, event, context);
       if (!attempt.error) {
         const outcome = attempt.outcome;
@@ -445,7 +443,7 @@ function groupByPriority<T extends { priority: number }>(items: T[]): Map<number
     if (!grouped.has(item.priority)) {
       grouped.set(item.priority, []);
     }
-    grouped.get(item.priority)!.push(item);
+    grouped.get(item.priority)?.push(item);
   }
   return grouped;
 }

@@ -14,9 +14,19 @@ import {
   callTreeFrom,
   envVarsInTree,
   depsOf,
+  indexedTestFactsForFiles,
   testFilesFor,
+  graphStats,
 } from './queries.js'
-import type { CallTreeRow, BoundaryRow, DepRow, EnvVarRow } from './queries.js'
+import type { CallTreeRow, BoundaryRow, DepRow, EnvVarRow, IndexedTestFactsBundle } from './queries.js'
+import { selectBoundaryCandidates } from './skeptic/selection.js'
+import { buildBoundaryDossier } from './skeptic/boundary_dossier.js'
+import {
+  type BoundaryDossier,
+  cloneDefaultSkepticConfig,
+  type BoundaryCandidate,
+  type SkepticConfig,
+} from './skeptic/types.js'
 
 // --- Registry Types ---
 
@@ -44,6 +54,7 @@ export interface SubstitutionRegistry {
   substitutions: Record<string, SubstitutionEntry>
   envDefaults: Record<string, string>
   testPatterns: string[]
+  skeptic: SkepticConfig
 }
 
 // --- Test Health Result Types ---
@@ -107,6 +118,96 @@ export interface GapReport {
   boundaries: BoundaryInfo[]
 }
 
+// --- Project Index Types ---
+
+export interface ProjectIndex {
+  version: 1
+  repoRoot: string
+  commit: string
+  timestamp: string
+  language: 'typescript'
+  summary: {
+    totalBoundaries: number
+    tested: number
+    ready: number
+    blocked: number
+    unknown: number
+  }
+  boundaries: IndexBoundary[]
+  testInfrastructure: {
+    framework: string
+    testFiles: string[]
+  }
+  graphStats: {
+    entities: number
+    imports: number
+    calls: number
+    uses: number
+    owns: number
+    extends: number
+    implements: number
+  }
+  unresolved: string[]
+}
+
+export interface IndexBoundary {
+  id: string
+  file: string
+  lineStart: number | null
+  lineEnd: number | null
+  kind: string
+  name: string
+  signature: string
+  fanIn: number
+  readiness: 'ready' | 'blocked' | 'unknown'
+  hasTests: boolean
+  testFiles: string[]
+  deps: IndexDep[]
+  envVars: IndexEnvVar[]
+  blockers: string[]
+  callTree: IndexCallTree
+}
+
+export interface IndexDep {
+  paramName: string
+  paramType: string | null
+  status: 'wirable' | 'blocked' | 'unknown'
+  substitution?: {
+    testType: string
+    testModule: string
+    setup: string
+    inspect: string
+    teardown?: string
+  }
+  blocker?: { reason: string }
+}
+
+export interface IndexEnvVar {
+  varName: string
+  accessor: string
+  readByEntity: string
+  readByFile: string
+  status: 'covered' | 'defaulted' | 'unmapped'
+  coveredBy?: string
+  default?: string
+}
+
+export interface IndexCallTree {
+  maxDepthReached: number
+  totalNodes: number
+  assertionPoints: number
+  nodes: IndexCallTreeNode[]
+}
+
+export interface IndexCallTreeNode {
+  entityId: string
+  name: string
+  file: string
+  depth: number
+  sameModule: boolean
+  injected: boolean
+}
+
 // --- Registry Loading ---
 
 /**
@@ -119,7 +220,13 @@ export async function loadRegistry(registryPath: string): Promise<SubstitutionRe
     content = await readFile(registryPath, 'utf-8')
   } catch {
     // No registry file → empty registry
-    return { version: 1, substitutions: {}, envDefaults: {}, testPatterns: [] }
+    return {
+      version: 1,
+      substitutions: {},
+      envDefaults: {},
+      testPatterns: [],
+      skeptic: cloneDefaultSkepticConfig(),
+    }
   }
 
   return parseRegistryYaml(content)
@@ -135,13 +242,26 @@ export function parseRegistryYaml(content: string): SubstitutionRegistry {
     substitutions: {},
     envDefaults: {},
     testPatterns: [],
+    skeptic: cloneDefaultSkepticConfig(),
   }
 
   const lines = content.split('\n')
   let i = 0
 
   // State machine for parsing
-  type Section = 'root' | 'substitutions' | 'sub_entry' | 'sub_prod' | 'sub_test' | 'env_defaults' | 'test_patterns'
+  type Section =
+    | 'root'
+    | 'substitutions'
+    | 'sub_entry'
+    | 'sub_prod'
+    | 'sub_test'
+    | 'env_defaults'
+    | 'test_patterns'
+    | 'skeptic'
+    | 'skeptic_runner'
+    | 'skeptic_runner_env'
+    | 'skeptic_mutation'
+    | 'skeptic_selection'
   let section: Section = 'root'
   let currentSubName = ''
   let currentSub: Partial<SubstitutionEntry> = {}
@@ -215,6 +335,8 @@ export function parseRegistryYaml(content: string): SubstitutionRegistry {
         const val = trimmed.slice(2).trim().replace(/^["']|["']$/g, '')
         if (section === 'test_patterns') {
           registry.testPatterns.push(val)
+        } else if (section === 'skeptic_runner') {
+          registry.skeptic.runner.command.push(val)
         } else if (section === 'sub_prod' && multilineKey === '') {
           // Array value for env
           if (!currentProd.env) (currentProd as Record<string, unknown>).env = []
@@ -254,6 +376,8 @@ export function parseRegistryYaml(content: string): SubstitutionRegistry {
         (currentProd as Record<string, unknown>)[key] = arr
       } else if (section === 'sub_test') {
         currentTest[key] = arr
+      } else if (section === 'skeptic_runner' && key === 'command') {
+        registry.skeptic.runner.command = arr
       }
       i++
       continue
@@ -265,6 +389,7 @@ export function parseRegistryYaml(content: string): SubstitutionRegistry {
       else if (key === 'substitutions') { flushSub(); section = 'substitutions' }
       else if (key === 'env_defaults') { flushSub(); section = 'env_defaults' }
       else if (key === 'test_patterns') { flushSub(); section = 'test_patterns' }
+      else if (key === 'skeptic') { flushSub(); section = 'skeptic' }
       i++
       continue
     }
@@ -318,6 +443,77 @@ export function parseRegistryYaml(content: string): SubstitutionRegistry {
       if (indent >= 2) {
         registry.envDefaults[key] = value
       }
+      i++
+      continue
+    }
+
+    if (section === 'skeptic') {
+      if (indent === 2 && value === '') {
+        if (key === 'runner') section = 'skeptic_runner'
+        else if (key === 'mutation') section = 'skeptic_mutation'
+        else if (key === 'selection') section = 'skeptic_selection'
+      }
+      i++
+      continue
+    }
+
+    if (section === 'skeptic_runner') {
+      if (indent <= 2) {
+        section = 'skeptic'
+        continue
+      }
+
+      if (key === 'env' && value === '') {
+        registry.skeptic.runner.env = {}
+        section = 'skeptic_runner_env'
+        i++
+        continue
+      }
+
+      if (key === 'env' && value === '{}') {
+        registry.skeptic.runner.env = {}
+        i++
+        continue
+      }
+
+      if (key === 'test_name_flag') registry.skeptic.runner.testNameFlag = value
+      else if (key === 'timeout_sec') registry.skeptic.runner.timeoutSec = parseInt(value, 10)
+      else if (key === 'command' && value) registry.skeptic.runner.command = [value]
+      i++
+      continue
+    }
+
+    if (section === 'skeptic_runner_env') {
+      if (indent <= 4) {
+        section = 'skeptic_runner'
+        continue
+      }
+      registry.skeptic.runner.env[key] = value
+      i++
+      continue
+    }
+
+    if (section === 'skeptic_mutation') {
+      if (indent <= 2) {
+        section = 'skeptic'
+        continue
+      }
+      if (key === 'worktree_dir') registry.skeptic.mutation.worktreeDir = value
+      else if (key === 'max_mutants_per_boundary') registry.skeptic.mutation.maxMutantsPerBoundary = parseInt(value, 10)
+      else if (key === 'max_boundaries_per_run') registry.skeptic.mutation.maxBoundariesPerRun = parseInt(value, 10)
+      i++
+      continue
+    }
+
+    if (section === 'skeptic_selection') {
+      if (indent <= 2) {
+        section = 'skeptic'
+        continue
+      }
+      if (key === 'prefer_recent') registry.skeptic.selection.preferRecent = value === 'true'
+      else if (key === 'min_fan_in') registry.skeptic.selection.minFanIn = parseInt(value, 10)
+      i++
+      continue
     }
 
     i++
@@ -345,6 +541,10 @@ export class TestHealthModule {
       this._registry = await loadRegistry(regPath)
     }
     return this._registry
+  }
+
+  getSourceRoot(): string {
+    return this.sourceRoot
   }
 
   /**
@@ -433,6 +633,19 @@ export class TestHealthModule {
     return results
   }
 
+  async testFiles(entityId: string): Promise<Entity[]> {
+    return testFilesFor(this.sql, entityId)
+  }
+
+  async indexedTestFacts(filepaths: string[]): Promise<IndexedTestFactsBundle> {
+    return indexedTestFactsForFiles(this.sql, filepaths)
+  }
+
+  async boundaryInfo(entityId: string): Promise<BoundaryInfo | null> {
+    const infos = await this.boundaries()
+    return infos.find(info => info.entity.id === entityId) ?? null
+  }
+
   /**
    * Full readiness verdict for a boundary.
    */
@@ -490,6 +703,141 @@ export class TestHealthModule {
       envVars,
       blockers,
       testFiles,
+    }
+  }
+
+  async skepticTargets(
+    selector?: string,
+    opts?: {
+      maxDepth?: number
+      recentPaths?: string[]
+    },
+  ): Promise<BoundaryCandidate[]> {
+    return selectBoundaryCandidates(this, opts ? { ...opts, selector } : { selector })
+  }
+
+  async skepticDossier(
+    boundaryId: string,
+    opts?: {
+      maxDepth?: number
+    },
+  ): Promise<BoundaryDossier> {
+    return buildBoundaryDossier(this, boundaryId, opts)
+  }
+
+  /**
+   * Build the full project index — the mechanical foundation for both blue and red teams.
+   * Derives all structural data from the entity graph AST. No LLM judgment.
+   */
+  async buildIndex(opts?: {
+    repoRoot?: string
+    commit?: string
+    filepath?: string
+    maxDepth?: number
+  }): Promise<ProjectIndex> {
+    const repoRoot = opts?.repoRoot ?? this.sourceRoot
+    const maxDepth = opts?.maxDepth ?? 10
+
+    const boundaryRows = await queryBoundaries(this.sql, opts?.filepath)
+
+    const indexBoundaries: IndexBoundary[] = []
+    const allTestFiles = new Set<string>()
+
+    for (const b of boundaryRows) {
+      const verdict = await this.readiness(b.entity.id)
+      const tree = await this.callTree(b.entity.id, maxDepth)
+
+      for (const tf of verdict.testFiles) allTestFiles.add(tf.filepath)
+
+      const assertionPoints = tree.filter(n => n.injected).length
+      const maxTreeDepth = tree.reduce((max, n) => Math.max(max, n.depth), 0)
+
+      indexBoundaries.push({
+        id: b.entity.id,
+        file: b.entity.filepath,
+        lineStart: b.entity.startLine,
+        lineEnd: b.entity.endLine,
+        kind: b.entity.kind,
+        name: b.entity.name,
+        signature: buildSignature(b.entity),
+        fanIn: b.fanIn,
+        readiness: verdict.ready ? 'ready' : verdict.blockers.length > 0 ? 'blocked' : 'unknown',
+        hasTests: verdict.testFiles.length > 0,
+        testFiles: verdict.testFiles.map(t => t.filepath),
+        deps: verdict.deps.map(d => {
+          const dep: IndexDep = { paramName: d.paramName, paramType: d.paramType, status: d.status }
+          if (d.substitution) dep.substitution = d.substitution
+          if (d.blocker) dep.blocker = d.blocker
+          return dep
+        }),
+        envVars: verdict.envVars.map(e => {
+          const ev: IndexEnvVar = {
+            varName: e.varName,
+            accessor: e.accessor,
+            readByEntity: e.readBy.id,
+            readByFile: e.readBy.filepath,
+            status: e.status,
+          }
+          if (e.coveredBy) ev.coveredBy = e.coveredBy
+          if (e.default) ev.default = e.default
+          return ev
+        }),
+        blockers: verdict.blockers,
+        callTree: {
+          maxDepthReached: maxTreeDepth,
+          totalNodes: tree.length,
+          assertionPoints,
+          nodes: tree.map(n => ({
+            entityId: n.entity.id,
+            name: n.entity.name,
+            file: n.entity.filepath,
+            depth: n.depth,
+            sameModule: n.sameModule,
+            injected: n.injected,
+          })),
+        },
+      })
+    }
+
+    const stats = await graphStats(this.sql)
+
+    const tested = indexBoundaries.filter(b => b.hasTests).length
+    const ready = indexBoundaries.filter(b => b.readiness === 'ready').length
+    const blocked = indexBoundaries.filter(b => b.readiness === 'blocked').length
+    const unknown = indexBoundaries.filter(b => b.readiness === 'unknown').length
+
+    return {
+      version: 1,
+      repoRoot,
+      commit: opts?.commit ?? '',
+      timestamp: new Date().toISOString(),
+      language: 'typescript',
+      summary: {
+        totalBoundaries: indexBoundaries.length,
+        tested,
+        ready,
+        blocked,
+        unknown,
+      },
+      boundaries: indexBoundaries,
+      testInfrastructure: {
+        framework: 'vitest',
+        testFiles: [...allTestFiles].sort(),
+      },
+      graphStats: {
+        entities: stats.entities,
+        imports: stats.imports,
+        calls: stats.calls,
+        uses: stats.uses,
+        owns: stats.owns,
+        extends: stats.extends,
+        implements: stats.implements,
+      },
+      unresolved: [
+        'Exit points not extracted — return/throw/error propagation sites within function bodies not tracked by AST parser',
+        'Coverage data unavailable — line-level test execution coverage requires vitest --coverage integration',
+        'Mock detection not implemented — test mock patterns not scanned heuristically',
+      ],
     }
   }
 
@@ -585,6 +933,14 @@ function resolveEnvVar(v: EnvVarRow, registry: SubstitutionRegistry, readBy: Ent
     readBy,
     status: 'unmapped',
   }
+}
+
+function buildSignature(entity: Entity): string {
+  if (entity.kind === 'class') return `class ${entity.name}`
+  const prefix = entity.async ? 'async ' : ''
+  const params = entity.paramsText ?? '()'
+  const ret = entity.returnText ? `: ${entity.returnText}` : ''
+  return `${prefix}${entity.name}${params}${ret}`
 }
 
 function findSubstitution(paramType: string, registry: SubstitutionRegistry): SubstitutionEntry | undefined {

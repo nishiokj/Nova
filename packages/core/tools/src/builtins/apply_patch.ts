@@ -148,7 +148,7 @@ export function parsePatch(input: string): PatchOperation[] {
       finalizeHunk();
       // Extract optional context header after @@
       const headerMatch = /^@@\s*(.*)$/.exec(line);
-      const contextHeader = headerMatch?.[1]?.trim() || undefined;
+      const contextHeader = headerMatch?.[1]?.trim() ?? undefined;
       currentHunk = { contextHeader, lines: [] };
       state = State.HUNK_BODY;
       continue;

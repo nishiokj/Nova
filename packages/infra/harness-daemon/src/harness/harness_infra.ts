@@ -126,7 +126,7 @@ export function createToolRegistry(config: FullHarnessConfig, workingDir: string
       },
       required: ['skill'],
       executor: (args) => Effect.sync(() => {
-        const skillName = String(args.skill ?? '').trim();
+        const skillName = (typeof args.skill === 'string' ? args.skill : '').trim();
         if (!skillName) {
           return errorResult('Skill', 'Skill name is required', 0);
         }

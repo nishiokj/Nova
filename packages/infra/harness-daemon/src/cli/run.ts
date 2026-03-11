@@ -80,6 +80,7 @@ interface PreparedRunInput {
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 0;
+const PREFLIGHT_SMOKE_ENV = 'AGENTLAB_PREFLIGHT_SMOKE';
 
 function usageText(message?: string): string {
   const body = `Usage: nova run (--input <prompt> | --input-file <path> | <input_path>) [<output_path>] [options]
@@ -111,6 +112,11 @@ ${body}` : body;
 
 function failUsage(message: string): never {
   throw new Error(usageText(message));
+}
+
+function envFlagEnabled(name: string): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
 function asNonEmptyString(value: unknown): string | undefined {
@@ -247,7 +253,7 @@ function parseRunArgs(rawArgs: string[]): RunCliOptions {
     } else if (arg === '--dangerous') {
       dangerous = true;
     } else if (arg === '--help' || arg === '-h') {
-      console.log(usageText());
+      process.stdout.write(`${usageText()}\n`);
       process.exit(0);
     } else {
       failUsage(`Unknown argument: ${arg}`);
@@ -381,7 +387,8 @@ function parseJsonFile(path: string, label: string): Record<string, unknown> {
     value = JSON.parse(raw);
   } catch (error) {
     throw new Error(
-      `Invalid JSON in ${label} (${path}): ${error instanceof Error ? error.message : String(error)}`
+      `Invalid JSON in ${label} (${path}): ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
     );
   }
   if (!isRecord(value)) {
@@ -420,7 +427,7 @@ function parseInputFile(path: string): { task: Record<string, unknown>; payload?
     }
     const prompt = raw.trim();
     if (!prompt) {
-      throw new Error(`Input file has no prompt content: ${path}`);
+      throw new Error(`Input file has no prompt content: ${path}`, { cause: jsonErr });
     }
     return {
       task: {
@@ -569,6 +576,11 @@ async function maybeSaveProviderKeys(
       apiKey: key,
     });
     if (!result.success) {
+      if (result.error === 'Provider management not configured') {
+        // Headless experiment runs may intentionally disable GraphD/auth-backed
+        // provider persistence and rely on process env fallback instead.
+        continue;
+      }
       throw new Error(
         `providers_save failed for ${mapping.provider}: ${result.error ?? 'unknown error'}`
       );
@@ -651,9 +663,9 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
         return;
       }
       if (event.type === 'llm_call') {
-        const promptTokens = (event.data?.promptTokens as number) ?? 0;
-        const completionTokens = (event.data?.completionTokens as number) ?? 0;
-        const reasoningTokens = (event.data?.reasoningTokens as number) ?? 0;
+        const promptTokens = event.data?.promptTokens ?? 0;
+        const completionTokens = event.data?.completionTokens ?? 0;
+        const reasoningTokens = event.data?.reasoningTokens ?? 0;
         const safePromptTokens = Number.isFinite(promptTokens) ? promptTokens : 0;
         const safeCompletionTokens = Number.isFinite(completionTokens) ? completionTokens : 0;
         const safeReasoningTokens = Number.isFinite(reasoningTokens) ? reasoningTokens : 0;
@@ -739,6 +751,41 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
       if (!setModel.success) {
         throw new Error(`model.set failed: ${setModel.error ?? 'unknown error'}`);
       }
+    }
+
+    if (envFlagEnabled(PREFLIGHT_SMOKE_ENV)) {
+      appendHookEvent({
+        event_type: 'agent_step_end',
+        budgets: {
+          steps: 1,
+          tokens_in: tokensIn,
+          tokens_out: tokensOut,
+          tool_calls: toolCallCount,
+        },
+      });
+
+      const output: AgentResult = {
+        schema_version: 'agent_result_v1',
+        ids,
+        outcome: 'success',
+        metrics: {
+          success: 1,
+          latency_ms: Date.now() - startedAt,
+          total_tokens: tokensIn + tokensOut,
+          tokens_in: tokensIn,
+          tokens_out: tokensOut,
+          turn_count: modelCallCount,
+          tool_call_count: toolCallCount,
+          preflight_smoke: 1,
+        },
+      };
+
+      if (options.outputPath) {
+        writeAgentResult(options.outputPath, output);
+      } else {
+        printAnswerFromResult(output);
+      }
+      return;
     }
 
     const requestId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;

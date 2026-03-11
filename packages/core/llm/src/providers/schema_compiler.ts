@@ -37,7 +37,7 @@ function transformChildValue(
   transform: (schema: JsonSchema) => JsonSchema
 ): unknown {
   if (Array.isArray(value)) {
-    return value.map((entry) => (isSchemaObject(entry) ? transform(entry) : entry));
+    return (value as unknown[]).map((entry) => (isSchemaObject(entry) ? transform(entry) : entry));
   }
 
   if (!isSchemaObject(value)) {
@@ -67,7 +67,7 @@ function normalizeForOpenAI(schema: JsonSchema): JsonSchema {
     const normalizedValue = transformChildValue(value, key, normalizeForOpenAI);
 
     if (mappedKey in result && Array.isArray(result[mappedKey]) && Array.isArray(normalizedValue)) {
-      result[mappedKey] = [...(result[mappedKey] as unknown[]), ...normalizedValue];
+      result[mappedKey] = [...(result[mappedKey] as unknown[]), ...(normalizedValue as unknown[])];
     } else {
       result[mappedKey] = normalizedValue;
     }
@@ -76,7 +76,7 @@ function normalizeForOpenAI(schema: JsonSchema): JsonSchema {
   return result;
 }
 
-function getConstType(value: unknown): JsonSchema['type'] | undefined {
+function getConstType(value: unknown): JsonSchema['type'] {
   if (value === null) return 'null';
   if (typeof value === 'string') return 'string';
   if (typeof value === 'boolean') return 'boolean';
@@ -232,7 +232,7 @@ function mergeAlternatives(options: JsonSchema[]): JsonSchema {
   }
 
   const enumValues = options
-    .flatMap((option) => (Array.isArray(option.enum) ? option.enum : []));
+    .flatMap((option) => (Array.isArray(option.enum) ? (option.enum as unknown[]) : []));
   if (enumValues.length > 0 && enumValues.length === options.reduce((n, option) => n + (Array.isArray(option.enum) ? option.enum.length : 0), 0)) {
     const mergedEnumValues = uniqueValues(enumValues);
     return withTypeList({ enum: mergedEnumValues }, getEnumTypes(mergedEnumValues));

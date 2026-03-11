@@ -9,7 +9,7 @@ import { runHarnessDaemon } from './harness/daemon.js';
 // Initialize profiler for daemon (enabled via PROFILE=1 env var)
 profiler.init('harness-daemon', './profile-daemon.json');
 
-runHarnessDaemon().catch((error) => {
+runHarnessDaemon().catch((error: unknown) => {
   console.error('[harness-daemon] fatal error:', error);
   process.exit(1);
 });

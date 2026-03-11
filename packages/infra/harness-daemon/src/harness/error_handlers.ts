@@ -81,7 +81,7 @@ export function classifyRecoverableError(
 
   // Retries exhausted errors
   if (error instanceof RetriesExhaustedError) {
-    const causeMessage = error.cause instanceof Error ? error.cause.message : String(error.cause ?? '');
+    const causeMessage = error.cause instanceof Error ? error.cause.message : (typeof error.cause === 'string' ? error.cause : '');
     return {
       userMessage: `⚠️ Request failed after ${error.attempts} attempts. Please wait a moment and try again. Your conversation has been saved.`,
       logLevel: 'warning',

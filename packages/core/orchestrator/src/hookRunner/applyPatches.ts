@@ -63,7 +63,7 @@ export function applyPatches(
   for (const patch of patches) {
     const validation = validatePatch(patch);
     if (!validation.valid) {
-      rejected.push({ patch, reason: validation.error! });
+      rejected.push({ patch, reason: validation.error ?? 'unknown validation error' });
       audit.push(createAuditEntry(source, `patch_rejected:${patch.op}`, { error: validation.error }));
       continue;
     }
@@ -185,14 +185,8 @@ function applyPatch(state: HookState, patch: StatePatch): void {
     }
 
     case 'increment_counter': {
-      const counter = patch.counter;
-      switch (counter) {
-        case 'realign':
-          state.realignCount++;
-          break;
-        default:
-          assertNever(counter);
-      }
+      // patch.counter is 'realign' (single variant)
+      state.realignCount++;
       break;
     }
 

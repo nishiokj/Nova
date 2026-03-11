@@ -156,7 +156,7 @@ export interface OrchestratorRuntime {
    * Optional lifecycle hook for wiring external subscriptions.
    * Return a cleanup function to run when execution ends.
    */
-  onStart?: (context: ContextWindow) => void | (() => void);
+  onStart?: (context: ContextWindow) => (() => void) | undefined;
   /**
    * Called each iteration with execution state.
    * May be sync or async.
@@ -776,10 +776,6 @@ export class Orchestrator {
       cancellation: message.cancellation,
     }, message.workItemId, this.requestId));
 
-    if (message.action !== 'cancel') {
-      return;
-    }
-
     const cancellation = message.cancellation ?? {
       requestedAt: Date.now(),
       requestedBy: source,
@@ -931,10 +927,10 @@ export class Orchestrator {
       if (hookParams?.isInternalHook && typeof handler === 'function') {
         yield* this.runHookHandler({
           handler: handler as (signal?: AbortSignal) => Promise<void>,
-          hookType: String(hookParams?.hookType ?? 'unknown'),
+          hookType: typeof hookParams.hookType === 'string' ? hookParams.hookType : 'unknown',
           workItemId: workId,
-          event: hookParams?.event,
-          hookContext: hookParams?.hookContext,
+          event: hookParams.event,
+          hookContext: hookParams.hookContext,
           contextWindow: context,
           signal: abortController?.signal,
         });
@@ -1013,7 +1009,7 @@ export class Orchestrator {
 
   private monitorControlQueue(runtime: OrchestratorRuntime, state: ExecutionState): Effect.Effect<never> {
     return Effect.gen(this, function* () {
-      while (true) {
+      for (;;) {
         yield* this.syncRuntimeControlState(runtime);
         if (this.isRunScopedCancellation(this.runtimeRunControl)) {
           const reason = this.runtimeRunControl.cancellation?.reason ?? 'Execution cancelled by runtime control';
@@ -1092,7 +1088,7 @@ export class Orchestrator {
           });
           continue;
         }
-        let agent: Agent | null = null;
+        let agent: Agent | null;
         try {
           agent = this.createAgent(item.agent, context);
         } catch (err) {
@@ -1145,7 +1141,8 @@ export class Orchestrator {
       const elapsed = getElapsedMs(state);
 
       if (runtime?.onIteration) {
-        yield* Effect.promise(() => Promise.resolve(runtime.onIteration!({
+        const onIteration = runtime.onIteration;
+        yield* Effect.promise(() => Promise.resolve(onIteration({
           iteration,
           context,
           totalToolCalls: state.totalToolCalls,
@@ -1278,7 +1275,7 @@ export class Orchestrator {
         const goalStateReached = structured?.goalStateReached === true || result.terminationReason === 'goal_state_reached';
 
         if (goalStateReached) {
-          this.log('info', 'Goal state reached', { workId, response: result.response?.slice(0, 100) });
+          this.log('info', 'Goal state reached', { workId, response: result.response.slice(0, 100) });
           this.completedWork.set(workId, result);
           this.mergeAgentResultContext(context, workId, result);
           state.inProgress.delete(workId);
@@ -1290,7 +1287,7 @@ export class Orchestrator {
             const stopResult = yield* this.callStopHook({
               context,
               terminationReason: 'goal_state_reached',
-              response: result.response ?? '',
+              response: result.response,
               iteration,
               agentType: item.agent,
               runtime,
@@ -1376,7 +1373,7 @@ export class Orchestrator {
 
               this.emit(createEvent('agent_progress', {
                 kind: 'work',
-                message: stopResult.systemMessage || `Control hook continuing (iteration ${iteration})`,
+                message: stopResult.systemMessage ?? `Control hook continuing (iteration ${iteration})`,
                 requestId: this.requestId,
               }));
 
@@ -1435,7 +1432,7 @@ export class Orchestrator {
         success: initialResult.success,
         response: initialResult.response,
         error: initialResult.error,
-        terminationReason: initialResult.terminationReason ?? 'agent_error',
+        terminationReason: initialResult.terminationReason,
         metrics: {
           iterations: state.iteration,
           totalLlmCalls: state.totalLlmCalls,
@@ -1564,7 +1561,7 @@ export class Orchestrator {
     // Get agent's budget from registry, fallback to orchestrator config
     let agentBudget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number } | undefined;
     try {
-      agentBudget = this.agentRegistry?.getConfig(agentType)?.budget;
+      agentBudget = this.agentRegistry?.getConfig(agentType).budget;
     } catch {
       // Agent not in registry, use orchestrator defaults
     }
@@ -1931,8 +1928,8 @@ export class Orchestrator {
       }
       case 'user_input_required': {
         if (!userPrompt) return null;
-        const firstQuestion = userPrompt.questions?.[0];
-        if (!firstQuestion?.question) return null;
+        const firstQuestion = userPrompt.questions[0];
+        if (!firstQuestion.question) return null;
         const options = firstQuestion.options?.map(option => {
           if (typeof option === 'string') {
             return { label: option };
@@ -1958,12 +1955,18 @@ export class Orchestrator {
           context.sessionKey,
           workId,
           errorType,
-          agentResult?.error ?? response ?? terminationReason,
+          agentResult?.error ?? response,
           metrics,
           undefined
         );
       }
-      default:
+      case 'user_stopped':
+      case 'rate_limit':
+      case 'circuit_open':
+      case 'timeout':
+      case 'refusal':
+      case 'observer_stopped':
+      case 'observer_work_item_stopped':
         return null;
     }
   }
@@ -2014,7 +2017,7 @@ export class Orchestrator {
     if (!runtime?.hookRegistry) return Effect.succeed(null);
 
     const effectiveWorkId = workId ?? this.initialWorkId;
-    const effectiveObjective = objective ?? response.slice(0, 160) ?? '';
+    const effectiveObjective = objective ?? response.slice(0, 160);
     const metrics = this.buildExecutionMetrics({
       result: agentResult,
       context,
@@ -2221,7 +2224,7 @@ export class Orchestrator {
 
       return {
         ...work,
-        goal: work.goal ?? work.objective,
+        goal: work.goal,
         bounds,
         dependencies: work.dependencies ?? [],
       };
@@ -2326,7 +2329,7 @@ export class Orchestrator {
       const actionIsContinue = structured?.action === 'continue';
 
       // --- User input needed (via PromptUser tool) ---
-      if (result.needsUserInput && result.userPrompt) {
+      if (result.needsUserInput) {
         return yield* this.handleUserInputRequired(params);
       }
 
@@ -2387,7 +2390,7 @@ export class Orchestrator {
           logMessage: 'Agent timeout',
           logMeta: { workId, error: result.error },
           fallbackResponse: 'Execution stopped: timeout',
-          error: result.error || 'timeout',
+          error: result.error ?? 'timeout',
         });
       }
 
@@ -2397,8 +2400,8 @@ export class Orchestrator {
           logLevel: 'error',
           logMessage: 'Agent error',
           logMeta: { workId, error: result.error },
-          emitGoalNotAchieved: result.error || 'agent_error',
-          error: result.error || 'Agent encountered an unexpected error',
+          emitGoalNotAchieved: result.error ?? 'agent_error',
+          error: result.error ?? 'Agent encountered an unexpected error',
         });
       }
 
@@ -2449,7 +2452,7 @@ export class Orchestrator {
       const stopResult = yield* this.callStopHook({
         context,
         terminationReason: reason,
-        response: result.response ?? '',
+        response: result.response,
         iteration,
         agentType,
         runtime,
@@ -2493,7 +2496,7 @@ export class Orchestrator {
         return this.createInterruptionResult(agentType);
       }
 
-      const firstPromptQuestion = result.userPrompt?.questions?.[0];
+      const firstPromptQuestion = result.userPrompt?.questions[0];
       this.log('info', 'Awaiting user input', {
         workId,
         question: firstPromptQuestion?.question,
@@ -2504,7 +2507,7 @@ export class Orchestrator {
       const stopResult = yield* this.callStopHook({
         context,
         terminationReason: 'user_input_required',
-        response: result.response ?? '',
+        response: result.response,
         iteration,
         agentType,
         runtime,
@@ -2522,7 +2525,7 @@ export class Orchestrator {
       return {
         terminal: this.createResult({
           success: false,
-          response: result.response ?? '',
+          response: result.response,
           userPrompt: result.userPrompt,
           terminationReason: 'user_input_required',
           metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
@@ -2549,7 +2552,7 @@ export class Orchestrator {
         const stopResult = yield* this.callStopHook({
           context,
           terminationReason: reason,
-          response: result.response ?? '',
+          response: result.response,
           iteration,
           agentType,
           runtime,
@@ -2581,7 +2584,7 @@ export class Orchestrator {
 
             this.emit(createEvent('agent_progress', {
               kind: 'work',
-              message: stopResult.systemMessage || `Control hook continuing on ${reason} (iteration ${iteration})`,
+              message: stopResult.systemMessage ?? `Control hook continuing on ${reason} (iteration ${iteration})`,
               requestId: this.requestId,
             }));
 
@@ -2598,12 +2601,12 @@ export class Orchestrator {
         }
       }
 
-      this.emitGoalNotAchieved(goal, result.error || reason, 1);
+      this.emitGoalNotAchieved(goal, result.error ?? reason, 1);
       return {
         terminal: this.createResult({
           success: false,
           response: result.response,
-          error: result.error || reason,
+          error: result.error ?? reason,
           terminationReason: reason,
           metrics: { iterations: iteration, totalLlmCalls, totalToolCalls, durationMs: now - startTime },
         }),
@@ -2625,7 +2628,7 @@ export class Orchestrator {
       const stopResult = yield* this.callStopHook({
         context,
         terminationReason: 'max_tool_calls_exceeded',
-        response: result.response ?? '',
+        response: result.response,
         iteration,
         agentType,
         runtime,

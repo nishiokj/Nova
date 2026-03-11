@@ -14,7 +14,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const PROJECT_ROOT = join(__dirname, '../../../')
+const PROJECT_ROOT = join(__dirname, '../../../../')
 const MIGRATIONS_DIR = join(__dirname, '../src/db/migrations')
 
 async function loadEnvFile(path: string): Promise<void> {

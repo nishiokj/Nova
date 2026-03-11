@@ -57,7 +57,7 @@ export async function executeWebSearch(
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
   const startTime = Date.now();
-  const query = String(args.query ?? '').trim();
+  const query = (typeof args.query === 'string' ? args.query : '').trim();
 
   if (!query) {
     return errorResult('Search query is required', startTime);
@@ -178,7 +178,7 @@ function parseStringArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.map(String).filter(Boolean);
   if (typeof value === 'string') {
     try {
-      const parsed = JSON.parse(value);
+      const parsed: unknown = JSON.parse(value);
       if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean);
     } catch {
       return value.trim() ? [value.trim()] : [];

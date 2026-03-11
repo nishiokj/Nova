@@ -9,7 +9,7 @@ import path from 'node:path';
 import { Effect } from 'effect';
 import type { ContextWindow } from 'context';
 import { createEvent } from 'types';
-import type { WorkItem } from 'types';
+import type { WorkItem, MessageItem } from 'types';
 import type { EventEmitCallback, InternalHookQueue, InternalHookContext } from './types.js';
 
 // ── Interface ────────────────────────────────────────────────────────
@@ -67,7 +67,7 @@ interface CacheEntry {
 const CONCEPT_INTENTS = new Set(['decision', 'preference', 'principle', 'tradeoff', 'recall']);
 
 function extractUserMessages(ctx: ContextWindow, limit = 3): string[] {
-  return (ctx.getItemsByType('message'))
+  return ctx.getItemsByType<MessageItem>('message')
     .filter(m => m.role === 'user')
     .map(m => {
       if (typeof m.content === 'string') return m.content;
@@ -108,9 +108,10 @@ export class MemoryBridge {
     return Effect.gen(this, function* () {
       // Recent conversations (first iteration only)
       let recent: string | null = null;
-      if (this.injector.injectRecentConversations && iteration === 0) {
+      const injectRecent = this.injector.injectRecentConversations;
+      if (injectRecent && iteration === 0) {
         recent = yield* Effect.tryPromise({
-          try: () => this.injector.injectRecentConversations!({ limit: 10, maxTokens: 600 }),
+          try: () => injectRecent({ limit: 10, maxTokens: 600 }),
           catch: () => null as never,
         }).pipe(Effect.catchAll(() => Effect.succeed(null)));
       }
@@ -125,7 +126,7 @@ export class MemoryBridge {
   }
 
   private buildQuery(workItem: WorkItem, globalContext: ContextWindow): string {
-    const parts = workItem?.objective ? [workItem.objective] : [];
+    const parts = workItem.objective ? [workItem.objective] : [];
     parts.push(...extractUserMessages(globalContext));
     return parts.join(' ').slice(0, 500);
   }
@@ -138,7 +139,7 @@ export class MemoryBridge {
     iteration: number,
   ): Effect.Effect<string | null, Error> {
     const query = this.buildQuery(workItem, globalContext);
-    const eventQuery = this.injector.summarizeQueryPlan?.(query) || query;
+    const eventQuery = this.injector.summarizeQueryPlan?.(query) ?? query;
     const queryKey = eventQuery.trim().replace(/\s+/g, ' ').toLowerCase();
     const cacheKey = workItem.workId || this.deps.sessionKey || 'default';
     const hookCtx = this.hookContext(workItem);
@@ -154,7 +155,8 @@ export class MemoryBridge {
       return Effect.succeed(cached.content);
     }
 
-    if (!shouldFetch || !this.injector.injectEvidence) {
+    const injectEvidence = this.injector.injectEvidence;
+    if (!shouldFetch || !injectEvidence) {
       const empty: CacheEntry = { queryKey, query, content: null, itemCount: 0 };
       this.cache.set(cacheKey, empty);
       this.emitInjected(workItem.workId, hookCtx, eventQuery, empty, iteration, taskContext);
@@ -168,7 +170,7 @@ export class MemoryBridge {
       );
 
       const result = yield* Effect.tryPromise({
-        try: () => this.injector.injectEvidence!({
+        try: () => injectEvidence({
           task: {
             objective: workItem.objective,
             recentMessages,
@@ -187,14 +189,14 @@ export class MemoryBridge {
         catch: (e) => e instanceof Error ? e : new Error(String(e)),
       });
 
-      const content = result?.content || null;
+      const content = result?.content ?? null;
       const entry: CacheEntry = {
         queryKey, query, content,
-        itemCount: result?.atoms?.length ?? 0,
-        latencyMs: result?.metrics?.latencyMs,
-        coverage: result?.metrics?.coverage,
-        discriminatorsIncluded: result?.metrics?.discriminatorsIncluded,
-        totalTokens: result?.metrics?.totalTokens,
+        itemCount: result?.atoms.length ?? 0,
+        latencyMs: result?.metrics.latencyMs,
+        coverage: result?.metrics.coverage,
+        discriminatorsIncluded: result?.metrics.discriminatorsIncluded,
+        totalTokens: result?.metrics.totalTokens,
         trainingSignal: result?.trainingSignal,
       };
       this.cache.set(cacheKey, entry);

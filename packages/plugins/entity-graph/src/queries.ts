@@ -6,7 +6,18 @@
  */
 
 import type { Sql } from 'postgres'
-import type { Entity, EntityKind, EdgeType, GraphStats } from './types.js'
+import type {
+  Entity,
+  EntityKind,
+  EdgeType,
+  GraphStats,
+  IndexedTestCase,
+  IndexedTestCaseAssertion,
+  IndexedTestCaseCall,
+  IndexedTestCaseImport,
+  IndexedTestCaseMock,
+  IndexedTestCaseSeamOverride,
+} from './types.js'
 
 // --- Row type from Postgres ---
 
@@ -433,7 +444,10 @@ export async function boundaries(
         SELECT COUNT(DISTINCT imp.filepath)
         FROM entity_graph.imports i
         JOIN entity_graph.entities imp ON imp.id = i.importer_id
-        WHERE i.imported_id = e.id AND imp.filepath != e.filepath
+        JOIN entity_graph.entities target_file ON target_file.id = i.imported_id
+        WHERE target_file.filepath = e.filepath
+          AND i.symbol = e.name
+          AND imp.filepath != e.filepath
       ) AS fan_in
     FROM entity_graph.entities e
     WHERE e.exported = true
@@ -445,7 +459,10 @@ export async function boundaries(
                 WHERE c.callee_id = e.id AND caller.filepath != e.filepath)
         OR EXISTS (SELECT 1 FROM entity_graph.imports i
                    JOIN entity_graph.entities imp ON imp.id = i.importer_id
-                   WHERE i.imported_id = e.id AND imp.filepath != e.filepath)
+                   JOIN entity_graph.entities target_file ON target_file.id = i.imported_id
+                   WHERE target_file.filepath = e.filepath
+                     AND i.symbol = e.name
+                     AND imp.filepath != e.filepath)
       )
     ORDER BY fan_in DESC, e.filepath, e.start_line
   `
@@ -562,9 +579,13 @@ export async function testFilesFor(
     WHERE tf.kind = 'file'
       AND (
         tf.filepath LIKE '%.test.ts'
+        OR tf.filepath LIKE '%.test.tsx'
         OR tf.filepath LIKE '%.spec.ts'
+        OR tf.filepath LIKE '%.spec.tsx'
         OR tf.filepath LIKE '%.test.js'
+        OR tf.filepath LIKE '%.test.jsx'
         OR tf.filepath LIKE '%.spec.js'
+        OR tf.filepath LIKE '%.spec.jsx'
         OR tf.filepath LIKE '%/__tests__/%'
         OR tf.filepath LIKE '%test_%'
       )
@@ -579,6 +600,162 @@ export async function testFilesFor(
       )
   `
   return rows.map(rowToEntity)
+}
+
+export interface IndexedTestFactsBundle {
+  testCases: IndexedTestCase[]
+  testCaseImports: IndexedTestCaseImport[]
+  testCaseCalls: IndexedTestCaseCall[]
+  testCaseAssertions: IndexedTestCaseAssertion[]
+  testCaseMocks: IndexedTestCaseMock[]
+  testCaseSeamOverrides: IndexedTestCaseSeamOverride[]
+}
+
+export async function indexedTestFactsForFiles(
+  sql: Sql,
+  filepaths: string[],
+): Promise<IndexedTestFactsBundle> {
+  if (filepaths.length === 0) {
+    return {
+      testCases: [],
+      testCaseImports: [],
+      testCaseCalls: [],
+      testCaseAssertions: [],
+      testCaseMocks: [],
+      testCaseSeamOverrides: [],
+    }
+  }
+
+  const testCases = await sql<Array<{
+    id: string
+    filepath: string
+    name: string
+    line_start: number
+    line_end: number
+  }>>`
+    SELECT id, filepath, name, line_start, line_end
+    FROM entity_graph.test_cases
+    WHERE filepath = ANY(${filepaths})
+    ORDER BY filepath ASC, line_start ASC, line_end ASC
+  `
+
+  const testCaseIds = testCases.map(row => row.id)
+  if (testCaseIds.length === 0) {
+    return {
+      testCases: [],
+      testCaseImports: [],
+      testCaseCalls: [],
+      testCaseAssertions: [],
+      testCaseMocks: [],
+      testCaseSeamOverrides: [],
+    }
+  }
+
+  const [testCaseImports, testCaseCalls, testCaseAssertions, testCaseMocks, testCaseSeamOverrides] = await Promise.all([
+    sql<Array<{
+      test_case_id: string
+      local_name: string
+      imported_name: string
+      resolved_path: string | null
+      is_prod: boolean
+    }>>`
+      SELECT test_case_id, local_name, imported_name, resolved_path, is_prod
+      FROM entity_graph.test_case_imports
+      WHERE test_case_id = ANY(${testCaseIds})
+      ORDER BY test_case_id ASC, local_name ASC, imported_name ASC
+    `,
+    sql<Array<{
+      test_case_id: string
+      kind: string
+      symbol: string
+      resolved_path: string | null
+      line: number
+    }>>`
+      SELECT test_case_id, kind, symbol, resolved_path, line
+      FROM entity_graph.test_case_calls
+      WHERE test_case_id = ANY(${testCaseIds})
+      ORDER BY test_case_id ASC, line ASC
+    `,
+    sql<Array<{
+      test_case_id: string
+      kind: string
+      target_symbol: string | null
+      resolved_path: string | null
+      line: number
+    }>>`
+      SELECT test_case_id, kind, target_symbol, resolved_path, line
+      FROM entity_graph.test_case_assertions
+      WHERE test_case_id = ANY(${testCaseIds})
+      ORDER BY test_case_id ASC, line ASC
+    `,
+    sql<Array<{
+      test_case_id: string
+      kind: string
+      api: string
+      target: string | null
+      line: number
+    }>>`
+      SELECT test_case_id, kind, api, target, line
+      FROM entity_graph.test_case_mocks
+      WHERE test_case_id = ANY(${testCaseIds})
+      ORDER BY test_case_id ASC, line ASC
+    `,
+    sql<Array<{
+      test_case_id: string
+      kind: string
+      target: string
+      line: number
+    }>>`
+      SELECT test_case_id, kind, target, line
+      FROM entity_graph.test_case_seam_overrides
+      WHERE test_case_id = ANY(${testCaseIds})
+      ORDER BY test_case_id ASC, line ASC
+    `,
+  ])
+
+  return {
+    testCases: testCases.map(row => ({
+      id: row.id,
+      filepath: row.filepath,
+      name: row.name,
+      lineStart: row.line_start,
+      lineEnd: row.line_end,
+    })),
+    testCaseImports: testCaseImports.map(row => ({
+      testCaseId: row.test_case_id,
+      localName: row.local_name,
+      importedName: row.imported_name,
+      resolvedPath: row.resolved_path,
+      isProd: row.is_prod,
+    })),
+    testCaseCalls: testCaseCalls.map(row => ({
+      testCaseId: row.test_case_id,
+      kind: row.kind as IndexedTestCaseCall['kind'],
+      symbol: row.symbol,
+      resolvedPath: row.resolved_path,
+      line: row.line,
+    })),
+    testCaseAssertions: testCaseAssertions.map(row => ({
+      testCaseId: row.test_case_id,
+      kind: row.kind as IndexedTestCaseAssertion['kind'],
+      targetSymbol: row.target_symbol,
+      resolvedPath: row.resolved_path,
+      line: row.line,
+    })),
+    testCaseMocks: testCaseMocks.map(row => ({
+      testCaseId: row.test_case_id,
+      kind: row.kind as IndexedTestCaseMock['kind'],
+      api: row.api,
+      target: row.target,
+      line: row.line,
+    })),
+    testCaseSeamOverrides: testCaseSeamOverrides.map(row => ({
+      testCaseId: row.test_case_id,
+      kind: row.kind as IndexedTestCaseSeamOverride['kind'],
+      target: row.target,
+      line: row.line,
+    })),
+  }
 }
 
 /**

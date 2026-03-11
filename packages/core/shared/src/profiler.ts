@@ -68,7 +68,7 @@ class Profiler {
     // Record startup event so we always have at least one event
     this.instant('profiler:init', 'profiler', 'g', { processName });
 
-    console.log(`[profiler] Enabled for ${processName}, output: ${this.outputPath}`);
+    console.warn(`[profiler] Enabled for ${processName}, output: ${this.outputPath}`);
   }
 
   /** High-resolution timestamp in microseconds */
@@ -209,18 +209,22 @@ class Profiler {
 
   /** Create a method decorator for tracing */
   traceMethod(category = 'method'): MethodDecorator {
-    const profiler = this;
-    return function (_target, propertyKey, descriptor: PropertyDescriptor) {
-      const original = descriptor.value;
+    type AnyFn = (...args: unknown[]) => unknown;
+
+    // Arrow function captures `this` (Profiler instance) via lexical scope
+    return (_target, propertyKey, descriptor: PropertyDescriptor) => {
+      const original = descriptor.value as AnyFn;
       const name = String(propertyKey);
 
       if (original.constructor.name === 'AsyncFunction') {
-        descriptor.value = async function (...args: unknown[]) {
-          return profiler.traceAsync(name, () => original.apply(this, args), category);
+        const traceAsync = this.traceAsync.bind(this);
+        descriptor.value = function (this: unknown, ...args: unknown[]) {
+          return traceAsync(name, () => original.apply(this, args) as Promise<unknown>, category);
         };
       } else {
-        descriptor.value = function (...args: unknown[]) {
-          return profiler.trace(name, () => original.apply(this, args), category);
+        const traceFn = this.trace.bind(this);
+        descriptor.value = function (this: unknown, ...args: unknown[]) {
+          return traceFn(name, () => original.apply(this, args), category);
         };
       }
       return descriptor;
@@ -253,7 +257,7 @@ class Profiler {
     try {
       const fs = await import('fs/promises');
       await fs.writeFile(this.outputPath, json, 'utf-8');
-      console.log(`[profiler] Wrote ${this.events.length} events to ${this.outputPath}`);
+      console.warn(`[profiler] Wrote ${this.events.length} events to ${this.outputPath}`);
     } catch (error) {
       console.error('[profiler] Failed to write profile:', error);
     }
@@ -265,7 +269,7 @@ class Profiler {
       return;
     }
     if (this.events.length === 0) {
-      console.log(`[profiler] No events to write for ${this.processName}`);
+      console.warn(`[profiler] No events to write for ${this.processName}`);
       return;
     }
 
@@ -274,7 +278,7 @@ class Profiler {
 
     try {
       writeFileSync(this.outputPath, json, 'utf-8');
-      console.log(`[profiler] Wrote ${this.events.length} events to ${this.outputPath}`);
+      console.warn(`[profiler] Wrote ${this.events.length} events to ${this.outputPath}`);
     } catch (error) {
       console.error('[profiler] Failed to write profile:', error);
     }

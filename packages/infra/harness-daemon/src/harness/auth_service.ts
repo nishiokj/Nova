@@ -147,7 +147,7 @@ export class AuthService {
             res.end(this.errorPage(result.error ?? 'Authentication failed'));
           }
         })
-        .catch((err) => {
+        .catch((err: unknown) => {
           res.writeHead(500, { 'Content-Type': 'text/html' });
           res.end(this.errorPage(err instanceof Error ? err.message : 'Internal error'));
         });
@@ -737,8 +737,8 @@ export function createAuthServiceFromConfig(
     return null;
   }
 
-  const host = authConfig.host ?? '127.0.0.1';
-  const port = authConfig.port ?? 9556;
+  const host = authConfig.host;
+  const port = authConfig.port;
   const graphdDbPath = authConfig.graphd_db_path ?? join(homedir(), '.graphd', 'graphd.db');
   const masterKeyPath = authConfig.master_key_path ?? join(homedir(), '.config', 'harness', 'master.key');
   const redirectUri = authConfig.google_redirect_uri ?? `http://${host}:${port}/auth/google/callback`;

@@ -65,7 +65,7 @@ function normalizeUsage(usageData: unknown, options: NormalizeUsageOptions): Tok
   const completionTokens = readRequiredToken(usage, options.completionTokenKey);
   const reasoningTokens = extractReasoningTokens(usage);
   const rawTotalTokens = readOptionalToken(usage, options.totalTokenKey);
-  const totalTokens = rawTotalTokens !== undefined ? rawTotalTokens : promptTokens + completionTokens;
+  const totalTokens = rawTotalTokens ?? (promptTokens + completionTokens);
 
   const cachedTokens = extractCachedPromptTokens(usage);
 

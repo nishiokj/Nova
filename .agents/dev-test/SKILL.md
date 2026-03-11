@@ -46,47 +46,52 @@ Compute this path at the start of every invocation. This is the shared interface
 
 ---
 
-## Phase 0: Structural Analysis via Test Health
+## Phase 0: Read the Project Index
 
-Before doing anything else, use the **test-health system** to understand the target's structure. This is the foundation for all subsequent phases.
+Before doing anything else, check for the **project index** — the mechanically-derived structural foundation. Boundaries, dependencies, call trees, env vars, and readiness verdicts are all extracted from the AST by the entity graph parser. No LLM judgment involved.
 
-### 0.1 Check for entity graph availability
+### 0.1 Load the project index
 
-If the project has an entity graph database (check for `DATABASE_URL` or `TEST_DATABASE_URL` env var), use the `test-health` CLI or the TestHealthModule API to gather structural data:
+Check for `<health_dir>/project-index.json`.
+
+**If it exists**, read it. The index contains everything you need for test writing:
+
+1. **`boundaries[]`** — every exported function/class/method with external callers, ordered by fan-in (most-imported first). Each boundary includes:
+   - `deps[]` with status (`wirable` / `blocked` / `unknown`) and test substitution details (setup/inspect/teardown)
+   - `envVars[]` with status (`covered` / `defaulted` / `unmapped`)
+   - `callTree` with assertion points (`injected === true` nodes = cross-module calls on injected dependencies)
+   - `testFiles[]` that already import this boundary's module
+   - `readiness` verdict (`ready` / `blocked` / `unknown`) and `blockers[]` list
+
+2. **`summary`** — total boundaries, tested/ready/blocked/unknown counts
+
+3. **`testInfrastructure`** — framework and test file list
+
+4. **`unresolved[]`** — things the AST parser couldn't extract (gaps in mechanical coverage)
+
+Use this data directly. Do NOT re-discover what the index already tells you.
+
+**If the index doesn't exist**, tell the user to generate it:
 
 ```bash
-# What are the testable boundaries?
-test-health boundaries <target-filepath> --json
-
-# What does this boundary depend on? How to wire it?
-test-health deps <entity-id> --json
-
-# What's the call tree? Where are the assertion points?
-test-health tree <entity-id> --json
-
-# What env vars does it need?
-test-health env <entity-id> --json
-
-# What's untested?
-test-health gaps <target-filepath> --json
+test-health index > <health_dir>/project-index.json
+# or filtered to a specific file:
+test-health index packages/core/agent/src/agent.ts > <health_dir>/project-index.json
 ```
 
-### 0.2 Use test-health output to guide your work
+### 0.2 Interpret the index for test planning
 
-The test-health system tells you:
+From the index:
 
-1. **Boundaries** — the exported functions/classes with external callers. These are your test targets. Prioritize by fan-in (most-imported first).
+1. **Test targets** = boundaries where `readiness === 'ready'` and `hasTests === false`. These are untested but fully wirable. Start here.
 
-2. **Dependencies** — what each boundary needs to run. Each dep has a status:
-   - `wirable` — a test substitute exists in `test-health.yaml`. Use it. The registry provides setup/inspect/teardown code.
-   - `blocked` — no substitute, and the registry explicitly marks it as a blocker. **Stop.** Report the blocker to the user. Do NOT mock it.
-   - `unknown` — no registry entry. Flag it for the developer to add. Do NOT mock it.
+2. **Dependency wiring** = for each target, use `deps[].substitution` to set up test doubles. The registry provides `setup` / `inspect` / `teardown` code. If a dep is `blocked` or `unknown`, stop and tell the user — do NOT mock it.
 
-3. **Call tree** — the functions reachable from the boundary. Cross-module calls on injected dependencies are your **assertion points** — places where data persists beyond the return value.
+3. **Assertion points** = call tree nodes where `injected === true`. These are cross-module calls on injected dependencies — places where data persists beyond the return value. After the boundary runs, inspect these.
 
-4. **Env vars** — environment variables read in the call tree. Covered vars have test defaults. Unmapped vars are blockers.
+4. **Env var setup** = env vars with status `covered` have test defaults via `coveredBy`. Vars with status `defaulted` have a `default` value. `unmapped` vars are blockers.
 
-5. **Readiness verdict** — `ready` means all deps are wirable and all env vars are covered. `blocked` means at least one dependency cannot be satisfied in tests.
+5. **Priority** = sort targets by `fanIn` descending. High fan-in boundaries are imported by many files — bugs there have the widest blast radius.
 
 ### 0.3 Check for mutation testing report
 
@@ -112,7 +117,7 @@ Also check if a health report exists at `<health_dir>/report.json`.
 
 2. **Survived mutations**: Read their `gap` descriptions. Each tells you what property is unverified. Write tests that close those gaps.
 
-**If no entity graph or report exists**, proceed with manual discovery from Phase 1.
+**If no index or report exists**, proceed with manual discovery from Phase 1.
 
 ---
 
@@ -120,12 +125,15 @@ Also check if a health report exists at `<health_dir>/report.json`.
 
 Before writing a single test, understand the behavioral surface. Do NOT skip this phase. Use Glob, Grep, and Read to actually examine the code.
 
-**If you have test-health data from Phase 0**, use it to accelerate discovery:
-- Boundaries from test-health = your public interface
-- Call tree = your data flow map
-- Deps = your architectural boundaries
+**If you have the project index from Phase 0**, your structural discovery is done:
+- `index.boundaries` = your public interface (already prioritized by fan-in)
+- `boundary.callTree` = your data flow maps (with assertion points marked)
+- `boundary.deps` = your architectural boundaries (with wiring instructions)
+- `boundary.testFiles` = what's already exercised
 
-**If working without test-health**, manually identify:
+Focus discovery on reading the actual source code of each boundary to understand behavioral contracts — error behaviors, ordering, idempotency, atomicity — what the AST can't tell you.
+
+**If working without the project index**, manually identify:
 
 ### 1.1 Identify the public interface
 

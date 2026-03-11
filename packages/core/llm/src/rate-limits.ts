@@ -152,8 +152,11 @@ export function createRateLimitError(
   // Parse the error message
   let errorMessage = responseText;
   try {
-    const parsed = JSON.parse(responseText);
-    errorMessage = parsed?.error?.message ?? parsed?.message ?? responseText;
+    const parsed = JSON.parse(responseText) as Record<string, unknown>;
+    const error = parsed.error as Record<string, unknown> | undefined;
+    errorMessage = (typeof error?.message === 'string' ? error.message : undefined)
+      ?? (typeof parsed.message === 'string' ? parsed.message : undefined)
+      ?? responseText;
   } catch {
     // Keep original text
   }

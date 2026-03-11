@@ -5,7 +5,7 @@
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import { profiler } from 'shared';
-import type { BusClientMessage, BusServerMessage, BusMessage } from './bus_types.js';
+import type { BusClientMessage, BusServerMessage } from './bus_types.js';
 
 export interface BusClientOptions {
   host: string;
@@ -29,15 +29,16 @@ export class BusClient extends EventEmitter {
     if (this.connected) return;
 
     const url = `ws://${this.host}:${this.port}`;
-    this.ws = new WebSocket(url);
+    const ws = new WebSocket(url);
+    this.ws = ws;
 
     await new Promise<void>((resolve, reject) => {
-      this.ws!.once('error', reject);
-      this.ws!.once('open', () => resolve());
+      ws.once('error', reject);
+      ws.once('open', () => resolve());
     });
 
     this.connected = true;
-    this.ws.on('message', (data: WebSocket.RawData) => this.handleMessage(String(data)));
+    this.ws.on('message', (data: WebSocket.RawData) => this.handleMessage(Buffer.from(data as Buffer).toString('utf-8')));
     this.ws.on('close', () => this.handleClose());
     this.ws.on('error', (error) => {
       this.emit('error', { message: 'bus_client_error', detail: String(error) });
@@ -76,20 +77,15 @@ export class BusClient extends EventEmitter {
 
   private handleMessage(data: string): void {
     profiler.begin('bus.client.parse', 'bus');
-    let message: BusMessage;
+    let message: BusServerMessage;
     try {
-      message = JSON.parse(data) as BusMessage;
+      message = JSON.parse(data) as BusServerMessage;
     } catch (error) {
       profiler.end('bus.client.parse', 'bus');
       this.emit('error', { message: 'invalid_json', detail: String(error) });
       return;
     }
     profiler.end('bus.client.parse', 'bus');
-
-    if (!message || typeof message !== 'object' || !('type' in message)) {
-      this.emit('error', { message: 'invalid_message', detail: data });
-      return;
-    }
 
     profiler.begin(`bus.client.emit:${message.type}`, 'bus');
     switch (message.type) {
@@ -101,9 +97,6 @@ export class BusClient extends EventEmitter {
         this.emit('error', { message: message.message, detail: message.detail });
         profiler.end(`bus.client.emit:${message.type}`, 'bus');
         return;
-      default:
-        profiler.end(`bus.client.emit:${message.type}`, 'bus');
-        this.emit('error', { message: 'unexpected_message', detail: message });
     }
   }
 

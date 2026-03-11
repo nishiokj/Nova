@@ -63,7 +63,7 @@ export type AgentEventType = AgentCoreEventType | OrchestratorEventType;
 /**
  * Event agent type identifiers.
  */
-export type AgentType = CoreAgentType | 'orchestrator';
+export type AgentType = CoreAgentType;
 
 // ============================================
 // RUN CONTROL TYPES
@@ -160,7 +160,7 @@ export function eventToDict(event: AgentEvent): Record<string, unknown> {
     session_key: event.sessionKey ?? null,
     run_id: event.runId ?? null,
     work_item_id: event.workItemId ?? null,
-    data: event.data ?? {},
+    data: event.data,
   };
 }
 
@@ -502,19 +502,19 @@ export interface GitCommitData {
  * Data for run_control_requested event.
  * Emitted when cancel is requested.
  */
-export interface RunControlRequestedEventData extends RunControlRequestedData {}
+export type RunControlRequestedEventData = RunControlRequestedData;
 
 /**
  * Data for run_control_applied event.
  * Emitted after run control has been applied and quiesced.
  */
-export interface RunControlAppliedEventData extends RunControlAppliedData {}
+export type RunControlAppliedEventData = RunControlAppliedData;
 
 /**
  * Data for run_control_rejected event.
  * Emitted when a control request cannot be safely applied.
  */
-export interface RunControlRejectedEventData extends RunControlRejectedData {}
+export type RunControlRejectedEventData = RunControlRejectedData;
 
 // ============================================
 // EVENT CALLBACK TYPE

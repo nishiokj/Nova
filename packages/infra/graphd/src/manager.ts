@@ -1151,6 +1151,7 @@ export class GraphDManager {
   /**
    * Get a user preference value.
    */
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
   getUserPreference<T = unknown>(key: string): T | null {
     if (!this.store) return null;
     try {

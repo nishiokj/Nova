@@ -68,16 +68,12 @@ export class OpenAIProvider implements LLMProviderAdapter {
           Stream.fromAsyncIterable(
             {
               [Symbol.asyncIterator]: async function* () {
-                while (true) {
-                  const next = await generator.next();
-                  if (next.done) {
-                    if (next.value) {
-                      params.onComplete?.(next.value);
-                    }
-                    return;
-                  }
+                let next = await generator.next();
+                while (!next.done) {
                   yield next.value;
+                  next = await generator.next();
                 }
+                params.onComplete?.(next.value);
               },
             },
             (error) => toLLMExecutionError(error, 'openai', context.config.model)
@@ -182,7 +178,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
 
     body.input = this.normalizeInput(params.messages);
     const inputArray = body.input as Record<string, unknown>[];
-    if (!inputArray || inputArray.length === 0) {
+    if (inputArray.length === 0) {
       logger.error('OpenAI request has no input items', {
         method: 'respond',
         endpoint: '/v1/responses',
@@ -259,8 +255,8 @@ export class OpenAIProvider implements LLMProviderAdapter {
       data = await this.pollForCompletion(resolved, responseId, logger);
     } else if (status === 'failed' || status === 'cancelled' || status === 'incomplete') {
       const error = data.error as Record<string, unknown> | undefined;
-      const errorMessage = error?.message ?? `Response ${status}`;
-      const errorCode = error?.code ?? 'unknown';
+      const errorMessage = typeof error?.message === 'string' ? error.message : `Response ${status}`;
+      const errorCode = typeof error?.code === 'string' ? error.code : 'unknown';
       logger.error(`OpenAI immediate ${status}`, {
         method: 'respond',
         endpoint: '/v1/responses',
@@ -274,7 +270,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
     const outputText = this.parseOutputText(data);
     const toolCalls = this.parseToolCalls(data);
 
-    const finalStatus = (data.status as string) ?? 'completed';
+    const finalStatus = (data.status as string | undefined) ?? 'completed';
     const stopReasonMap: Record<string, StopReason> = {
       completed: 'end_turn',
       failed: 'end_turn',
@@ -291,7 +287,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
       stopReason,
       usage,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      model: (data.model as string) ?? resolved.model,
+      model: (data.model as string | undefined) ?? resolved.model,
       durationMs: Date.now() - context.startTime,
       responseId: data.id as string | undefined,
     };
@@ -361,8 +357,8 @@ export class OpenAIProvider implements LLMProviderAdapter {
 
       if (status === 'failed' || status === 'cancelled' || status === 'incomplete') {
         const error = data.error as Record<string, unknown> | undefined;
-        const errorMessage = error?.message ?? `Response ${status}`;
-        const errorCode = error?.code ?? 'unknown';
+        const errorMessage = typeof error?.message === 'string' ? error.message : `Response ${status}`;
+        const errorCode = typeof error?.code === 'string' ? error.code : 'unknown';
         logger.error(`OpenAI response ${status}`, {
           method: 'pollForCompletion',
           endpoint: `/v1/responses/${responseId}`,
@@ -514,9 +510,9 @@ export class OpenAIProvider implements LLMProviderAdapter {
     let buffer = '';
 
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      let readResult = await reader.read();
+      while (!readResult.done) {
+        const { value } = readResult;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
@@ -583,13 +579,14 @@ export class OpenAIProvider implements LLMProviderAdapter {
                   toolCalls.push(...parsedCalls.filter((call) => !!call.name));
                 }
                 usage = normalizeResponsesApiUsage(responseObj.usage);
-                model = (responseObj.model as string) ?? model;
+                model = (responseObj.model as string | undefined) ?? model;
               }
             }
           } catch {
             // Skip malformed events
           }
         }
+        readResult = await reader.read();
       }
     } catch (streamError) {
       const cause = streamError instanceof Error ? streamError : new Error(String(streamError));
@@ -636,7 +633,6 @@ export class OpenAIProvider implements LLMProviderAdapter {
       typeof name === 'string' && /^[A-Za-z0-9_-]+$/.test(name);
 
     for (const msg of messages) {
-      if (!msg) continue;
       const item = msg as unknown as Record<string, unknown>;
       const callId = (item.call_id ?? item.id ?? item.callId) as string;
 
@@ -652,8 +648,8 @@ export class OpenAIProvider implements LLMProviderAdapter {
         let args = item.arguments;
         if (codexName === 'apply_patch' && typeof args === 'string') {
           try {
-            const parsed = JSON.parse(args);
-            if (parsed && typeof parsed === 'object' && typeof parsed.input === 'string') {
+            const parsed = JSON.parse(args) as Record<string, unknown>;
+            if (typeof parsed.input === 'string') {
               args = parsed.input;
             }
           } catch {
@@ -747,7 +743,6 @@ export class OpenAIProvider implements LLMProviderAdapter {
 
     let content = '';
     for (const item of output) {
-      if (!item || typeof item !== 'object') continue;
       const itemType = item.type as string | undefined;
 
       if (itemType === 'message') {
@@ -761,7 +756,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
         for (const block of contentBlocks) {
           const blockType = block.type as string | undefined;
           if (blockType === 'output_text' || blockType === 'text') {
-            content += (block.text as string) ?? '';
+            content += (block.text as string | undefined) ?? '';
           } else if (blockType === 'output_json' || blockType === 'json') {
             const jsonPayload = (block.json as Record<string, unknown> | undefined)
               ?? (block.output as Record<string, unknown> | undefined);
@@ -769,14 +764,14 @@ export class OpenAIProvider implements LLMProviderAdapter {
               content += JSON.stringify(jsonPayload);
             }
           } else if (blockType === 'refusal') {
-            content += (block.refusal as string) ?? '';
+            content += (block.refusal as string | undefined) ?? '';
           }
         }
         continue;
       }
 
       if (itemType === 'output_text' || itemType === 'text') {
-        content += (item.text as string) ?? '';
+        content += (item.text as string | undefined) ?? '';
         continue;
       }
 
@@ -790,7 +785,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
       }
 
       if (itemType === 'refusal') {
-        content += (item.refusal as string) ?? '';
+        content += (item.refusal as string | undefined) ?? '';
       }
     }
 
@@ -826,7 +821,7 @@ export class OpenAIProvider implements LLMProviderAdapter {
       let args: Record<string, unknown> = {};
       if (typeof argsRaw === 'string' && argsRaw.length > 0) {
         try {
-          const parsed = JSON.parse(argsRaw);
+          const parsed = JSON.parse(argsRaw) as unknown;
           if (parsed && typeof parsed === 'object') {
             args = parsed as Record<string, unknown>;
           }
@@ -846,8 +841,6 @@ export class OpenAIProvider implements LLMProviderAdapter {
     };
 
     for (const item of output) {
-      if (!item || typeof item !== 'object') continue;
-
       if (item.type === 'function_call') {
         const callId = (item.call_id ?? item.id) as string;
         const name = item.name as string;

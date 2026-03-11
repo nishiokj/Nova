@@ -38,7 +38,7 @@ export async function runCodexOAuthFlow(callbacks: OAuthFlowCallbacks): Promise<
 
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
-      void handleOAuthCallback(req, res).catch((err) => {
+      void handleOAuthCallback(req, res).catch((err: unknown) => {
         // Catch double-faults (e.g. response write fails inside the inner catch)
         if (!res.headersSent) {
           try { res.writeHead(500); res.end('Internal error'); } catch { /* connection closed */ }

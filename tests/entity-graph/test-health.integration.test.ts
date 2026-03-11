@@ -9,7 +9,7 @@
 
 import postgres, { type Sql } from 'postgres'
 import { SCHEMA_DDL } from 'entity-graph/schema.js'
-import { TestHealthModule, parseRegistryYaml } from 'entity-graph/test-health.js'
+import { TestHealthModule, parseRegistryYaml, loadRegistry } from 'entity-graph/test-health.js'
 import type { SubstitutionRegistry, BoundaryInfo, ReadinessVerdict, GapReport } from 'entity-graph/test-health.js'
 import { callTreeFrom, boundaries, envVarsInTree, depsOf, testFilesFor } from 'entity-graph/queries.js'
 import type { CallTreeRow, BoundaryRow, EnvVarRow, DepRow } from 'entity-graph/queries.js'
@@ -201,6 +201,41 @@ substitutions:
 `
     const registry = parseRegistryYaml(yaml)
     expect(registry.substitutions.Cache.prod.type).toBe('RedisCache')
+  })
+
+  test('preserves inspect field in test entries', () => {
+    const yaml = `
+version: 1
+
+substitutions:
+  Database:
+    prod:
+      type: PostgresDatabase
+      module: src/infra/postgres.ts
+      env: [DATABASE_URL]
+    test:
+      type: SQLiteMemory
+      module: src/infra/sqlite-memory.ts
+      env: []
+      setup: |
+        const db = new SQLiteMemory()
+      inspect: |
+        return await db.query("SELECT COUNT(*) FROM users")
+      teardown: |
+        await db.close()
+`
+    const registry = parseRegistryYaml(yaml)
+    expect(registry.substitutions.Database.test?.inspect).toContain('SELECT COUNT(*)')
+  })
+})
+
+describe('loadRegistry', () => {
+  test('returns empty registry for nonexistent file', async () => {
+    const registry = await loadRegistry('/tmp/this-file-absolutely-does-not-exist-12345.yaml')
+    expect(registry.version).toBe(1)
+    expect(registry.substitutions).toEqual({})
+    expect(registry.envDefaults).toEqual({})
+    expect(registry.testPatterns).toEqual([])
   })
 })
 
@@ -1033,6 +1068,155 @@ substitutions:
       const report = await mod.gaps()
       expect(report.totalBoundaries).toBe(1)
       expect(report.tested).toBe(0)
+    })
+  })
+
+  // --- Resolution logic gap tests ---
+
+  describe('depsFor() — resolution edge cases', () => {
+    test('resolves dep via prod.type fallback when key name differs', async () => {
+      // Registry key is "Database", but the dep paramType is "PostgresDatabase" (the prod.type)
+      await insertEntity(sql, { id: 'function:src/svc.ts:run', kind: 'function', name: 'run', filepath: 'src/svc.ts', startLine: 1, endLine: 30, exported: true })
+      await insertFunctionDep(sql, 'function:src/svc.ts:run', 'db', 'PostgresDatabase', 0)
+
+      const yamlWithProdType = `
+version: 1
+substitutions:
+  Database:
+    prod:
+      type: PostgresDatabase
+      module: src/infra/postgres.ts
+      env: [DATABASE_URL]
+    test:
+      type: SQLiteMemory
+      module: src/infra/sqlite-memory.ts
+      env: []
+`
+      const mod = createModule(yamlWithProdType)
+      const deps = await mod.depsFor('function:src/svc.ts:run')
+      expect(deps).toHaveLength(1)
+      expect(deps[0].status).toBe('wirable')
+      expect(deps[0].substitution?.testType).toBe('SQLiteMemory')
+    })
+
+    test('returns unknown for dep with null paramType', async () => {
+      await insertEntity(sql, { id: 'function:src/svc.ts:run', kind: 'function', name: 'run', filepath: 'src/svc.ts', startLine: 1, endLine: 30, exported: true })
+      await insertFunctionDep(sql, 'function:src/svc.ts:run', 'opts', null, 0)
+
+      const mod = createModule(REGISTRY_YAML)
+      const deps = await mod.depsFor('function:src/svc.ts:run')
+      expect(deps).toHaveLength(1)
+      expect(deps[0].paramName).toBe('opts')
+      expect(deps[0].paramType).toBeNull()
+      expect(deps[0].status).toBe('unknown')
+    })
+
+    test('forwards setup, inspect, and teardown from registry', async () => {
+      await insertEntity(sql, { id: 'function:src/svc.ts:run', kind: 'function', name: 'run', filepath: 'src/svc.ts', startLine: 1, endLine: 30, exported: true })
+      await insertFunctionDep(sql, 'function:src/svc.ts:run', 'db', 'Database', 0)
+
+      const yamlWithSnippets = `
+version: 1
+substitutions:
+  Database:
+    prod:
+      type: PostgresDatabase
+      module: src/infra/postgres.ts
+      env: []
+    test:
+      type: SQLiteMemory
+      module: src/infra/sqlite-memory.ts
+      env: []
+      setup: |
+        const db = new SQLiteMemory()
+      inspect: |
+        return await db.query("SELECT 1")
+      teardown: |
+        await db.close()
+`
+      const mod = createModule(yamlWithSnippets)
+      const deps = await mod.depsFor('function:src/svc.ts:run')
+      expect(deps[0].substitution?.setup).toContain('new SQLiteMemory()')
+      expect(deps[0].substitution?.inspect).toContain('SELECT 1')
+      expect(deps[0].substitution?.teardown).toContain('await db.close()')
+    })
+  })
+
+  describe('envVarsFor() — resolution priority', () => {
+    test('prod.env coverage takes priority over env_defaults', async () => {
+      // DATABASE_URL is in both prod.env AND env_defaults — prod.env must win
+      await insertEntity(sql, { id: 'function:src/a.ts:a', kind: 'function', name: 'a', filepath: 'src/a.ts', startLine: 1, endLine: 10, exported: true })
+      await insertEnvRead(sql, 'function:src/a.ts:a', 'DATABASE_URL', 'src/a.ts', 3, 'process.env')
+
+      const yamlWithBothCoverage = `
+version: 1
+substitutions:
+  Database:
+    prod:
+      type: PostgresDatabase
+      module: src/infra/postgres.ts
+      env: [DATABASE_URL]
+    test:
+      type: SQLiteMemory
+      module: src/infra/sqlite-memory.ts
+      env: []
+env_defaults:
+  DATABASE_URL: postgres://localhost/fallback
+`
+      const mod = createModule(yamlWithBothCoverage)
+      const envVars = await mod.envVarsFor('function:src/a.ts:a')
+      expect(envVars).toHaveLength(1)
+      expect(envVars[0].status).toBe('covered')
+      expect(envVars[0].coveredBy).toBe('Database')
+    })
+  })
+
+  describe('readiness() — compound scenarios', () => {
+    test('reports both wirable and unknown deps correctly', async () => {
+      await insertEntity(sql, { id: 'function:src/svc.ts:run', kind: 'function', name: 'run', filepath: 'src/svc.ts', startLine: 1, endLine: 30, exported: true })
+      await insertFunctionDep(sql, 'function:src/svc.ts:run', 'db', 'Database', 0)
+      await insertFunctionDep(sql, 'function:src/svc.ts:run', 'logger', 'CustomLogger', 1)
+
+      const mod = createModule(REGISTRY_YAML)
+      const verdict = await mod.readiness('function:src/svc.ts:run')
+
+      expect(verdict.ready).toBe(false)
+      // db is wirable, logger is unknown → one blocker
+      const dbDep = verdict.deps.find(d => d.paramName === 'db')
+      expect(dbDep?.status).toBe('wirable')
+      const loggerDep = verdict.deps.find(d => d.paramName === 'logger')
+      expect(loggerDep?.status).toBe('unknown')
+      expect(verdict.blockers).toHaveLength(1)
+      expect(verdict.blockers[0]).toContain('logger')
+      expect(verdict.blockers[0]).toContain('CustomLogger')
+    })
+  })
+
+  describe('getRegistry() — caching', () => {
+    test('returns the same registry instance on repeated calls', async () => {
+      const mod = createModule(REGISTRY_YAML)
+      const reg1 = await mod.getRegistry()
+      const reg2 = await mod.getRegistry()
+      expect(reg1).toBe(reg2) // same reference, not just equal
+    })
+  })
+
+  describe('gaps() — filepath filtering', () => {
+    test('passes filepath filter through to boundaries', async () => {
+      // Two boundaries in different files
+      await insertEntity(sql, { id: 'function:src/a.ts:a', kind: 'function', name: 'a', filepath: 'src/a.ts', startLine: 1, endLine: 10, exported: true })
+      await insertEntity(sql, { id: 'function:src/b.ts:b', kind: 'function', name: 'b', filepath: 'src/b.ts', startLine: 1, endLine: 10, exported: true })
+      await insertEntity(sql, { id: 'function:src/caller.ts:c', kind: 'function', name: 'c', filepath: 'src/caller.ts', startLine: 1, endLine: 10 })
+      await insertCall(sql, 'function:src/caller.ts:c', 'function:src/a.ts:a')
+      await insertCall(sql, 'function:src/caller.ts:c', 'function:src/b.ts:b')
+
+      const mod = createModule(REGISTRY_YAML)
+      const allGaps = await mod.gaps()
+      expect(allGaps.totalBoundaries).toBe(2)
+
+      const filteredGaps = await mod.gaps('src/a.ts')
+      expect(filteredGaps.totalBoundaries).toBe(1)
+      expect(filteredGaps.boundaries[0].entity.filepath).toBe('src/a.ts')
     })
   })
 })

@@ -124,4 +124,65 @@ CREATE TABLE IF NOT EXISTS entity_graph.function_deps (
   position    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_eg_fn_deps_function ON entity_graph.function_deps(function_id);
+
+-- Persisted test-block facts for skeptic/test-health dossier construction
+CREATE TABLE IF NOT EXISTS entity_graph.test_cases (
+  id          TEXT PRIMARY KEY,
+  filepath    TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  line_start  INTEGER NOT NULL,
+  line_end    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eg_test_cases_filepath ON entity_graph.test_cases(filepath);
+
+CREATE TABLE IF NOT EXISTS entity_graph.test_case_imports (
+  test_case_id   TEXT NOT NULL,
+  local_name     TEXT NOT NULL,
+  imported_name  TEXT NOT NULL,
+  resolved_path  TEXT,
+  is_prod        BOOLEAN NOT NULL DEFAULT FALSE,
+  PRIMARY KEY (test_case_id, local_name, imported_name)
+);
+CREATE INDEX IF NOT EXISTS idx_eg_test_case_imports_case ON entity_graph.test_case_imports(test_case_id);
+CREATE INDEX IF NOT EXISTS idx_eg_test_case_imports_path ON entity_graph.test_case_imports(resolved_path);
+
+CREATE TABLE IF NOT EXISTS entity_graph.test_case_calls (
+  id            SERIAL PRIMARY KEY,
+  test_case_id  TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  symbol        TEXT NOT NULL,
+  resolved_path TEXT,
+  line          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eg_test_case_calls_case ON entity_graph.test_case_calls(test_case_id);
+CREATE INDEX IF NOT EXISTS idx_eg_test_case_calls_path ON entity_graph.test_case_calls(resolved_path);
+
+CREATE TABLE IF NOT EXISTS entity_graph.test_case_assertions (
+  id            SERIAL PRIMARY KEY,
+  test_case_id  TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  target_symbol TEXT,
+  resolved_path TEXT,
+  line          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eg_test_case_assertions_case ON entity_graph.test_case_assertions(test_case_id);
+
+CREATE TABLE IF NOT EXISTS entity_graph.test_case_mocks (
+  id            SERIAL PRIMARY KEY,
+  test_case_id  TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  api           TEXT NOT NULL,
+  target        TEXT,
+  line          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eg_test_case_mocks_case ON entity_graph.test_case_mocks(test_case_id);
+
+CREATE TABLE IF NOT EXISTS entity_graph.test_case_seam_overrides (
+  id            SERIAL PRIMARY KEY,
+  test_case_id  TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  target        TEXT NOT NULL,
+  line          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eg_test_case_seams_case ON entity_graph.test_case_seam_overrides(test_case_id);
 `

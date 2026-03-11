@@ -106,7 +106,7 @@ export class HarnessClient extends EventEmitter {
       return true;
     }, this.requestTimeout);
 
-    this.bus.on('event', (payload, channel) => {
+    this.bus.on('event', (payload: unknown, channel: string) => {
       this.handleBusEvent(payload, channel);
     });
     this.bus.on('error', (payload) => {

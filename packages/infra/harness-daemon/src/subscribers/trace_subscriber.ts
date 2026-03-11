@@ -56,7 +56,7 @@ export class TraceSubscriber {
     this.repoRoot = repoRoot;
 
     this.unsubscribeToolCall = eventBus.subscribe('tool_call', (event) =>
-      this.handleToolCallEvent(event)
+      this.handleToolCallEvent(event as AgentEvent<ToolCallData>)
     );
   }
 
@@ -112,10 +112,12 @@ export class TraceSubscriber {
     let oldContent: string | undefined;
 
     if (normalizedToolName === 'Write') {
-      newContent = (args.content as string) ?? '';
+      newContent = typeof args.content === 'string' ? args.content : '';
     } else {
-      oldContent = ((args.old_string ?? args.oldString) as string) ?? undefined;
-      newContent = ((args.new_string ?? args.newString) as string) ?? '';
+      const rawOld = args.old_string ?? args.oldString;
+      oldContent = typeof rawOld === 'string' ? rawOld : undefined;
+      const rawNew = args.new_string ?? args.newString;
+      newContent = typeof rawNew === 'string' ? rawNew : '';
     }
 
     const contentHash = createHash('sha256').update(newContent).digest('hex');

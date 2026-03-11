@@ -49,7 +49,7 @@ export function getTerminationCategory(reason: TerminationReason): TerminationCa
     case 'observer_work_item_stopped':
       return 'observer';
     default:
-      return assertNever(reason, `Unknown termination reason: ${reason}`);
+      return assertNever(reason, `Unknown termination reason: ${reason as string}`);
   }
 }
 
