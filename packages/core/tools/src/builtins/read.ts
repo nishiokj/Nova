@@ -28,8 +28,8 @@ export async function executeRead(
     return errorResult('Read', 'file_path parameter is required. Provide the path to the file you want to read.', 0);
   }
   const cwd = context?.workdirOverride ?? process.cwd();
-  const encoding = (args.encoding as BufferEncoding) ?? 'utf-8';
-  const maxBytes = (args.maxBytes as number) ?? 100000;
+  const encoding = (typeof args.encoding === 'string' ? args.encoding : 'utf-8') as BufferEncoding;
+  const maxBytes = typeof args.maxBytes === 'number' ? args.maxBytes : 100000;
   const startLine = typeof args.startLine === 'number' ? args.startLine : undefined;
   const endLine = typeof args.endLine === 'number' ? args.endLine : undefined;
 
@@ -65,7 +65,7 @@ export async function executeRead(
         if (bytesRead >= maxBytes) break;
       }
 
-      content = buffer.slice(0, bytesRead).toString(encoding);
+      content = buffer.subarray(0, bytesRead).toString(encoding);
       content += `\n...[truncated, file size: ${fileSize} bytes]`;
     } else {
       content = await readFile(resolvedPath, { encoding });

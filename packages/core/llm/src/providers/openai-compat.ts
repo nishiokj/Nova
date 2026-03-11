@@ -9,9 +9,11 @@ import type {
   TokenUsage,
   StopReason,
   LLMResponse,
+  LLMItem,
   RespondParams,
   StreamParams,
   LLMExecutionError,
+  ContentBlock,
 } from 'types';
 import { Effect, Stream } from 'effect';
 import type { ProviderContext, LLMProviderAdapter } from './types.js';
@@ -136,7 +138,7 @@ class ThinkTagFilter {
 function separateThinkTags(text: string): { content: string; reasoning: string } {
   let reasoning = '';
   // First pass: strip paired <think>...</think> blocks
-  let cleaned = text.replace(/<think>([\s\S]*?)<\/think>/g, (_, inner) => {
+  let cleaned = text.replace(/<think>([\s\S]*?)<\/think>/g, (_, inner: string) => {
     reasoning += inner;
     return '';
   });
@@ -255,12 +257,10 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
           Stream.fromAsyncIterable(
             {
               [Symbol.asyncIterator]: async function* () {
-                while (true) {
+                for (;;) {
                   const next = await generator.next();
                   if (next.done) {
-                    if (next.value) {
-                      params.onComplete?.(next.value);
-                    }
+                    params.onComplete?.(next.value);
                     return;
                   }
                   yield next.value;
@@ -282,7 +282,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
 
     return tools.map((t) => {
       const qwenHint = useQwenSkin
-        ? `\nQwen tool call syntax: <function=${t.name}>{\"arg\":\"value\"}</function>`
+        ? `\nQwen tool call syntax: <function=${t.name}>{"arg":"value"}</function>`
         : '';
 
       return {
@@ -300,7 +300,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     });
   }
 
-  formatMessages(messages: any[], systemPrompt?: string): Record<string, unknown>[] {
+  formatMessages(messages: LLMItem[], systemPrompt?: string): Record<string, unknown>[] {
     const result: Record<string, unknown>[] = [];
 
     if (systemPrompt) {
@@ -312,7 +312,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     let pendingReasoningContent = '';
 
     for (const msg of messages) {
-      if (!msg || msg.role === 'system') continue;
+      if (msg.role === 'system') continue;
       const item = msg as unknown as Record<string, unknown>;
 
       // Handle reasoning items (GLM-4.7 thinking traces)
@@ -388,9 +388,9 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
 
       const textParts: string[] = [];
       const toolCalls: Record<string, unknown>[] = [];
+      const blocks = msg.content as ContentBlock[];
 
-      for (const block of msg.content) {
-        if (!block) continue;
+      for (const block of blocks) {
         if (block.type === 'text') {
           textParts.push(block.text);
         } else if (block.type === 'tool_use') {
@@ -406,7 +406,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
           result.push({
             role: 'tool',
             tool_call_id: block.toolUseId,
-            content: block.content ?? '',
+            content: block.content,
           });
         }
       }
@@ -453,7 +453,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       // Attach pending reasoning content to final assistant message
       if (pendingReasoningContent) {
         assistantMsg.reasoning_content = pendingReasoningContent;
-        pendingReasoningContent = '';
+        pendingReasoningContent = ''; // eslint-disable-line no-useless-assignment -- reset for next iteration
       }
       result.push(assistantMsg);
     }
@@ -494,8 +494,8 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     const useQwenSkin = params.tools && params.tools.length > 0
       && this.shouldUseQwenToolSkin(resolved.model, resolved.displayProvider);
 
-    if (useQwenSkin) {
-      const qwenHint = this.buildQwenToolSkinInstruction(params.tools!);
+    if (useQwenSkin && params.tools) {
+      const qwenHint = this.buildQwenToolSkinInstruction(params.tools);
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${qwenHint}` : qwenHint;
     }
 
@@ -639,29 +639,29 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     };
 
     const choice = data.choices[0];
-    const rawMessageContent = choice?.message?.content as unknown;
+    const rawMessageContent = choice.message.content as unknown;
     const rawContent = this.normalizeContent(rawMessageContent);
     // Separate <think> blocks from content — Qwen/DeepSeek emit reasoning in content tags
     const { content: strippedContent, reasoning: thinkReasoning } = separateThinkTags(rawContent);
     const content = strippedContent;
-    const reasoningContent = choice?.message?.reasoning_content ?? (thinkReasoning || undefined);
+    const reasoningContent = choice.message.reasoning_content ?? (thinkReasoning || undefined);
 
     logger.debug('OpenAI-compat response received', {
       model: resolved.model,
-      finishReason: choice?.finish_reason,
+      finishReason: choice.finish_reason,
       hasContent: !!content,
-      contentLength: content?.length ?? 0,
-      contentPreview: content?.slice(0, 200),
-      hasToolCalls: !!choice?.message?.tool_calls,
-      toolCallCount: choice?.message?.tool_calls?.length ?? 0,
+      contentLength: content.length,
+      contentPreview: content.slice(0, 200),
+      hasToolCalls: !!choice.message.tool_calls,
+      toolCallCount: choice.message.tool_calls?.length ?? 0,
     });
 
     const toolCalls: ToolCall[] = [];
-    if (choice?.message?.tool_calls) {
+    if (choice.message.tool_calls) {
       for (const tc of choice.message.tool_calls) {
-        let args: Record<string, unknown> = {};
+        let args: Record<string, unknown>;
         try {
-          args = JSON.parse(tc.function.arguments);
+          args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
         } catch {
           args = {};
         }
@@ -679,11 +679,12 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
 
     if (toolCalls.length === 0 && content) {
       // Parse tool calls from content before stripping tags
-      toolCalls.push(...this.parseToolCallsFromContent(content));
-      if (toolCalls.length > 0) {
+      const recovered = this.parseToolCallsFromContent(content);
+      if (recovered.length > 0) {
+        toolCalls.push(...recovered);
         logger.debug('Recovered tool calls from text content', {
           model: resolved.model,
-          recoveredCount: toolCalls.length,
+          recoveredCount: recovered.length,
         });
       }
     }
@@ -698,7 +699,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       content_filter: 'end_turn',
     };
     let stopReason: StopReason =
-      stopReasonMap[choice?.finish_reason ?? 'stop'] ?? 'end_turn';
+      stopReasonMap[choice.finish_reason] ?? 'end_turn';
     if (toolCalls.length > 0 && stopReason === 'end_turn') {
       stopReason = 'tool_use';
     }
@@ -710,7 +711,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       stopReason,
       usage,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      model: data.model ?? resolved.model,
+      model: data.model,
       durationMs: Date.now() - context.startTime,
       reasoningContent,
     };
@@ -744,8 +745,8 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     const useQwenSkin = params.tools && params.tools.length > 0
       && this.shouldUseQwenToolSkin(resolved.model, resolved.displayProvider);
 
-    if (useQwenSkin) {
-      const qwenHint = this.buildQwenToolSkinInstruction(params.tools!);
+    if (useQwenSkin && params.tools) {
+      const qwenHint = this.buildQwenToolSkinInstruction(params.tools);
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${qwenHint}` : qwenHint;
     }
 
@@ -874,7 +875,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     // Profile stream consumption (reading all SSE events)
     const streamAsyncId = profiler.asyncBegin('llm:stream:consume', 'http');
     try {
-      while (true) {
+      for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -929,7 +930,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
             const choice = event.choices?.[0];
             if (choice) {
               // Stream reasoning content (z.ai-coder thinking trace)
-              if (choice.delta?.reasoning_content) {
+              if (choice.delta.reasoning_content) {
                 const reasoningChunk = choice.delta.reasoning_content;
                 fullReasoningContent += reasoningChunk;
                 logger.debug('Received reasoning chunk', {
@@ -982,16 +983,17 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
                 }
               }
 
-              if (choice.delta?.tool_calls) {
+              if (choice.delta.tool_calls) {
                 for (const tc of choice.delta.tool_calls) {
-                  if (!toolCallBuilders.has(tc.index)) {
-                    toolCallBuilders.set(tc.index, {
+                  let builder = toolCallBuilders.get(tc.index);
+                  if (!builder) {
+                    builder = {
                       id: tc.id ?? '',
                       name: tc.function?.name ?? '',
                       arguments: '',
-                    });
+                    };
+                    toolCallBuilders.set(tc.index, builder);
                   }
-                  const builder = toolCallBuilders.get(tc.index)!;
                   if (tc.id) builder.id = tc.id;
                   if (tc.function?.name) builder.name = tc.function.name;
                   if (tc.function?.arguments) builder.arguments += tc.function.arguments;
@@ -1048,9 +1050,9 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       // Convert partial tool call builders to tool calls for error recovery
       const partialToolCalls: ToolCall[] = [];
       for (const builder of toolCallBuilders.values()) {
-        let args: Record<string, unknown> = {};
+        let args: Record<string, unknown>;
         try {
-          args = JSON.parse(builder.arguments);
+          args = JSON.parse(builder.arguments) as Record<string, unknown>;
         } catch {
           args = {};
         }
@@ -1083,9 +1085,9 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     if (toolCallBuilders.size > 0) {
       for (const builder of toolCallBuilders.values()) {
         if (!builder.name) continue;
-        let args: Record<string, unknown> = {};
+        let args: Record<string, unknown>;
         try {
-          args = JSON.parse(builder.arguments);
+          args = JSON.parse(builder.arguments) as Record<string, unknown>;
         } catch {
           args = {};
         }
@@ -1099,11 +1101,12 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
 
     // Parse tool calls from raw content (which still has <tool_call> tags intact)
     if (toolCalls.length === 0 && rawContentForParsing) {
-      toolCalls.push(...this.parseToolCallsFromContent(rawContentForParsing));
-      if (toolCalls.length > 0) {
+      const recovered = this.parseToolCallsFromContent(rawContentForParsing);
+      if (recovered.length > 0) {
+        toolCalls.push(...recovered);
         logger.debug('Recovered streamed tool calls from text content', {
           model: resolved.model,
-          recoveredCount: toolCalls.length,
+          recoveredCount: recovered.length,
         });
       }
     }
@@ -1145,11 +1148,10 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
   }
 
   private buildQwenToolSkinInstruction(tools: ToolDefinition[]): string {
-    const exampleTool = tools.find((t) => t && typeof t.name === 'string' && t.name.length > 0);
+    const exampleTool = tools.find((t) => t.name.length > 0);
     const toolName = exampleTool?.name ?? 'Read';
-    const argName = exampleTool?.parameters?.required?.[0]
-      ?? Object.keys(exampleTool?.parameters?.properties ?? {})[0]
-      ?? 'path';
+    const argName = exampleTool?.parameters.required[0]
+      ?? Object.keys(exampleTool?.parameters.properties ?? {})[0];
     const argValue = argName.toLowerCase().includes('path')
       ? 'packages/core/agent/src/agent.ts'
       : 'value';
@@ -1159,7 +1161,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       'When you need a tool, emit a tool-call block directly.',
       'Use this exact shape:',
       '<tool_call>',
-      `<function=${toolName}>{\"${argName}\":\"${argValue}\"}</function>`,
+      `<function=${toolName}>{"${argName}":"${argValue}"}</function>`,
       '</tool_call>',
       'Do not output only prose about calling tools.',
     ].join('\n');
@@ -1284,11 +1286,11 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
 
   private parseFunctionTagToolCalls(content: string): { name: string; arguments: Record<string, unknown> }[] {
     const calls: { name: string; arguments: Record<string, unknown> }[] = [];
-    const fnRegex = /<function=([A-Za-z0-9_.\-\/]+)>\s*([\s\S]*?)\s*<\/function>/gi;
+    const fnRegex = /<function=([A-Za-z0-9_./-]+)>\s*([\s\S]*?)\s*<\/function>/gi;
     let match: RegExpExecArray | null;
 
     while ((match = fnRegex.exec(content)) !== null) {
-      const name = (match[1] ?? '').trim();
+      const name = match[1].trim();
       if (!name) continue;
       const args = this.normalizeToolArguments(match[2]);
       calls.push({ name, arguments: args });
@@ -1316,9 +1318,9 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
     let foundArg = false;
     let argMatch: RegExpExecArray | null;
     while ((argMatch = argRegex.exec(trimmed)) !== null) {
-      const key = argMatch[1]?.trim();
+      const key = argMatch[1].trim();
       if (!key) continue;
-      args[key] = this.parseLooseValue(argMatch[2] ?? '');
+      args[key] = this.parseLooseValue(argMatch[2]);
       foundArg = true;
     }
 
@@ -1364,11 +1366,11 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
   }
 
   private pushUniqueToolCall(calls: ToolCall[], call: ToolCall): void {
-    const serializedArgs = JSON.stringify(call.arguments ?? {});
+    const serializedArgs = JSON.stringify(call.arguments);
     const exists = calls.some(
       (candidate) =>
         candidate.name === call.name &&
-        JSON.stringify(candidate.arguments ?? {}) === serializedArgs
+        JSON.stringify(candidate.arguments) === serializedArgs
     );
     if (!exists) {
       calls.push(call);
@@ -1410,7 +1412,7 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
 
   private tryParseJsonObject(value: string): Record<string, unknown> | null {
     try {
-      const parsed = JSON.parse(value);
+      const parsed: unknown = JSON.parse(value);
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
       return parsed as Record<string, unknown>;
     } catch {

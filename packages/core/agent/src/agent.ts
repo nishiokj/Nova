@@ -7,7 +7,7 @@
 
 import path from 'node:path';
 import { Effect, Stream } from 'effect';
-import type { LLMAdapter, Message, LLMRequestConfig, LLMResponse } from 'llm';
+import type { LLMAdapter, LLMRequestConfig, LLMResponse } from 'llm';
 import {
   resilientCall,
   RateLimitError,
@@ -20,6 +20,7 @@ import {
 } from 'llm';
 import { getAgentPrompt } from './prompts.js';
 import { MemoryBridge } from './memory-bridge.js';
+import type { MemoryInjector } from './memory-bridge.js';
 import type { ToolRegistry } from 'tools';
 import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema, ContextItem, ArtifactItem, LLMItem, ContentBlock } from 'types';
 import { isLLMMessageItem, isLLMFunctionCallItem, isLLMFunctionCallOutputItem } from 'types';
@@ -52,16 +53,6 @@ const MAX_SCHEMA_REMINDER_RETRIES = 3;
 type AgentAction = 'done' | 'continue';
 
 const QUESTION_CLEANUP_REGEX = /```[\s\S]*?```|`[^`]*`/g;
-const BOUNDS_TERMINATION_REASONS = new Set([
-  'max_iterations_exceeded',
-  'max_tool_calls_exceeded',
-  'max_duration_exceeded',
-]);
-
-function isBoundsTerminationReason(reason: string | undefined): boolean {
-  return typeof reason === 'string' && BOUNDS_TERMINATION_REASONS.has(reason);
-}
-
 function inferUserPromptFromResponse(responseText?: string): UserPromptInfo | null {
   if (!responseText) return null;
 
@@ -193,7 +184,7 @@ export class Agent {
     hooks?: AgentHooks;
     internalHookQueue?: InternalHookQueue;
     getModelSelection?: (agentType: string) => ModelSelection | null;
-    memoryInjector?: import('./memory-bridge.js').MemoryInjector;
+    memoryInjector?: MemoryInjector;
   }) {
     this.config = config;
     this.llm = runtime.llm;
@@ -246,12 +237,12 @@ export class Agent {
       };
     }
 
-    const state = runControl?.control?.state;
+    const state = runControl?.control.state;
     if (state === 'cancelling' || state === 'cancelled') {
       return {
         action: 'stop',
         source: 'run_control',
-        reason: runControl?.control?.cancellation?.reason ?? 'Execution cancelled by runtime control',
+        reason: runControl?.control.cancellation?.reason ?? 'Execution cancelled by runtime control',
         terminationReason: 'user_stopped',
       };
     }
@@ -294,7 +285,7 @@ export class Agent {
       toolCallsMade: metrics.toolCallsMade,
       llmCallsMade: metrics.llmCallsMade,
       hasResponse,
-      terminationReason: result.terminationReason || undefined,
+      terminationReason: result.terminationReason ?? undefined,
     }, this.buildHookContext(workItem));
   }
 
@@ -320,9 +311,14 @@ export class Agent {
     return null;
   }
 
+  /** Tracks whether the last agent-level compaction was a no-op */
+  private _lastAgentCompactWasNoop = false;
+
   /**
-   * Compact context if near full and rebuild localReadFiles tracking.
-   * Handles both LLM-assisted compaction and fallback basic compaction.
+   * Deep-compact context when critically full.
+   * The ContextWindow's internal _maybeAutoCompact handles routine compaction
+   * at 50% with generous limits. This is the emergency tier at 80% with tighter
+   * limits, and includes a no-op guard to prevent compaction storms.
    */
   private compactIfNeeded(
     localContext: ContextWindow,
@@ -330,12 +326,26 @@ export class Agent {
     workItem: WorkItem
   ): Effect.Effect<void> {
     return Effect.sync(() => {
-      if (!localContext.isNearFull(0.5)) return;
+      if (!localContext.isNearFull(0.80)) {
+        this._lastAgentCompactWasNoop = false;
+        return;
+      }
 
-      localContext.compact({
+      // If last compaction recovered nothing, don't burn cycles scanning again
+      if (this._lastAgentCompactWasNoop) return;
+
+      const result = localContext.compact({
         deduplicateByPath: true,
-        truncateOutputsTo: 4000,
+        truncateOutputsTo: 2000,
+        maxFileContentCount: 15,
+        maxFunctionCallCount: 60,
+        maxFunctionCallOutputCount: 60,
       });
+
+      if (result.itemsRemoved === 0 && result.outputsTruncated === 0) {
+        this._lastAgentCompactWasNoop = true;
+        return;
+      }
 
       // Rebuild localReadFiles from compacted context
       localReadFiles.clear();
@@ -364,7 +374,7 @@ export class Agent {
     iteration: number,
     maxIterations: number
   ): Effect.Effect<{
-    messages: Record<string, unknown>[];
+    messages: LLMItem[];
     tools: ToolDefinition[] | undefined;
     toolChoice: 'none' | 'auto' | 'required' | undefined;
   }> {
@@ -435,7 +445,7 @@ export class Agent {
       result.needsUserInput = true;
       result.userPrompt = {
         questions: [{
-          question: responseText || contentFallback || structuredFallback || 'Waiting for your response...',
+          question: responseText ?? contentFallback,
         }],
       };
       result.terminationReason = 'user_input_required';
@@ -454,7 +464,7 @@ export class Agent {
 
     const shouldInferUserPrompt = action !== 'done' || structuredOutput?.goalStateReached !== true;
     if (shouldInferUserPrompt) {
-      const responseCandidate = (responseText || contentFallback || structuredResponseDirect || structuredFallback || '').trim();
+      const responseCandidate = (responseText ?? contentFallback).trim();
       const inferredPrompt = inferUserPromptFromResponse(responseCandidate);
       if (inferredPrompt) {
         result.needsUserInput = true;
@@ -480,10 +490,10 @@ export class Agent {
       // double TUI output. Fall back to structuredOutput.response (the canonical
       // response that was already streamed) before using structuredFallback, so that
       // downstream validation (refusal, planning-speak) sees the actual response.
-      const primaryCandidate = (responseText ?? contentFallback ?? '').trim();
+      const primaryCandidate = (responseText ?? contentFallback).trim();
       const finalText = primaryCandidate
-        ? (responseText ?? contentFallback ?? '')
-        : (structuredResponseDirect.trim() || structuredFallback || '');
+        ? (responseText ?? contentFallback)
+        : structuredResponseDirect.trim();
       if (isRefusal(finalText)) {
         result.isRefusal = true;
         result.error = 'LLM refused to complete the task';
@@ -649,7 +659,7 @@ export class Agent {
     // If we already streamed the response field, don't re-emit
     if (streamedContent.length > 0) return;
 
-    const fallbackResponse = responseText?.trim() || this.extractStructuredFallbackResponse(structuredOutput);
+    const fallbackResponse = responseText?.trim() ?? this.extractStructuredFallbackResponse(structuredOutput);
     if (fallbackResponse?.trim()) {
       this.emit(createEvent('agent_message', {
         agentType: this.config.type,
@@ -674,7 +684,7 @@ export class Agent {
    */
   private streamWithResilience(
     params: {
-      messages: Message[];
+      messages: LLMItem[];
       tools?: ToolDefinition[];
       toolChoice?: 'none' | 'auto' | 'required';
       responseSchema?: StructuredOutputSchema;
@@ -684,7 +694,7 @@ export class Agent {
   ): Effect.Effect<{ response: LLMResponse }, Error | RateLimitError | CircuitOpenError | TimeoutError | RetriesExhaustedError> {
     const provider = this.llmConfig.provider ?? 'unknown';
     const circuitState = getProviderCircuitState(provider);
-    const circuitKey = `${provider}:${this.llmConfig.model ?? 'unknown'}`;
+    const circuitKey = `${provider}:${this.llmConfig.model}`;
 
     // Wrap the streaming operation in resilientCall with timeout.
     // We wrap full stream consumption so retry/timeout covers the full LLM operation.
@@ -726,7 +736,7 @@ export class Agent {
       {
         circuitState,
         circuitKey,
-        timeoutMs: this.config.budget.llmStreamTimeoutMs ?? DEFAULT_AGENT_BUDGET.llmStreamTimeoutMs!,
+        timeoutMs: this.config.budget.llmStreamTimeoutMs ?? DEFAULT_AGENT_BUDGET.llmStreamTimeoutMs ?? 240_000,
         operationName: `LLM stream (${this.config.type})`,
         config: {
           ...DEFAULT_RESILIENCE_CONFIG,
@@ -889,9 +899,10 @@ export class Agent {
       const localReadFiles = new Set(globalContext.getReadFilesArray());
       let consecutiveNoActionNoToolResponses = 0;
       let forceRequiredToolChoice = false;
+      this._lastAgentCompactWasNoop = false; // Reset for new execution
 
       // Auto-read target files
-      if (workItem.targetPaths && workItem.targetPaths.length > 0) {
+      if (workItem.targetPaths.length > 0) {
         yield* this.autoReadTargetFiles(
           workItem.targetPaths,
           localContext,
@@ -957,7 +968,7 @@ export class Agent {
       // Use resilient streaming with retry + circuit breaker
       const llmAsyncId = profiler.asyncBegin(`agent.llmCall:${this.config.type}`, 'llm');
       const { response } = yield* this.streamWithResilience({
-        messages: messages as unknown as Message[],
+        messages,
         tools: toolsForThisCall,
         toolChoice: effectiveToolChoice,
         responseSchema: this.config.outputSchema,
@@ -989,8 +1000,8 @@ export class Agent {
 
       const llmDurationMs = Date.now() - llmStartTime;
       profiler.asyncEnd(`agent.llmCall:${this.config.type}`, llmAsyncId, 'llm', {
-        promptTokens: response.usage?.promptTokens,
-        completionTokens: response.usage?.completionTokens,
+        promptTokens: response.usage.promptTokens,
+        completionTokens: response.usage.completionTokens,
         toolCalls: response.toolCalls?.length ?? 0,
       });
       metrics.llmCallsMade++;
@@ -998,24 +1009,22 @@ export class Agent {
       this.emitLlmCall(response, messages, llmDurationMs, toolsForThisCall ?? [], localContext.maxTokens, workItem.workId);
 
       // Update local context metrics with actual token usage from LLM
-      if (response.usage) {
-        const reasoningTokens = response.usage.reasoningTokens ?? 0;
-        const visibleCompletionTokens = Math.max(0, (response.usage.completionTokens ?? 0) - reasoningTokens);
-        localContext.updateMetrics(
-          response.usage.promptTokens ?? 0,
-          visibleCompletionTokens,
-          response.usage.cachedTokens
-        );
-      }
+      const reasoningTokens = response.usage.reasoningTokens ?? 0;
+      const visibleCompletionTokens = Math.max(0, response.usage.completionTokens - reasoningTokens);
+      localContext.updateMetrics(
+        response.usage.promptTokens,
+        visibleCompletionTokens,
+        response.usage.cachedTokens
+      );
 
-      const content = (response.content ?? '');
+      const content = response.content;
       const toolCalls = response.toolCalls ?? [];
       if (toolCalls.length > 0) {
         consecutiveNoActionNoToolResponses = 0;
         forceRequiredToolChoice = false;
       }
 
-      const reasoningContent = response.reasoningContent || (streamedReasoningContent ? streamedReasoningContent : undefined);
+      const reasoningContent = response.reasoningContent ?? (streamedReasoningContent ? streamedReasoningContent : undefined);
 
       // Add reasoning content to context for multi-turn salience
       if (reasoningContent) {
@@ -1046,7 +1055,7 @@ export class Agent {
       // Only use pre-JSON text (if any) to avoid duplicate TUI output
       const preJsonText = extractPreJsonText(content);
       const responseText = streamedResponseContent.length > 0
-        ? (preJsonText?.trim() || undefined)  // Only pre-JSON text, response was already streamed
+        ? (preJsonText.trim() || undefined)  // Only pre-JSON text, response was already streamed
         : rawResponseText;  // Nothing streamed, use full combined text
 
       // Fallback: if structured output was expected but streaming didn't capture anything
@@ -1113,8 +1122,6 @@ export class Agent {
       switch (resolved) {
         case 'done':
         case 'user_input':
-          consecutiveNoActionNoToolResponses = 0;
-          forceRequiredToolChoice = false;
           this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
           return;
 
@@ -1170,7 +1177,7 @@ export class Agent {
               localContext.addMessage('user', this.buildRequiredToolCallReminder(toolsForThisCall), workItem.workId);
             }
 
-            const schemaReminder = this.buildSchemaReminder(this.resolveOutputSchemaId());
+            const schemaReminder = this.buildSchemaReminder();
             localContext.addMessage('user', schemaReminder, workItem.workId);
             this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
             continue;
@@ -1225,9 +1232,7 @@ export class Agent {
 
     // Handle exhausted resources - treat as partial success if we have content
     // If terminationReason is unset, we exhausted iterations without a specific termination
-    if (!result.terminationReason) {
-      result.terminationReason = 'max_iterations_exceeded';
-    }
+    result.terminationReason ??= 'max_iterations_exceeded';
 
     // For any bounds-related termination, mark as partial success if we have content
     const isBoundsTermination =
@@ -1387,7 +1392,18 @@ export class Agent {
           rateLimitInfo: result.rateLimitInfo,
         };
       }
-      default: {
+      case 'goal_state_reached':
+      case 'user_stopped':
+      case 'max_iterations_exceeded':
+      case 'max_tool_calls_exceeded':
+      case 'max_duration_exceeded':
+      case 'circuit_open':
+      case 'timeout':
+      case 'agent_error':
+      case 'invalid_action':
+      case 'no_action':
+      case 'observer_stopped':
+      case 'observer_work_item_stopped': {
         return {
           ...base,
           terminationReason,
@@ -1443,7 +1459,7 @@ export class Agent {
     const view = ContextWindow.deserialize(globalContext.serialize());
     const items = view.items;
     const norm = (s: string) => s.replace(/\\/g, '/');
-    const targets = (workItem.targetPaths ?? []).map(norm).filter(p => p.length > 0);
+    const targets = workItem.targetPaths.map(norm).filter(p => p.length > 0);
     const matchesTarget = (p: string) => {
       const n = norm(p);
       return targets.some(t => n === t || n.endsWith(`/${t}`) || n.startsWith(t));
@@ -1503,9 +1519,8 @@ export class Agent {
     workItem: WorkItem,
     globalContext: ContextWindow,
     localContext: ContextWindow
-  ): Record<string, unknown>[] {
-    // Use LLMItem[] for type safety during construction
-    const messages: (LLMItem | Record<string, unknown>)[] = [
+  ): LLMItem[] {
+    const messages: LLMItem[] = [
       { type: 'message', role: 'system', content: systemPrompt },
     ];
 
@@ -1589,7 +1604,7 @@ export class Agent {
         if (callIdsWithOutputs.has(item.call_id)) {
           messages.push(item);
         }
-      } else if (item.type === 'function_call_output') {
+      } else {
         messages.push(item);
       }
     }
@@ -1625,11 +1640,12 @@ export class Agent {
     name: string,
     args: Record<string, unknown>,
   ): Effect.Effect<{ action: 'proceed'; effectiveArgs: Record<string, unknown> } | { action: 'block'; errorMessage: string }, Error> {
-    if (!this.hooks?.preToolUse) {
+    const hook = this.hooks?.preToolUse;
+    if (!hook) {
       return Effect.succeed({ action: 'proceed', effectiveArgs: args });
     }
     return Effect.tryPromise({
-      try: () => this.hooks!.preToolUse!(name, args),
+      try: () => hook(name, args),
       catch: (error) => error instanceof Error ? error : new Error(String(error)),
     }).pipe(
       Effect.map((hookResult) => {
@@ -1652,11 +1668,12 @@ export class Agent {
     args: Record<string, unknown>,
     toolResult: ToolResult,
   ): Effect.Effect<ToolResult, Error> {
-    if (!this.hooks?.postToolUse) {
+    const hook = this.hooks?.postToolUse;
+    if (!hook) {
       return Effect.succeed(toolResult);
     }
     return Effect.tryPromise({
-      try: () => this.hooks!.postToolUse!(name, args, toolResult),
+      try: () => hook(name, args, toolResult),
       catch: (error) => error instanceof Error ? error : new Error(String(error)),
     }).pipe(
       Effect.map((hookResult) => {
@@ -1811,7 +1828,7 @@ export class Agent {
             if (typeof readPath === 'string') {
               localReadFiles.add(readPath);
               if (!localContext.hasReadFile(readPath)) {
-                const rawOutput = toolResult.output ?? '';
+                const rawOutput = toolResult.output;
                 localContext.addFileContent(readPath, truncateToolOutput(rawOutput, call.name), undefined, workItem.workId);
                 addedFileContent = true;
               }
@@ -1863,7 +1880,7 @@ export class Agent {
         const rawOutput = toolResult.isSuccess ? toolResult.output : failureMessage;
         const isReadWithFileContent = nameLower === 'read' && addedFileContent;
         const outputForContext = isReadWithFileContent
-          ? `[file content stored in context: ${call.arguments.path}]`
+          ? `[file content stored in context: ${String(call.arguments.path)}]`
           : truncateToolOutput(rawOutput, call.name);
         localContext.addFunctionCallOutput(call.id, outputForContext, !toolResult.isSuccess, toolDurationMs, itemWorkId);
 
@@ -2010,24 +2027,22 @@ export class Agent {
   }
 
   private mergeSubAgentResults(parentLocalContext: ContextWindow, subResult: AgentResult): void {
-    for (const p of subResult.filesRead ?? []) {
+    for (const p of subResult.filesRead) {
       if (typeof p === 'string' && p.length > 0) parentLocalContext.markFileRead(p);
     }
 
-    const subArtifacts = subResult.artifacts ?? subResult.localContext?.getArtifacts() ?? [];
+    const subArtifacts = subResult.artifacts ?? subResult.localContext.getArtifacts();
     for (const a of subArtifacts) {
-      if (!a?.sourcePath || typeof a.name !== 'string') continue;
+      if (!a.sourcePath || typeof a.name !== 'string') continue;
       const existing = parentLocalContext.getArtifactsByPath(a.sourcePath);
       if (!existing.some(e => e.name === a.name && e.line === a.line)) {
         parentLocalContext.addArtifact(a, a.workItemId);
       }
     }
 
-    if (subResult.localContext) {
-      for (const f of subResult.localContext.getItemsByType<FileContentItem>('file_content')) {
-        if (f?.path && typeof f.content === 'string' && !parentLocalContext.hasReadFile(f.path)) {
-          parentLocalContext.addFileContent(f.path, f.content, f.language, f.workItemId);
-        }
+    for (const f of subResult.localContext.getItemsByType<FileContentItem>('file_content')) {
+      if (f.path && typeof f.content === 'string' && !parentLocalContext.hasReadFile(f.path)) {
+        parentLocalContext.addFileContent(f.path, f.content, f.language, f.workItemId);
       }
     }
   }
@@ -2070,7 +2085,7 @@ export class Agent {
         return errorResult(call.name, message, 0);
       }
 
-      const args = call.arguments ?? {};
+      const args = call.arguments;
       const objective = typeof args.objective === 'string' ? args.objective.trim() : '';
       if (!objective) {
         return errorResult(call.name, 'Missing required argument: objective', 0);
@@ -2082,7 +2097,7 @@ export class Agent {
           : parentWorkItem.goal;
       const delta = typeof args.delta === 'string' ? args.delta : undefined;
       const toolHint = typeof args.toolHint === 'string'
-        ? String(args.toolHint)
+        ? args.toolHint
         : undefined;
       const rawTargetPaths = args.targetPaths;
       const targetPaths = Array.isArray(rawTargetPaths)
@@ -2152,7 +2167,7 @@ export class Agent {
     let postProcessingError: string | null = null;
 
     let enhancedResponse = subResult.response;
-    if (!enhancedResponse && subResult.localContext) {
+    if (!enhancedResponse) {
       const toolOutputs = subResult.localContext.getItemsByType('function_call_output') as {
         output: string;
         isError?: boolean;
@@ -2210,7 +2225,7 @@ export class Agent {
         extractedArtifacts.push(...artifacts.filter(isValidRawArtifact));
       }
 
-      if (extractedArtifacts.length === 0 && subResult.localContext) {
+      if (extractedArtifacts.length === 0) {
         const contextArtifacts = subResult.localContext.getArtifacts();
         if (contextArtifacts.length > 0) {
           extractedArtifacts.push(...contextArtifacts);
@@ -2235,7 +2250,7 @@ export class Agent {
       console.error(`[AGENT] Sub-agent post-processing error: ${message}`, stack ?? '');
     }
 
-    const filesReadCount = (subResult.filesRead ?? []).length;
+    const filesReadCount = subResult.filesRead.length;
     const artifactCount = extractedArtifacts.length;
 
     if (agentConfig.type === 'explorer' && filesReadCount > 0 && artifactCount === 0) {
@@ -2250,7 +2265,7 @@ export class Agent {
       success: subResult.success,
       response: enhancedResponse,
       responseStreamedToUser,
-      filesRead: subResult.filesRead ?? [],
+      filesRead: subResult.filesRead,
       artifacts: Array.isArray(artifacts) ? artifacts : [],
       error: subResult.error,
       postProcessingError,
@@ -2283,20 +2298,18 @@ export class Agent {
       .join(' ');
     const parts = [`${friendlyName || 'Sub-agent'} failed`];
 
-    if (subResult.terminationReason) {
-      parts.push(` (reason: ${subResult.terminationReason})`);
-    }
+    parts.push(` (reason: ${subResult.terminationReason})`);
     if (subResult.error) {
       parts.push(`: ${subResult.error}`);
     } else if (subResult.terminationReason === 'agent_error') {
       parts.push(` - no error message captured, check agent logs`);
     }
 
-    const toolsUsed = subResult.metrics?.toolCallsMade ?? 0;
+    const toolsUsed = subResult.metrics.toolCallsMade;
     if (toolsUsed > 0) {
-      parts.push(`\nTools called: ${toolsUsed} (${subResult.metrics?.toolCallsSucceeded ?? 0} succeeded, ${subResult.metrics?.toolCallsFailed ?? 0} failed)`);
+      parts.push(`\nTools called: ${toolsUsed} (${subResult.metrics.toolCallsSucceeded} succeeded, ${subResult.metrics.toolCallsFailed} failed)`);
     }
-    if (subResult.toolErrors && subResult.toolErrors.length > 0) {
+    if (subResult.toolErrors.length > 0) {
       parts.push(`\nTool errors: ${subResult.toolErrors.slice(0, 3).join('; ')}${subResult.toolErrors.length > 3 ? '...' : ''}`);
     }
     if (enhancedResponse && enhancedResponse.trim().length > 0) {
@@ -2389,7 +2402,7 @@ export class Agent {
     return null;
   }
 
-  private buildSchemaReminder(schemaId: string | null): string {
+  private buildSchemaReminder(): string {
     if (typeof this.config.schemaReminder === 'string' && this.config.schemaReminder.trim().length > 0) {
       return this.config.schemaReminder;
     }
@@ -2487,7 +2500,7 @@ export class Agent {
 
     const candidates = [parsed, ...this.extractJsonCandidates(content)];
     for (const candidate of candidates) {
-      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+      if (typeof candidate !== 'object' || Array.isArray(candidate)) continue;
       const normalized = this.normalizeActionOutputCandidate(candidate, schemaId);
       if (normalized) {
         // Preserve artifacts from original output — they are stripped by .strict()
@@ -2513,7 +2526,7 @@ export class Agent {
     const candidates = [parsed, ...this.extractJsonCandidates(content)];
 
     for (const candidate of candidates) {
-      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+      if (typeof candidate !== 'object' || Array.isArray(candidate)) continue;
 
       // Must have at least action or artifacts to be useful
       const hasAction = typeof candidate.action === 'string';
@@ -2541,7 +2554,7 @@ export class Agent {
 
   private tryParseJsonCandidate(value: string): Record<string, unknown> | null {
     try {
-      const parsed = JSON.parse(value);
+      const parsed: unknown = JSON.parse(value);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         return parsed as Record<string, unknown>;
       }
@@ -2558,7 +2571,7 @@ export class Agent {
     const fenceRegex = /```(?:json)?\s*([\s\S]*?)\s*```/gi;
     let match: RegExpExecArray | null;
     while ((match = fenceRegex.exec(content)) !== null) {
-      const candidate = match[1]?.trim();
+      const candidate = match[1].trim();
       if (!candidate) continue;
       const parsed = this.tryParseJsonCandidate(candidate);
       if (parsed) results.push(parsed);
@@ -2678,7 +2691,7 @@ export class Agent {
   }
 
   private combineResponseText(preJsonText: string, parsedResponseText: string | undefined): string | undefined {
-    const pre = preJsonText?.trim() ?? '';
+    const pre = preJsonText.trim();
     const parsed = parsedResponseText?.trim() ?? '';
     return (pre && parsed) ? `${pre}\n\n${parsed}` : (pre || parsed || undefined);
   }
@@ -2720,7 +2733,7 @@ export class Agent {
     this.emit(createEvent('llm_error', {
       agentType: this.config.type,
       provider: this.llmConfig.provider ?? 'unknown',
-      model: this.llmConfig.model ?? 'unknown',
+      model: this.llmConfig.model,
       error: error.message,
       errorType: this.classifyError(error),
     }, workItemId));
@@ -2736,13 +2749,13 @@ export class Agent {
   }
 
   private synthesizePartialResponse(localContext: ContextWindow, existingResponse: string): string {
-    if (existingResponse?.trim()) return existingResponse;
+    if (existingResponse.trim()) return existingResponse;
 
     const messages = localContext.getItemsByType('message') as { role: string; content: string | unknown[] }[];
     const last = messages.filter(m => m.role === 'assistant').at(-1);
     if (last) {
       const content = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
-      if (content?.trim()) return content;
+      if (content.trim()) return content;
     }
 
     const outputs = (localContext.getItemsByType('function_call_output') as { name?: string; output: string; isError?: boolean }[])

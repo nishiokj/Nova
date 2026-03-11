@@ -195,7 +195,7 @@ export type RuntimeScriptOutput = z.infer<typeof RuntimeScriptOutputSchema>;
 
 type JsonSchema = Record<string, unknown>;
 
-function zodToJsonSchema(schema: z.ZodTypeAny): JsonSchema {
+function zodToJsonSchema(schema: z.ZodType): JsonSchema {
   const jsonSchema = toJSONSchema(schema) as JsonSchema;
   // Keep shared schemas provider-agnostic. Provider adapters can apply
   // compatibility transforms for their own JSON Schema subsets.
@@ -220,9 +220,8 @@ export function unwrapStructuredOutput(output: Record<string, unknown>): Record<
 
 export function getOutputSchemaJson(
   schemaName: OutputSchemaName
-): { name: string; schema: JsonSchema; strict: boolean; schemaId: OutputSchemaName } | undefined {
+): { name: string; schema: JsonSchema; strict: boolean; schemaId: OutputSchemaName } {
   const schema = OUTPUT_SCHEMAS[schemaName];
-  if (!schema) return undefined;
 
   return {
     name: schemaName,
@@ -245,11 +244,6 @@ export function parseAgentOutput<T extends OutputSchemaName>(
   rawOutput: unknown
 ): z.output<(typeof OUTPUT_SCHEMAS)[T]> | null {
   const schema = OUTPUT_SCHEMAS[schemaName];
-  if (!schema) {
-    console.warn(`[output] Unknown schema: ${schemaName}`);
-    return null;
-  }
-
   const result = schema.safeParse(rawOutput);
   if (!result.success) {
     const issues = result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ');
@@ -265,7 +259,6 @@ export function parseAgentOutput<T extends OutputSchemaName>(
  */
 export function isValidOutput(schemaName: OutputSchemaName, output: unknown): boolean {
   const schema = OUTPUT_SCHEMAS[schemaName];
-  if (!schema) return false;
   return schema.safeParse(output).success;
 }
 

@@ -40,9 +40,9 @@ export interface PromptUserArgs {
  * Execute PromptUser tool.
  * Returns a special marker result - the actual pause logic is in the agent.
  */
-export async function executePromptUser(
+export function executePromptUser(
   args: Record<string, unknown>
-): Promise<ToolResult> {
+): ToolResult {
   // The tool itself doesn't "do" anything - it's a signal to the agent
   // to pause execution and request user input. The agent intercepts this
   // tool call and extracts the args to build UserPromptInfo.

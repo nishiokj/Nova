@@ -25,14 +25,13 @@ import {
 import { Effect, Layer, ManagedRuntime } from 'effect';
 import os from 'os';
 import { execSync } from 'child_process';
-import { randomUUID } from 'crypto';
 import { createAdapter, hasCodexCredentials, type ProviderKeyService } from 'llm';
 import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
 import type { ToolRegistry } from 'tools';
-import { createEvent, getProviderEnvVar, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type RateLimitData, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
+import { createEvent, getProviderEnvVar, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
 import type { ContextWindow } from 'context';
 import { profiler } from 'shared';
-import { GraphDManager, createGraphDConfig, type GraphDSession } from 'graphd';
+import { GraphDManager, createGraphDConfig } from 'graphd';
 import { EventBus, type EventBusProtocol, createEventEmitCallback } from 'comms-bus';
 import { createGraphDSubscriber } from '../subscribers/graphd_subscriber.js';
 import type { LogSubscriber} from '../subscribers/log_subscriber.js';
@@ -40,7 +39,6 @@ import { createLogSubscriber } from '../subscribers/log_subscriber.js';
 import { createTraceSubscriber, extractCommitSha, isGitCommitCommand } from '../subscribers/trace_subscriber.js';
 import type { TraceSubscriber } from '../subscribers/trace_subscriber.js';
 import path from 'path';
-import fs from 'fs';
 import {
   createStatusEvent,
   createResponseEvent,
@@ -55,7 +53,7 @@ import type {
   SessionControlResult,
 } from './types.js';
 import { loadConfig, getAgentConfig } from './config_loader.js';
-import type { FullHarnessConfig, ResolvedAgentConfig } from './config.js';
+import type { FullHarnessConfig } from './config.js';
 import { LocalProviderManager } from './local_providers.js';
 import { ConfiguredEffectHooksRunner } from './configured_effect_hooks.js';
 import {
@@ -63,7 +61,6 @@ import {
   getHookDefinition,
   normalizeHookTrigger,
   type HookContext as SkillHookContext,
-  type HookDefinition,
   type HookResult as LegacyHookResult,
 } from './skills_loader.js';
 import { SessionStore } from './session_store.js';
@@ -71,7 +68,7 @@ import { createFileLogger, createToolRegistry, type HarnessLogger } from './harn
 import { HarnessPluginRegistry } from './plugin_registry.js';
 import { PermissionChecker } from './permissions.js';
 import { DefaultOrchestratorRunner, type OrchestratorRunner } from './orchestrator_runner.js';
-import type { PermissionedTool, PermissionRequest, PermissionResponse } from 'types';
+import type { PermissionResponse } from 'types';
 import { isPermissionedTool, normalizeToolName } from 'types';
 import { createSessionState, touchSession, clearSessionState, type SessionState } from './session_state.js';
 import {
@@ -126,8 +123,6 @@ interface MemoryPluginModule {
     postgresOptions?: Record<string, unknown>;
   }) => EntityGraphInstance;
 }
-
-interface SessionGetResponse { session?: GraphDSession; error?: string }
 
 export interface CloseSessionResult {
   success: boolean;
@@ -281,8 +276,8 @@ class AsyncEventQueue {
     if (this.done) return;
 
     if (this.resolvers.length > 0) {
-      const resolve = this.resolvers.shift()!;
-      resolve({ value: event, done: false });
+      const resolve = this.resolvers.shift();
+      resolve?.({ value: event, done: false });
     } else {
       this.queue.push(event);
     }
@@ -298,7 +293,8 @@ class AsyncEventQueue {
 
   async next(): Promise<IteratorResult<BridgeEvent, void>> {
     if (this.queue.length > 0) {
-      return { value: this.queue.shift()!, done: false };
+      const event = this.queue.shift();
+      if (event) return { value: event, done: false };
     }
 
     if (this.done) {
@@ -510,8 +506,8 @@ export class AgentHarness {
     const defaultAgent = config.agents[config.defaultAgent];
     this.logger.info('AgentHarness initialized', {
       defaultAgent: config.defaultAgent,
-      provider: defaultAgent?.llm.provider,
-      model: defaultAgent?.llm.model,
+      provider: defaultAgent.llm.provider,
+      model: defaultAgent.llm.model,
       agentCount: Object.keys(config.agents).length,
       graphdEnabled: this.graphd !== null,
       memoryEnabled: this.config.memory.enabled,
@@ -541,7 +537,7 @@ export class AgentHarness {
     const sessions = [];
     for (const [sessionKey, state] of this.sessions.entries()) {
       const context = state.store.getCachedContextSnapshot();
-      const contextItemCount = context?.items?.length ?? 0;
+      const contextItemCount = context?.items.length ?? 0;
       // Estimate tokens: ~4 chars per token
       let contextChars = 0;
       if (context?.items) {
@@ -695,19 +691,17 @@ export class AgentHarness {
     if (result.action === 'block') {
       return { kind: 'block', reason: result.message ?? 'Blocked by configured hook' };
     }
-    if (result.action === 'modify') {
-      if (eventType === 'pre_tool_use' && result.modified && typeof result.modified === 'object') {
-        return { kind: 'modify', value: result.modified, ...(result.message ? { reason: result.message } : {}) };
-      }
-      if (eventType === 'post_tool_use' && this.isToolResult(result.modified)) {
-        return { kind: 'modify', value: result.modified, ...(result.message ? { reason: result.message } : {}) };
-      }
-      if (eventType === 'user_prompt_submit' && result.modified && typeof result.modified === 'object') {
-        return { kind: 'modify', value: result.modified, ...(result.message ? { reason: result.message } : {}) };
-      }
-      return { kind: 'allow', message: result.message ?? 'Modify ignored for event type' };
+    // result.action is 'modify' (exhaustive after allow/block checks above)
+    if (eventType === 'pre_tool_use' && result.modified && typeof result.modified === 'object') {
+      return { kind: 'modify', value: result.modified, ...(result.message ? { reason: result.message } : {}) };
     }
-    return { kind: 'allow' };
+    if (eventType === 'post_tool_use' && this.isToolResult(result.modified)) {
+      return { kind: 'modify', value: result.modified, ...(result.message ? { reason: result.message } : {}) };
+    }
+    if (eventType === 'user_prompt_submit' && result.modified && typeof result.modified === 'object') {
+      return { kind: 'modify', value: result.modified, ...(result.message ? { reason: result.message } : {}) };
+    }
+    return { kind: 'allow', message: result.message ?? 'Modify ignored for event type' };
   }
 
   private registerSessionUnifiedHooks(sessionKey: string, workingDir: string): void {
@@ -840,7 +834,7 @@ export class AgentHarness {
 
   private trackSessionHookTask(task: Promise<void>): void {
     this.pendingSessionHookTasks.add(task);
-    task.finally(() => {
+    void task.finally(() => {
       this.pendingSessionHookTasks.delete(task);
     });
   }
@@ -861,8 +855,8 @@ export class AgentHarness {
     errorLogMessage: string
   ): Promise<void> {
     const task = this.runSessionEffectHooks(sessionKey, event, context).then(
-      () => {},
-      (error) => {
+      () => { /* resolve — error handler below */ },
+      (error: unknown) => {
         this.logger.warning(errorLogMessage, {
           sessionKey,
           eventType: event.type,
@@ -880,7 +874,7 @@ export class AgentHarness {
     }
     this.closingSessionHooks.add(sessionKey);
     const workingDir = state.store.getWorkingDirectory();
-    this.enqueueSessionEffectHook(
+    void this.enqueueSessionEffectHook(
       sessionKey,
       { type: 'session_stop', sessionKey, reason: 'session_cleanup' },
       { sessionKey, requestId: 'session_cleanup', workingDir },
@@ -908,7 +902,7 @@ export class AgentHarness {
   private markSessionInactive(sessionKey: string): void {
     if (!this.isGraphDReady()) return;
     try {
-      this.graphd!.sessionUpdateStatus(sessionKey, 'inactive');
+      this.graphd?.sessionUpdateStatus(sessionKey, 'inactive');
     } catch (error) {
       this.logger.warning('Failed to mark session inactive', { sessionKey, error: String(error) });
     }
@@ -1111,7 +1105,7 @@ export class AgentHarness {
     const state = createSessionState(store);
     this.sessions.set(sessionKey, state);
     this.registerSessionUnifiedHooks(sessionKey, workingDir ?? this.config.tools.workingDir);
-    this.enqueueSessionEffectHook(
+    void this.enqueueSessionEffectHook(
       sessionKey,
       { type: 'session_start', sessionKey, workingDir: workingDir ?? this.config.tools.workingDir },
       {
@@ -1137,8 +1131,10 @@ export class AgentHarness {
     }
 
     if (!oldestKey) return;
+    const oldestState = this.sessions.get(oldestKey);
+    if (!oldestState) return;
 
-    this.teardownSession(oldestKey, this.sessions.get(oldestKey)!);
+    this.teardownSession(oldestKey, oldestState);
     this.logger.debug('LRU evicted session (maxSessions reached)', {
       sessionKey: oldestKey,
       maxSessions: this.maxSessions,
@@ -1213,7 +1209,7 @@ export class AgentHarness {
 
     const modelEntry = this.config.models.available.find((entry) =>
       entry.id.trim().toLowerCase() === model.toLowerCase()
-      && entry.provider?.trim().toLowerCase() === provider.toLowerCase()
+      && entry.provider.trim().toLowerCase() === provider.toLowerCase()
     );
     const contextWindow = Math.trunc(modelEntry?.context_window ?? NaN);
     if (!modelEntry?.provider || !Number.isFinite(contextWindow) || contextWindow <= 0) {
@@ -1263,7 +1259,7 @@ export class AgentHarness {
       let updated = false;
       for (const [agentType, selection] of Object.entries(globalSelections)) {
         if (!this.isSelectionAccessible(selection, hiddenModels)) {
-          delete globalSelections[agentType];
+          Reflect.deleteProperty(globalSelections, agentType);
           updated = true;
         }
       }
@@ -1280,11 +1276,11 @@ export class AgentHarness {
 
   private modelSelectionForAgent(agentType: string, hiddenModels: Set<string>): ModelSelection | null {
     const agentConfig = this.config.agents[agentType];
-    const model = agentConfig?.llm.model?.trim();
+    const model = agentConfig.llm.model.trim();
     if (!model || hiddenModels.has(model.toLowerCase())) {
       return null;
     }
-    const provider = (agentConfig.llm.displayProvider || agentConfig.llm.provider)?.trim();
+    const provider = (agentConfig.llm.displayProvider || agentConfig.llm.provider).trim();
     const selection = provider ? { provider, model, contextWindow: agentConfig.llm.contextWindow } : null;
     if (!this.isSelectionAccessible(selection, hiddenModels)) {
       return null;
@@ -1450,7 +1446,7 @@ export class AgentHarness {
 
   getAllSessionSelectedModels(sessionKey: string): Map<string, ModelSelection> {
     const state = this.sessions.get(sessionKey);
-    return state?.store.getAllModelSelections() ?? new Map();
+    return state?.store.getAllModelSelections() ?? new Map<string, ModelSelection>();
   }
 
   setSessionAsyncModeEnabled(sessionKey: string, enabled: boolean): void {
@@ -1589,7 +1585,7 @@ export class AgentHarness {
   private persistUserMessage(sessionKey: string, requestId: string, userInput: string): boolean {
     if (!this.isGraphDReady()) return false;
     try {
-      this.graphd!.messageAdd(sessionKey, 'user', userInput, requestId);
+      this.graphd?.messageAdd(sessionKey, 'user', userInput, requestId);
       return true;
     } catch (error) {
       this.logger.warning('GraphD user message persist failed', { error: String(error) });
@@ -1692,8 +1688,8 @@ export class AgentHarness {
     const contextWindow = store.getContext();
     contextWindow.addMessage('user', inputText);
     const goal = inputText;
-    const effectiveAgentType: AgentType = requestedTier || 'standard';
-    const effectiveWorkingDir = workingDir ?? this.config.tools.workingDir;
+    const effectiveAgentType: AgentType = requestedTier ?? 'standard';
+    const effectiveWorkingDir = workingDir;
 
     if (supplementalContext.length > 0) {
       contextWindow.addMessage(
@@ -1705,7 +1701,7 @@ export class AgentHarness {
     if (this.isGraphDReady()) {
       try {
         store.touch(effectiveWorkingDir);
-        this.graphd!.setActive(true);
+        this.graphd?.setActive(true);
       } catch (error) {
         this.logger.warning('GraphD session touch failed', { error: String(error) });
       }
@@ -1734,7 +1730,7 @@ export class AgentHarness {
           }
         );
         if (userPromptHookResult.status === 'blocked') {
-          const blockMsg = userPromptHookResult.blockedBy?.reason || 'Request blocked by hook';
+          const blockMsg = userPromptHookResult.blockedBy?.reason ?? 'Request blocked by hook';
           eventQueue.push(createErrorEvent(blockMsg, false));
           eventQueue.push(createStatusEvent('idle'));
           emit(createEvent('harness_error', { message: blockMsg, fatal: false }));
@@ -1768,7 +1764,7 @@ export class AgentHarness {
                 agentType: effectiveAgentType,
               });
             }
-            this.graphd!.sessionUpdateMetadata(sessionKey, {
+            this.graphd?.sessionUpdateMetadata(sessionKey, {
               user_id: 'local-user',
               tier: effectiveAgentType,
               ...(selection ? { model: selection.model, provider: selection.provider } : {}),
@@ -1798,7 +1794,6 @@ export class AgentHarness {
         const responseContent = result.finalText.trim().length > 0
           ? result.finalText
           : streamedAssistantChunks.join('');
-        const responseHasContent = responseContent.trim().length > 0;
 
         // Persist canonical messages before emitting response/status events.
         // The dashboard refreshes on SSE response events, so persistence must
@@ -1920,7 +1915,7 @@ export class AgentHarness {
 
             if (this.isGraphDReady()) {
               try {
-                this.graphd!.setActive(false);
+                this.graphd?.setActive(false);
               } catch {
                 // Ignore errors during cleanup
               }
@@ -1934,17 +1929,19 @@ export class AgentHarness {
       }
     })();
 
+    const cancel = (reason?: string) =>
+      this.controlSessionExecution({
+        sessionKey,
+        action: 'cancel',
+        reason: reason ?? 'Execution cancelled by handle',
+        requestedBy: 'system',
+      });
+
     return {
       result: resultPromise,
       events: eventQueue,
-      cancel: (reason?: string) =>
-        this.controlSessionExecution({
-          sessionKey,
-          action: 'cancel',
-          reason: reason ?? 'Execution cancelled by handle',
-          requestedBy: 'system',
-        }),
-      abort() { void this.cancel!(); },
+      cancel,
+      abort: () => { void cancel(); },
     };
   }
 
@@ -1963,14 +1960,14 @@ export class AgentHarness {
 
     try {
       if (!userMessagePersisted) {
-        this.graphd!.messageAdd(sessionKey, 'user', userInput, requestId);
+        this.graphd?.messageAdd(sessionKey, 'user', userInput, requestId);
       }
       if (assistantResponse.trim().length > 0) {
-        this.graphd!.messageAdd(sessionKey, 'assistant', assistantResponse, requestId, {
+        this.graphd?.messageAdd(sessionKey, 'assistant', assistantResponse, requestId, {
           duration_ms: durationMs,
         });
       }
-      this.graphd!.sessionUpdateMetadata(sessionKey, {
+      this.graphd?.sessionUpdateMetadata(sessionKey, {
         last_request_id: requestId,
         last_duration_ms: durationMs,
       });
@@ -2057,21 +2054,18 @@ export class AgentHarness {
               }
 
               // Wait for user response via promise
-              let timeoutId: ReturnType<typeof setTimeout> | null = null;
+              let timeoutResolve: (value: null) => void;
+              const timeoutPromise = new Promise<null>((resolve) => { timeoutResolve = resolve; });
+              const timeoutId = setTimeout(() => timeoutResolve(null), PERMISSION_REQUEST_TIMEOUT_MS);
+
               const response = await Promise.race<PermissionResponse | null>([
                 new Promise<PermissionResponse>((resolve) => {
                   permissionChecker.registerPendingRequest(request.requestId, request, resolve);
                 }),
-                new Promise<PermissionResponse | null>((resolve) => {
-                  timeoutId = setTimeout(() => {
-                    resolve(null);
-                  }, PERMISSION_REQUEST_TIMEOUT_MS);
-                }),
+                timeoutPromise,
               ]);
 
-              if (timeoutId) {
-                clearTimeout(timeoutId);
-              }
+              clearTimeout(timeoutId);
 
               if (!response) {
                 permissionChecker.cancelPendingRequest(request.requestId);
@@ -2239,19 +2233,15 @@ export class AgentHarness {
 
   private attachArtifactSubscriber(context: ContextWindow): () => void {
     return this.eventBus.subscribe('artifact_discovered', (event: AgentEvent<ArtifactDiscoveredData>) => {
-      const data = event.data;
-      if (!data?.artifact) {
-        return;
-      }
       context.addArtifact({
-        sourcePath: data.artifact.sourcePath,
-        line: data.artifact.line,
-        kind: data.artifact.kind as ArtifactKind,
-        name: data.artifact.name,
-        signature: data.artifact.signature,
-        insight: data.artifact.insight,
-        relevance: data.artifact.relevance,
-        discoveredBy: data.agentType,
+        sourcePath: event.data.artifact.sourcePath,
+        line: event.data.artifact.line,
+        kind: event.data.artifact.kind as ArtifactKind,
+        name: event.data.artifact.name,
+        signature: event.data.artifact.signature,
+        insight: event.data.artifact.insight,
+        relevance: event.data.artifact.relevance,
+        discoveredBy: event.data.agentType,
       });
     });
   }
@@ -2303,8 +2293,6 @@ export class AgentHarness {
       return selection;
     };
 
-    const sessionKey = context.sessionKey;
-
     const runtime = {
       hookRegistry,
       executeEffectHook: async (event: InternalHookEvent, hookContext: InternalHookContext, signal?: AbortSignal) => {
@@ -2338,7 +2326,7 @@ export class AgentHarness {
     const asyncId = profiler.asyncBegin(`orchestrator:${agentType}`, 'orchestrator');
     let orchestratorBudget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number } | undefined;
     try {
-      orchestratorBudget = this.agentRegistry?.getConfig(agentType)?.budget;
+      orchestratorBudget = this.agentRegistry.getConfig(agentType).budget;
     } catch {
       // If agent config lookup fails, orchestrator falls back to internal defaults.
     }
@@ -2410,11 +2398,11 @@ export class AgentHarness {
    * Fork a session: clone context in GraphD and pre-populate in-memory cache.
    */
   forkSession(sourceSessionKey: string, targetSessionKey: string): { success: boolean; error?: string } {
-    if (!this.isGraphDReady()) {
+    if (!this.isGraphDReady() || !this.graphd) {
       return { success: false, error: 'GraphD not available' };
     }
 
-    const result = this.graphd!.sessionFork(sourceSessionKey, targetSessionKey);
+    const result = this.graphd.sessionFork(sourceSessionKey, targetSessionKey);
 
     if (result.success) {
       // Pre-populate in-memory cache with cloned context
@@ -2537,7 +2525,7 @@ export class AgentHarness {
       try {
         state.store.persistContext();
         if (this.isGraphDReady()) {
-          this.graphd!.sessionUpdateStatus(sessionKey, 'inactive');
+          this.graphd?.sessionUpdateStatus(sessionKey, 'inactive');
         }
       } catch (error) {
         this.logger.warning('Session persist failed during shutdown', { sessionKey, error: String(error) });
@@ -2548,7 +2536,7 @@ export class AgentHarness {
 
     if (this.isGraphDReady()) {
       try {
-        await this.graphd!.stop();
+        await this.graphd?.stop();
         this.logger.info('GraphD disconnected');
       } catch (error) {
         this.logger.warning('GraphD stop failed', { error: String(error) });

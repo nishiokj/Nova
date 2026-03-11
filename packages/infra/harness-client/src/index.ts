@@ -16,8 +16,6 @@ import type {
   BridgeEvent,
   BridgeEventType,
   ConnectionState,
-  ReadyData,
-  ResponseData,
 } from './types.js';
 import { RpcClient } from './rpc_client.js';
 import type { ProcedureMethod } from './rpc_types.js';
@@ -108,7 +106,7 @@ export class HarnessClient extends EventEmitter {
       return true;
     }, this.requestTimeout);
 
-    this.bus.on('event', (payload, channel) => {
+    this.bus.on('event', (payload: unknown, channel: string) => {
       this.handleBusEvent(payload, channel);
     });
     this.bus.on('error', (payload) => {

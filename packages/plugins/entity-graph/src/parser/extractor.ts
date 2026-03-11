@@ -6,11 +6,9 @@
  * for exported/async flags and ownership relationships.
  */
 
-import { statSync } from 'fs'
-import path from 'path'
 import type { Language, Node, Tree } from 'web-tree-sitter'
 import { Query } from 'web-tree-sitter'
-import type { Entity, Edge, ParseResult, EntityKind } from '../types.js'
+import type { Entity, Edge, ParseResult, EntityKind, EnvRead, ConstructorDep, FunctionDep } from '../types.js'
 import type { SupportedLanguage } from './parser.js'
 import {
   CLASS_QUERY,
@@ -26,7 +24,12 @@ import {
   CALL_EXPRESSION_QUERY,
   EXTENDS_CLAUSE_QUERY,
   IMPLEMENTS_CLAUSE_QUERY,
+  ENV_MEMBER_QUERY,
+  ENV_SUBSCRIPT_QUERY,
+  ENV_DESTRUCTURE_QUERY,
 } from './queries.js'
+import { extractTestFacts } from './test-facts.js'
+import { resolveImportSource, stripQuotes } from './shared.js'
 
 // --- Helpers ---
 
@@ -74,64 +77,12 @@ function isAsync(node: Node): boolean {
 }
 
 /**
- * Strip quotes from a string literal node's text.
- */
-function stripQuotes(text: string): string {
-  if ((text.startsWith("'") && text.endsWith("'")) ||
-      (text.startsWith('"') && text.endsWith('"'))) {
-    return text.slice(1, -1)
-  }
-  return text
-}
-
-/**
  * Get raw text for an entity, truncated to avoid storing huge class bodies.
  */
 function getRawText(node: Node, maxLen = 2000): string | null {
   const text = node.text
   if (text.length <= maxLen) return text
   return text.slice(0, maxLen) + '...'
-}
-
-// --- Import Resolution ---
-
-const RESOLVE_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx']
-
-/**
- * Resolve a module specifier to a file path relative to sourceRoot.
- * Returns null for bare specifiers (external packages) or unresolvable paths.
- */
-function resolveImportSource(
-  specifier: string,
-  currentFilepath: string,
-  sourceRoot: string
-): string | null {
-  // Bare specifiers are external packages
-  if (!specifier.startsWith('.') && !specifier.startsWith('/')) {
-    return null
-  }
-
-  const currentDir = path.dirname(path.resolve(sourceRoot, currentFilepath))
-  const base = path.resolve(currentDir, specifier)
-
-  // Try exact file, then with extensions, then as directory with index file
-  const candidates = [
-    base,
-    ...RESOLVE_EXTENSIONS.map(ext => base + ext),
-    ...RESOLVE_EXTENSIONS.map(ext => path.join(base, `index${ext}`)),
-  ]
-
-  for (const candidate of candidates) {
-    try {
-      if (statSync(candidate).isFile()) {
-        return path.relative(sourceRoot, candidate)
-      }
-    } catch {
-      continue
-    }
-  }
-
-  return null
 }
 
 /**
@@ -197,9 +148,16 @@ export function extract(
 ): ParseResult {
   const entities: Entity[] = []
   const edges: Edge[] = []
-  const entitySet = new Set<string>() // dedup by ID
+  const envReads: EnvRead[] = []
+  const constructorDeps: ConstructorDep[] = []
+  const functionDeps: FunctionDep[] = []
+
+  // Import symbol map for cross-file call resolution: symbolName → resolvedFilePath
+  const importSymbolMap = new Map<string, string>()
 
   const rootNode = tree.rootNode
+  const testFacts = extractTestFacts(rootNode, filepath, sourceRoot)
+  const entitySet = new Set<string>() // dedup by ID
 
   // --- File entity (always created) ---
   const fileId = entityId('file', filepath, filepath)
@@ -213,6 +171,8 @@ export function extract(
     exported: false,
     async: false,
     rawText: null,
+    paramsText: null,
+    returnText: null,
   })
   entitySet.add(fileId)
 
@@ -221,7 +181,9 @@ export function extract(
     kind: EntityKind,
     name: string,
     node: Node,
-    ownerId?: string
+    ownerId?: string,
+    paramsText?: string | null,
+    returnText?: string | null,
   ): string {
     const id = entityId(kind, filepath, name)
     if (entitySet.has(id)) return id
@@ -237,6 +199,8 @@ export function extract(
       exported: isExported(node),
       async: isAsync(node),
       rawText: getRawText(node),
+      paramsText: paramsText ?? null,
+      returnText: returnText ?? null,
     })
 
     // Ownership edge (file owns class, class owns method, etc.)
@@ -270,7 +234,22 @@ export function extract(
       const methodName = cap.node.text
       const methodNode = cap.node.parent! // method_definition
       const ownerId = classIds.get(currentMethodClass)
-      addEntity('method', `${currentMethodClass}.${methodName}`, methodNode, ownerId)
+      const qualName = `${currentMethodClass}.${methodName}`
+      const { paramsText, returnText } = extractSignature(methodNode)
+      const id = addEntity('method', qualName, methodNode, ownerId, paramsText, returnText)
+
+      // Extract method params as function deps
+      const params = extractParams(methodNode)
+      for (const p of params) {
+        functionDeps.push({ functionId: id, ...p })
+      }
+
+      // Constructor params → constructor_deps
+      if (methodName === 'constructor' && ownerId) {
+        for (const p of params) {
+          constructorDeps.push({ classId: ownerId, ...p })
+        }
+      }
     }
   }
 
@@ -278,7 +257,13 @@ export function extract(
   const funcCaptures = runQuery(tsLanguage, FUNCTION_DECLARATION_QUERY, rootNode)
   for (const cap of funcCaptures) {
     if (cap.name === 'func.name') {
-      addEntity('function', cap.node.text, cap.node.parent!)
+      const funcNode = cap.node.parent! // function_declaration
+      const { paramsText, returnText } = extractSignature(funcNode)
+      const id = addEntity('function', cap.node.text, funcNode, undefined, paramsText, returnText)
+      const params = extractParams(funcNode)
+      for (const p of params) {
+        functionDeps.push({ functionId: id, ...p })
+      }
     }
   }
 
@@ -286,8 +271,19 @@ export function extract(
   const arrowCaptures = runQuery(tsLanguage, ARROW_FUNCTION_QUERY, rootNode)
   for (const cap of arrowCaptures) {
     if (cap.name === 'arrow.name') {
-      const arrowNode = cap.node.parent! // variable_declarator → lexical_declaration
-      addEntity('function', cap.node.text, arrowNode.parent ?? arrowNode)
+      const varDecl = cap.node.parent! // variable_declarator
+      const arrowNode = varDecl.childForFieldName('value')
+      const outerNode = varDecl.parent ?? varDecl
+      const { paramsText, returnText } = arrowNode
+        ? extractSignature(arrowNode)
+        : { paramsText: null, returnText: null }
+      const id = addEntity('function', cap.node.text, outerNode, undefined, paramsText, returnText)
+      if (arrowNode) {
+        const params = extractParams(arrowNode)
+        for (const p of params) {
+          functionDeps.push({ functionId: id, ...p })
+        }
+      }
     }
   }
 
@@ -315,7 +311,7 @@ export function extract(
     }
   }
 
-  // --- Extract import edges ---
+  // --- Extract import edges + build symbol map for cross-file call resolution ---
   const namedImportCaptures = runQuery(tsLanguage, NAMED_IMPORT_QUERY, rootNode)
   let currentImportSymbol = ''
 
@@ -333,13 +329,18 @@ export function extract(
           targetId: importedFileId,
           meta: { symbol: currentImportSymbol },
         })
+        // Map imported symbol for cross-file call resolution
+        importSymbolMap.set(currentImportSymbol, resolvedPath)
       }
     }
   }
 
   const defaultImportCaptures = runQuery(tsLanguage, DEFAULT_IMPORT_QUERY, rootNode)
+  let currentDefaultName = ''
   for (const cap of defaultImportCaptures) {
-    if (cap.name === 'import.source') {
+    if (cap.name === 'import.default_name') {
+      currentDefaultName = cap.node.text
+    } else if (cap.name === 'import.source') {
       const source = stripQuotes(cap.node.text)
       const resolvedPath = resolveImportSource(source, filepath, sourceRoot)
       if (resolvedPath) {
@@ -350,13 +351,20 @@ export function extract(
           targetId: importedFileId,
           meta: { symbol: 'default' },
         })
+        // Default import: the local name maps to the source file
+        if (currentDefaultName) {
+          importSymbolMap.set(currentDefaultName, resolvedPath)
+        }
       }
     }
   }
 
   const nsImportCaptures = runQuery(tsLanguage, NAMESPACE_IMPORT_QUERY, rootNode)
+  let currentNsName = ''
   for (const cap of nsImportCaptures) {
-    if (cap.name === 'import.source') {
+    if (cap.name === 'import.namespace_name') {
+      currentNsName = cap.node.text
+    } else if (cap.name === 'import.source') {
       const source = stripQuotes(cap.node.text)
       const resolvedPath = resolveImportSource(source, filepath, sourceRoot)
       if (resolvedPath) {
@@ -367,22 +375,67 @@ export function extract(
           targetId: importedFileId,
           meta: { symbol: '*' },
         })
+        // Namespace import: record for method-style cross-file resolution (ns.foo())
+        if (currentNsName) {
+          importSymbolMap.set(currentNsName, resolvedPath)
+        }
       }
     }
   }
 
-  // --- Extract call edges (intra-file resolution) ---
+  // --- Extract call edges (intra-file + cross-file resolution) ---
   const callCaptures = runQuery(tsLanguage, CALL_EXPRESSION_QUERY, rootNode)
   for (const cap of callCaptures) {
-    if (cap.name === 'call.func_name' || cap.name === 'call.method_name') {
+    if (cap.name === 'call.func_name') {
+      // Direct call: bar()
       const calleeName = cap.node.text
-      const callNode = cap.name === 'call.func_name'
-        ? cap.node.parent!  // call_expression
-        : cap.node.parent!.parent! // member_expression → call_expression
+      const callNode = cap.node.parent! // call_expression
       const line = callNode.startPosition.row + 1
 
-      // Resolve callee to a known entity in this file
-      const calleeId = resolveCallTarget(calleeName, filepath, entitySet)
+      // Try local resolution first
+      let calleeId = resolveCallTarget(calleeName, filepath, entitySet)
+
+      // Cross-file: if the callee was imported, resolve to the target file
+      if (!calleeId) {
+        const targetFile = importSymbolMap.get(calleeName)
+        if (targetFile) {
+          // Construct the entity ID — try function first (most common for imported symbols)
+          calleeId = entityId('function', targetFile, calleeName)
+        }
+      }
+
+      if (!calleeId) continue
+
+      const callerId = findEnclosingEntity(cap.node, filepath, entitySet) ?? fileId
+      edges.push({
+        type: 'calls',
+        sourceId: callerId,
+        targetId: calleeId,
+        meta: { siteLine: line },
+      })
+    } else if (cap.name === 'call.method_name') {
+      // Method call: foo.bar()
+      const methodName = cap.node.text
+      const memberExpr = cap.node.parent! // member_expression
+      const callNode = memberExpr.parent! // call_expression
+      const line = callNode.startPosition.row + 1
+
+      // Get the object: the part before the dot
+      const objectNode = memberExpr.childForFieldName('object')
+      const objectName = objectNode?.type === 'identifier' ? objectNode.text : null
+
+      // Try local resolution first (same-file method)
+      let calleeId = resolveCallTarget(methodName, filepath, entitySet)
+
+      // Cross-file: if the object was imported (namespace import or default class)
+      if (!calleeId && objectName) {
+        const targetFile = importSymbolMap.get(objectName)
+        if (targetFile) {
+          // Try as a function in the target file
+          calleeId = entityId('function', targetFile, methodName)
+        }
+      }
+
       if (!calleeId) continue
 
       const callerId = findEnclosingEntity(cap.node, filepath, entitySet) ?? fileId
@@ -433,7 +486,171 @@ export function extract(
     }
   }
 
-  return { filepath, entities, edges }
+  // --- Extract env var reads ---
+  extractEnvReads(tsLanguage, rootNode, filepath, entitySet, envReads)
+
+  return {
+    filepath,
+    entities,
+    edges,
+    envReads,
+    constructorDeps,
+    functionDeps,
+    testCases: testFacts.testCases,
+    testCaseImports: testFacts.testCaseImports,
+    testCaseCalls: testFacts.testCaseCalls,
+    testCaseAssertions: testFacts.testCaseAssertions,
+    testCaseMocks: testFacts.testCaseMocks,
+    testCaseSeamOverrides: testFacts.testCaseSeamOverrides,
+  }
+}
+
+/**
+ * Extract formal parameters from a function/method/arrow node.
+ * Returns array of { paramName, paramType, position }.
+ */
+function extractParams(node: Node): Array<{ paramName: string; paramType: string | null; position: number }> {
+  const params: Array<{ paramName: string; paramType: string | null; position: number }> = []
+  const formalParams = node.childForFieldName('parameters')
+  if (!formalParams) return params
+
+  let position = 0
+  for (let i = 0; i < formalParams.namedChildCount; i++) {
+    const param = formalParams.namedChild(i)
+    if (!param) continue
+    if (param.type !== 'required_parameter' && param.type !== 'optional_parameter') continue
+
+    const nameNode = param.childForFieldName('pattern')
+    if (!nameNode) continue
+
+    const typeAnnotation = param.childForFieldName('type')
+    let paramType: string | null = null
+    if (typeAnnotation) {
+      // type_annotation has a child that is the actual type node
+      const typeNode = typeAnnotation.namedChildCount > 0 ? typeAnnotation.namedChild(0) : null
+      paramType = typeNode?.text ?? null
+    }
+
+    params.push({
+      paramName: nameNode.text,
+      paramType,
+      position,
+    })
+    position++
+  }
+
+  return params
+}
+
+/**
+ * Extract paramsText and returnText from a function/method/arrow node.
+ */
+function extractSignature(node: Node): { paramsText: string | null; returnText: string | null } {
+  let paramsText: string | null = null
+  let returnText: string | null = null
+
+  const formalParams = node.childForFieldName('parameters')
+  if (formalParams) {
+    paramsText = formalParams.text
+  }
+
+  const returnType = node.childForFieldName('return_type')
+  if (returnType) {
+    // return_type is a type_annotation node — get the inner type text
+    const typeNode = returnType.namedChildCount > 0 ? returnType.namedChild(0) : null
+    returnText = typeNode?.text ?? returnType.text.replace(/^:\s*/, '')
+  }
+
+  return { paramsText, returnText }
+}
+
+/**
+ * Extract env var reads from source tree.
+ * Detects process.env.X, Bun.env.X, import.meta.env.X patterns.
+ */
+function extractEnvReads(
+  language: Language,
+  rootNode: Node,
+  filepath: string,
+  knownEntities: Set<string>,
+  envReads: EnvRead[],
+): void {
+  const envAccessors = new Set(['process', 'Bun'])
+
+  // process.env.VAR_NAME / Bun.env.VAR_NAME
+  const memberCaptures = runQuery(language, ENV_MEMBER_QUERY, rootNode)
+  for (let i = 0; i < memberCaptures.length; i++) {
+    const cap = memberCaptures[i]
+    if (cap.name === 'env.obj') {
+      const obj = cap.node.text
+      const prop = memberCaptures[i + 1]?.node.text
+      const varNameCap = memberCaptures[i + 2]
+      if (prop === 'env' && envAccessors.has(obj) && varNameCap?.name === 'env.var_name') {
+        const enclosing = findEnclosingEntity(cap.node, filepath, knownEntities)
+        if (enclosing) {
+          envReads.push({
+            entityId: enclosing,
+            varName: varNameCap.node.text,
+            filepath,
+            line: cap.node.startPosition.row + 1,
+            accessor: `${obj}.env`,
+          })
+        }
+      }
+    }
+  }
+
+  // process.env['VAR_NAME']
+  const subscriptCaptures = runQuery(language, ENV_SUBSCRIPT_QUERY, rootNode)
+  for (let i = 0; i < subscriptCaptures.length; i++) {
+    const cap = subscriptCaptures[i]
+    if (cap.name === 'env.obj') {
+      const obj = cap.node.text
+      const prop = subscriptCaptures[i + 1]?.node.text
+      const varNameCap = subscriptCaptures[i + 2]
+      if (prop === 'env' && envAccessors.has(obj) && varNameCap?.name === 'env.var_name') {
+        const enclosing = findEnclosingEntity(cap.node, filepath, knownEntities)
+        if (enclosing) {
+          envReads.push({
+            entityId: enclosing,
+            varName: stripQuotes(varNameCap.node.text),
+            filepath,
+            line: cap.node.startPosition.row + 1,
+            accessor: `${obj}.env`,
+          })
+        }
+      }
+    }
+  }
+
+  // const { VAR_A, VAR_B } = process.env
+  const destructureCaptures = runQuery(language, ENV_DESTRUCTURE_QUERY, rootNode)
+  for (let i = 0; i < destructureCaptures.length; i++) {
+    const cap = destructureCaptures[i]
+    if (cap.name === 'env.var_name') {
+      // Look ahead for obj and prop
+      let objCap: CaptureResult | undefined
+      let propCap: CaptureResult | undefined
+      for (let j = i + 1; j < destructureCaptures.length; j++) {
+        if (destructureCaptures[j].name === 'env.obj') { objCap = destructureCaptures[j]; break }
+      }
+      for (let j = i + 1; j < destructureCaptures.length; j++) {
+        if (destructureCaptures[j].name === 'env.prop') { propCap = destructureCaptures[j]; break }
+      }
+      if (objCap && propCap && propCap.node.text === 'env' && envAccessors.has(objCap.node.text)) {
+        const enclosing = findEnclosingEntity(cap.node, filepath, knownEntities)
+        if (enclosing) {
+          envReads.push({
+            entityId: enclosing,
+            varName: cap.node.text,
+            filepath,
+            line: cap.node.startPosition.row + 1,
+            accessor: `${objCap.node.text}.env`,
+          })
+        }
+      }
+    }
+  }
 }
 
 /**

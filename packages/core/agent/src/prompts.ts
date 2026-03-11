@@ -5,6 +5,7 @@
  * prompts stay coupled to the tool skin definitions and can't drift.
  */
 import type { ToolVocabulary } from 'llm';
+import type { StructuredOutputSchema } from 'types';
 import { NOVA_VOCAB, vocabForProvider } from 'llm';
 
 // ============================================
@@ -736,7 +737,7 @@ export function buildAgentConfig(
   tools: string[],
   budget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number },
   llmParams: { maxTokens: number; temperature: number },
-  outputSchema?: import('types').StructuredOutputSchema,
+  outputSchema?: StructuredOutputSchema,
   envContext?: EnvironmentContext
 ): {
   type: string;
@@ -745,7 +746,7 @@ export function buildAgentConfig(
   tools: string[];
   budget: { maxIterations: number; maxToolCalls: number; maxDurationMs: number };
   llmParams: { maxTokens: number; temperature: number };
-  outputSchema?: import('types').StructuredOutputSchema;
+  outputSchema?: StructuredOutputSchema;
 } {
   const basePrompt = getAgentPrompt(agentType, NOVA_VOCAB);
   const envPrompt = envContext ? buildEnvironmentPrompt(envContext) : undefined;

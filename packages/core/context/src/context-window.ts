@@ -11,6 +11,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, copyFileSync, readdirSync, unlinkSync } from 'fs';
 import nodePath from 'path';
 import type {
+  ArtifactKind,
   ContentBlock,
   ContextWindowMetrics,
 } from 'types';
@@ -322,7 +323,7 @@ function parseItem(block: string): ContextItem | null {
     return {
       type: 'message',
       role,
-      content: hasContentBlocks ? JSON.parse(content) : content,
+      content: hasContentBlocks ? (JSON.parse(content) as MessageItem['content']) : content,
       timestamp: parseInt(meta.ts, 10),
       workItemId: meta.workItemId,
     } as MessageItem;
@@ -333,7 +334,7 @@ function parseItem(block: string): ContextItem | null {
       type: 'function_call',
       callId: meta.callId,
       name: meta.name,
-      arguments: JSON.parse(content),
+      arguments: JSON.parse(content) as Record<string, unknown>,
       timestamp: parseInt(meta.ts, 10),
       workItemId: meta.workItemId,
     } as FunctionCallItem;
@@ -471,6 +472,8 @@ export class ContextWindow {
   private _artifactCounter = 0;
   private _created: string;
   private _compactionCount = 0;
+  /** Item count at last auto-compact; prevents no-op compaction storms */
+  private _itemCountAtLastAutoCompact = 0;
 
   constructor(sessionKey: string, maxTokens = 200_000, filePath?: string) {
     this.sessionKey = sessionKey;
@@ -524,12 +527,13 @@ export class ContextWindow {
       peakInputTokens: this._metrics.peakInputTokens || undefined,
       totalOutputTokens: this._metrics.totalOutputTokens || undefined,
       percentageUsed: this._metrics.percentageUsed || undefined,
-      totalCachedTokens: this._metrics.totalCachedTokens || undefined,
+      totalCachedTokens: this._metrics.totalCachedTokens ?? undefined,
     });
   }
 
   private _loadFromDisk(): void {
-    const content = readFileSync(this.filePath!, 'utf-8');
+    if (!this.filePath) return;
+    const content = readFileSync(this.filePath, 'utf-8');
     const parsed = parseFrontmatter(content);
     if (!parsed) return;
 
@@ -584,7 +588,7 @@ export class ContextWindow {
       .filter(f => /^context\.v(\d+)\.md$/.test(f))
       .map(f => ({
         name: f,
-        version: parseInt(/^context\.v(\d+)\.md$/.exec(f)![1], 10),
+        version: parseInt(/^context\.v(\d+)\.md$/.exec(f)?.[1] ?? '0', 10),
       }))
       .sort((a, b) => a.version - b.version);
 
@@ -603,7 +607,8 @@ export class ContextWindow {
     versionedFiles.sort((a, b) => a.version - b.version);
 
     while (versionedFiles.length > 10) {
-      const oldest = versionedFiles.shift()!;
+      const oldest = versionedFiles.shift();
+      if (!oldest) break;
       unlinkSync(nodePath.join(dir, oldest.name));
     }
   }
@@ -614,10 +619,16 @@ export class ContextWindow {
 
   /**
    * Auto-compact when context is near full.
-   * Deduplicates file_content by path and truncates long outputs.
+   * Debounced: requires at least 10 new items since last compaction to avoid
+   * no-op compaction storms (the primary cause of 40+ compactions per run).
    */
   private _maybeAutoCompact(): void {
     if (!this.isNearFull(0.5)) return;
+    // Debounce: require meaningful growth before retrying compaction.
+    // First compaction fires unconditionally; subsequent ones need 10+ new items.
+    if (this._itemCountAtLastAutoCompact > 0 &&
+        this._items.length < this._itemCountAtLastAutoCompact + 10) return;
+
     this.compact({
       deduplicateByPath: true,
       maxFileContentCount: 30,
@@ -625,6 +636,7 @@ export class ContextWindow {
       maxFunctionCallOutputCount: 220,
       truncateOutputsTo: 3_000,
     });
+    this._itemCountAtLastAutoCompact = this._items.length;
   }
 
   // =========================================================================
@@ -780,7 +792,7 @@ export class ContextWindow {
   /**
    * Get artifacts by kind (function, class, etc.).
    */
-  getArtifactsByKind(kind: import('types').ArtifactKind): ArtifactItem[] {
+  getArtifactsByKind(kind: ArtifactKind): ArtifactItem[] {
     return this.getArtifacts().filter(a => a.kind === kind);
   }
 
@@ -894,34 +906,32 @@ export class ContextWindow {
    */
   ejectFileContentById(id: string): EjectResult {
     this._syncFromDiskIfBacked();
-    let ejectedPath: string | null = null;
-
-    this._items = this._items.filter((item) => {
-      if (item.type === 'file_content' && item.id === id) {
-        ejectedPath = item.path;
-        return false;
-      }
-      return true;
-    });
-
-    if (ejectedPath) {
-      // Check if any other items for this path remain
-      const hasOtherItems = this._items.some(
-        (item) => item.type === 'file_content' && item.path === ejectedPath
-      );
-      if (!hasOtherItems) {
-        this._readFiles.delete(ejectedPath);
-      }
-      this._version++;
-      this._writeDisk();
-      return {
-        ejectedCount: 1,
-        ejectedIds: [id],
-        pathsRemoved: hasOtherItems ? [] : [ejectedPath],
-      };
+    const target = this._items.find(
+      (item) => item.type === 'file_content' && item.id === id
+    );
+    if (target?.type !== 'file_content') {
+      return { ejectedCount: 0, ejectedIds: [], pathsRemoved: [] };
     }
 
-    return { ejectedCount: 0, ejectedIds: [], pathsRemoved: [] };
+    const ejectedPath = target.path;
+    this._items = this._items.filter(
+      (item) => !(item.type === 'file_content' && item.id === id)
+    );
+
+    // Check if any other items for this path remain
+    const hasOtherItems = this._items.some(
+      (item) => item.type === 'file_content' && item.path === ejectedPath
+    );
+    if (!hasOtherItems) {
+      this._readFiles.delete(ejectedPath);
+    }
+    this._version++;
+    this._writeDisk();
+    return {
+      ejectedCount: 1,
+      ejectedIds: [id],
+      pathsRemoved: hasOtherItems ? [] : [ejectedPath],
+    };
   }
 
   /**
@@ -1133,6 +1143,7 @@ export class ContextWindow {
     this._readFiles.clear();
     this._version++;
     this._metrics = createContextWindowMetrics(this.maxTokens);
+    this._itemCountAtLastAutoCompact = 0;
     this._writeDisk();
   }
 
@@ -1508,7 +1519,6 @@ export class ContextWindow {
           role,
           content,
           timestamp: item.timestamp,
-          requestId: (item as any).requestId, // requestId may be stored as metadata on item
         };
       });
   }
@@ -1537,7 +1547,7 @@ export class ContextWindow {
       for (const item of result.localContext.items) {
         if (item.type === 'function_call' || item.type === 'function_call_output') {
           const callId = item.callId;
-          if (callId && callId.startsWith('hook-')) {
+          if (callId.startsWith('hook-')) {
             continue;
           }
           this.appendItem(item);

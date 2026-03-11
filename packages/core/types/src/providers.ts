@@ -236,7 +236,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
       {
         id: 'gpt-5.3-codex-spark',
         name: 'GPT-5.3 Codex Spark',
-        context_window: 64_000,
+        context_window: 128_000,
         reasoning: ['low', 'medium', 'high', 'xhigh'],
       },
     ],
@@ -585,7 +585,7 @@ export function getAllModels(): ProviderModelEntry[] {
  * Get models for a specific provider.
  */
 export function getProviderModels(provider: SupportedProvider): ProviderModelDefinition[] {
-  return PROVIDER_REGISTRY[provider]?.models ?? [];
+  return PROVIDER_REGISTRY[provider].models ?? [];
 }
 
 /**
@@ -613,9 +613,7 @@ export function toGatewayModel(modelId: string, providerHint?: string): string {
   if (modelId.includes('/')) return modelId;
 
   let providerSlug = providerHint?.trim();
-  if (!providerSlug) {
-    providerSlug = getProviderForModel(modelId);
-  }
+  providerSlug ??= getProviderForModel(modelId);
 
   if (!providerSlug) {
     throw new Error(

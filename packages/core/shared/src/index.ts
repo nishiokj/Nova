@@ -34,7 +34,7 @@ export {
 
 // Re-export Zod for use across packages
 export { z } from 'zod';
-export type { ZodType, ZodError, ZodSchema, ZodIssue } from 'zod';
+export type { ZodType, ZodError } from 'zod';
 
 // Profiler for Chrome Trace format output
 export {

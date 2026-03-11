@@ -6,7 +6,18 @@
  */
 
 import type { Sql } from 'postgres'
-import type { Entity, EntityKind, EdgeType, GraphStats } from './types.js'
+import type {
+  Entity,
+  EntityKind,
+  EdgeType,
+  GraphStats,
+  IndexedTestCase,
+  IndexedTestCaseAssertion,
+  IndexedTestCaseCall,
+  IndexedTestCaseImport,
+  IndexedTestCaseMock,
+  IndexedTestCaseSeamOverride,
+} from './types.js'
 
 // --- Row type from Postgres ---
 
@@ -20,6 +31,8 @@ interface EntityRow {
   exported: boolean
   async: boolean
   raw_text: string | null
+  params_text: string | null
+  return_text: string | null
 }
 
 function rowToEntity(row: EntityRow): Entity {
@@ -33,6 +46,8 @@ function rowToEntity(row: EntityRow): Entity {
     exported: row.exported,
     async: row.async,
     rawText: row.raw_text,
+    paramsText: row.params_text ?? null,
+    returnText: row.return_text ?? null,
   }
 }
 
@@ -335,6 +350,412 @@ export async function unusedExports(sql: Sql, filepath?: string): Promise<Entity
         ORDER BY e.filepath, e.start_line ASC NULLS LAST
       `
   return rows.map(rowToEntity)
+}
+
+// --- Test Health Queries ---
+
+/**
+ * Call tree node returned by callTreeFrom.
+ */
+export interface CallTreeRow {
+  entity: Entity
+  depth: number
+  sameModule: boolean
+  injected: boolean
+}
+
+/**
+ * Walk `calls` edges downward from a boundary entity, producing the full call tree.
+ * Unlike blast radius (upward), this walks downward from an entry point.
+ */
+export async function callTreeFrom(
+  sql: Sql,
+  entityId: string,
+  maxDepth: number = 10,
+): Promise<CallTreeRow[]> {
+  const rows = await sql<Array<EntityRow & { depth: number; root_filepath: string; injected: boolean }>>`
+    WITH RECURSIVE call_tree AS (
+      SELECT
+        e.id, e.kind, e.name, e.filepath, e.start_line, e.end_line,
+        e.exported, e.async, e.raw_text, e.params_text, e.return_text,
+        0 AS depth,
+        e.filepath AS root_filepath,
+        false AS injected
+      FROM entity_graph.entities e
+      WHERE e.id = ${entityId}
+
+      UNION
+
+      SELECT DISTINCT
+        callee.id, callee.kind, callee.name, callee.filepath,
+        callee.start_line, callee.end_line, callee.exported, callee.async,
+        callee.raw_text, callee.params_text, callee.return_text,
+        ct.depth + 1,
+        ct.root_filepath,
+        callee.filepath != ct.root_filepath AS injected
+      FROM call_tree ct
+      JOIN entity_graph.calls c ON c.caller_id = ct.id
+      JOIN entity_graph.entities callee ON callee.id = c.callee_id
+      WHERE ct.depth < ${maxDepth}
+    ),
+    ranked AS (
+      SELECT *, ROW_NUMBER() OVER (PARTITION BY id ORDER BY depth ASC) AS rn
+      FROM call_tree
+      WHERE depth > 0
+    )
+    SELECT * FROM ranked WHERE rn = 1
+    ORDER BY depth ASC, filepath ASC
+  `
+
+  return rows.map(row => ({
+    entity: rowToEntity(row),
+    depth: row.depth,
+    sameModule: row.filepath === row.root_filepath,
+    injected: row.injected,
+  }))
+}
+
+/**
+ * Boundary info returned by the boundaries query.
+ */
+export interface BoundaryRow {
+  entity: Entity
+  fanIn: number
+}
+
+/**
+ * List all boundaries — exported entities with external callers/importers.
+ * Optionally filtered to a file. Ordered by fan-in descending.
+ */
+export async function boundaries(
+  sql: Sql,
+  filepath?: string,
+): Promise<BoundaryRow[]> {
+  const rows = await sql<Array<EntityRow & { fan_in: string }>>`
+    SELECT
+      e.*,
+      (
+        SELECT COUNT(DISTINCT caller.filepath)
+        FROM entity_graph.calls c
+        JOIN entity_graph.entities caller ON caller.id = c.caller_id
+        WHERE c.callee_id = e.id AND caller.filepath != e.filepath
+      ) +
+      (
+        SELECT COUNT(DISTINCT imp.filepath)
+        FROM entity_graph.imports i
+        JOIN entity_graph.entities imp ON imp.id = i.importer_id
+        JOIN entity_graph.entities target_file ON target_file.id = i.imported_id
+        WHERE target_file.filepath = e.filepath
+          AND i.symbol = e.name
+          AND imp.filepath != e.filepath
+      ) AS fan_in
+    FROM entity_graph.entities e
+    WHERE e.exported = true
+      AND e.kind IN ('function', 'method', 'class')
+      AND (${filepath ?? null}::text IS NULL OR e.filepath = ${filepath ?? null})
+      AND (
+        EXISTS (SELECT 1 FROM entity_graph.calls c
+                JOIN entity_graph.entities caller ON caller.id = c.caller_id
+                WHERE c.callee_id = e.id AND caller.filepath != e.filepath)
+        OR EXISTS (SELECT 1 FROM entity_graph.imports i
+                   JOIN entity_graph.entities imp ON imp.id = i.importer_id
+                   JOIN entity_graph.entities target_file ON target_file.id = i.imported_id
+                   WHERE target_file.filepath = e.filepath
+                     AND i.symbol = e.name
+                     AND imp.filepath != e.filepath)
+      )
+    ORDER BY fan_in DESC, e.filepath, e.start_line
+  `
+
+  return rows.map(row => ({
+    entity: rowToEntity(row),
+    fanIn: parseInt(row.fan_in, 10),
+  }))
+}
+
+/**
+ * Env var info returned by envVarsInTree.
+ */
+export interface EnvVarRow {
+  varName: string
+  accessor: string
+  entityId: string
+  filepath: string
+  line: number | null
+}
+
+/**
+ * Find all env vars read anywhere in a boundary's call tree.
+ */
+export async function envVarsInTree(
+  sql: Sql,
+  entityId: string,
+  maxDepth: number = 10,
+): Promise<EnvVarRow[]> {
+  const rows = await sql<Array<{ var_name: string; accessor: string; entity_id: string; filepath: string; line: number | null }>>`
+    WITH RECURSIVE call_tree AS (
+      SELECT e.id, e.filepath, 0 AS depth
+      FROM entity_graph.entities e
+      WHERE e.id = ${entityId}
+
+      UNION
+
+      SELECT DISTINCT callee.id, callee.filepath, ct.depth + 1
+      FROM call_tree ct
+      JOIN entity_graph.calls c ON c.caller_id = ct.id
+      JOIN entity_graph.entities callee ON callee.id = c.callee_id
+      WHERE ct.depth < ${maxDepth}
+    )
+    SELECT DISTINCT er.var_name, er.accessor, er.entity_id, er.filepath, er.line
+    FROM call_tree ct
+    JOIN entity_graph.env_reads er ON er.entity_id = ct.id
+    ORDER BY er.var_name
+  `
+
+  return rows.map(r => ({
+    varName: r.var_name,
+    accessor: r.accessor,
+    entityId: r.entity_id,
+    filepath: r.filepath,
+    line: r.line,
+  }))
+}
+
+/**
+ * Dep info returned by depsOf.
+ */
+export interface DepRow {
+  paramName: string
+  paramType: string | null
+  position: number
+}
+
+/**
+ * Get the injectable dependencies of a boundary — constructor params for classes,
+ * function params for functions/methods.
+ */
+export async function depsOf(
+  sql: Sql,
+  entityId: string,
+): Promise<DepRow[]> {
+  // Determine entity kind to pick the right table
+  const [entity] = await sql<[{ kind: string }?]>`
+    SELECT kind FROM entity_graph.entities WHERE id = ${entityId}
+  `
+  if (!entity) return []
+
+  if (entity.kind === 'class') {
+    // Constructor deps
+    const rows = await sql<Array<{ param_name: string; param_type: string | null; position: number }>>`
+      SELECT param_name, param_type, position
+      FROM entity_graph.constructor_deps
+      WHERE class_id = ${entityId}
+      ORDER BY position
+    `
+    return rows.map(r => ({ paramName: r.param_name, paramType: r.param_type, position: r.position }))
+  }
+
+  // Function/method deps
+  const rows = await sql<Array<{ param_name: string; param_type: string | null; position: number }>>`
+    SELECT param_name, param_type, position
+    FROM entity_graph.function_deps
+    WHERE function_id = ${entityId}
+    ORDER BY position
+  `
+  return rows.map(r => ({ paramName: r.param_name, paramType: r.param_type, position: r.position }))
+}
+
+/**
+ * Find test files that import a boundary's module.
+ * Test files are identified by naming convention: *.test.ts, *.spec.ts, __tests__/, test_*.
+ */
+export async function testFilesFor(
+  sql: Sql,
+  entityId: string,
+): Promise<Entity[]> {
+  const rows = await sql<EntityRow[]>`
+    SELECT DISTINCT tf.*
+    FROM entity_graph.entities tf
+    WHERE tf.kind = 'file'
+      AND (
+        tf.filepath LIKE '%.test.ts'
+        OR tf.filepath LIKE '%.test.tsx'
+        OR tf.filepath LIKE '%.spec.ts'
+        OR tf.filepath LIKE '%.spec.tsx'
+        OR tf.filepath LIKE '%.test.js'
+        OR tf.filepath LIKE '%.test.jsx'
+        OR tf.filepath LIKE '%.spec.js'
+        OR tf.filepath LIKE '%.spec.jsx'
+        OR tf.filepath LIKE '%/__tests__/%'
+        OR tf.filepath LIKE '%test_%'
+      )
+      AND EXISTS (
+        SELECT 1 FROM entity_graph.imports i
+        WHERE i.importer_id = tf.id
+          AND i.imported_id IN (
+            SELECT id FROM entity_graph.entities WHERE filepath = (
+              SELECT filepath FROM entity_graph.entities WHERE id = ${entityId}
+            )
+          )
+      )
+  `
+  return rows.map(rowToEntity)
+}
+
+export interface IndexedTestFactsBundle {
+  testCases: IndexedTestCase[]
+  testCaseImports: IndexedTestCaseImport[]
+  testCaseCalls: IndexedTestCaseCall[]
+  testCaseAssertions: IndexedTestCaseAssertion[]
+  testCaseMocks: IndexedTestCaseMock[]
+  testCaseSeamOverrides: IndexedTestCaseSeamOverride[]
+}
+
+export async function indexedTestFactsForFiles(
+  sql: Sql,
+  filepaths: string[],
+): Promise<IndexedTestFactsBundle> {
+  if (filepaths.length === 0) {
+    return {
+      testCases: [],
+      testCaseImports: [],
+      testCaseCalls: [],
+      testCaseAssertions: [],
+      testCaseMocks: [],
+      testCaseSeamOverrides: [],
+    }
+  }
+
+  const testCases = await sql<Array<{
+    id: string
+    filepath: string
+    name: string
+    line_start: number
+    line_end: number
+  }>>`
+    SELECT id, filepath, name, line_start, line_end
+    FROM entity_graph.test_cases
+    WHERE filepath = ANY(${filepaths})
+    ORDER BY filepath ASC, line_start ASC, line_end ASC
+  `
+
+  const testCaseIds = testCases.map(row => row.id)
+  if (testCaseIds.length === 0) {
+    return {
+      testCases: [],
+      testCaseImports: [],
+      testCaseCalls: [],
+      testCaseAssertions: [],
+      testCaseMocks: [],
+      testCaseSeamOverrides: [],
+    }
+  }
+
+  const [testCaseImports, testCaseCalls, testCaseAssertions, testCaseMocks, testCaseSeamOverrides] = await Promise.all([
+    sql<Array<{
+      test_case_id: string
+      local_name: string
+      imported_name: string
+      resolved_path: string | null
+      is_prod: boolean
+    }>>`
+      SELECT test_case_id, local_name, imported_name, resolved_path, is_prod
+      FROM entity_graph.test_case_imports
+      WHERE test_case_id = ANY(${testCaseIds})
+      ORDER BY test_case_id ASC, local_name ASC, imported_name ASC
+    `,
+    sql<Array<{
+      test_case_id: string
+      kind: string
+      symbol: string
+      resolved_path: string | null
+      line: number
+    }>>`
+      SELECT test_case_id, kind, symbol, resolved_path, line
+      FROM entity_graph.test_case_calls
+      WHERE test_case_id = ANY(${testCaseIds})
+      ORDER BY test_case_id ASC, line ASC
+    `,
+    sql<Array<{
+      test_case_id: string
+      kind: string
+      target_symbol: string | null
+      resolved_path: string | null
+      line: number
+    }>>`
+      SELECT test_case_id, kind, target_symbol, resolved_path, line
+      FROM entity_graph.test_case_assertions
+      WHERE test_case_id = ANY(${testCaseIds})
+      ORDER BY test_case_id ASC, line ASC
+    `,
+    sql<Array<{
+      test_case_id: string
+      kind: string
+      api: string
+      target: string | null
+      line: number
+    }>>`
+      SELECT test_case_id, kind, api, target, line
+      FROM entity_graph.test_case_mocks
+      WHERE test_case_id = ANY(${testCaseIds})
+      ORDER BY test_case_id ASC, line ASC
+    `,
+    sql<Array<{
+      test_case_id: string
+      kind: string
+      target: string
+      line: number
+    }>>`
+      SELECT test_case_id, kind, target, line
+      FROM entity_graph.test_case_seam_overrides
+      WHERE test_case_id = ANY(${testCaseIds})
+      ORDER BY test_case_id ASC, line ASC
+    `,
+  ])
+
+  return {
+    testCases: testCases.map(row => ({
+      id: row.id,
+      filepath: row.filepath,
+      name: row.name,
+      lineStart: row.line_start,
+      lineEnd: row.line_end,
+    })),
+    testCaseImports: testCaseImports.map(row => ({
+      testCaseId: row.test_case_id,
+      localName: row.local_name,
+      importedName: row.imported_name,
+      resolvedPath: row.resolved_path,
+      isProd: row.is_prod,
+    })),
+    testCaseCalls: testCaseCalls.map(row => ({
+      testCaseId: row.test_case_id,
+      kind: row.kind as IndexedTestCaseCall['kind'],
+      symbol: row.symbol,
+      resolvedPath: row.resolved_path,
+      line: row.line,
+    })),
+    testCaseAssertions: testCaseAssertions.map(row => ({
+      testCaseId: row.test_case_id,
+      kind: row.kind as IndexedTestCaseAssertion['kind'],
+      targetSymbol: row.target_symbol,
+      resolvedPath: row.resolved_path,
+      line: row.line,
+    })),
+    testCaseMocks: testCaseMocks.map(row => ({
+      testCaseId: row.test_case_id,
+      kind: row.kind as IndexedTestCaseMock['kind'],
+      api: row.api,
+      target: row.target,
+      line: row.line,
+    })),
+    testCaseSeamOverrides: testCaseSeamOverrides.map(row => ({
+      testCaseId: row.test_case_id,
+      kind: row.kind as IndexedTestCaseSeamOverride['kind'],
+      target: row.target,
+      line: row.line,
+    })),
+  }
 }
 
 /**

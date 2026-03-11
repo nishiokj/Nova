@@ -111,8 +111,8 @@ export async function executeWebFetch(
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
   const startTime = Date.now();
-  const url = String(args.url ?? '').trim();
-  const prompt = String(args.prompt ?? '').trim();
+  const url = (typeof args.url === 'string' ? args.url : '').trim();
+  const prompt = (typeof args.prompt === 'string' ? args.prompt : '').trim();
 
   if (!url) {
     return {
@@ -167,8 +167,7 @@ export async function executeWebFetch(
 
   try {
     const signal = composeSignals(context?.signal, FETCH_TIMEOUT_MS);
-    let response: Response;
-    response = await fetch(parsedUrl.href, {
+    const response = await fetch(parsedUrl.href, {
       method: 'GET',
       headers: {
         'User-Agent': USER_AGENT,
@@ -344,7 +343,7 @@ function parseContentType(value: string): { mimeType: string; charset?: string }
 
   for (const param of params) {
     const [key, val] = param.trim().split('=');
-    if (key?.toLowerCase() === 'charset' && val) {
+    if (key.toLowerCase() === 'charset' && val) {
       charset = val.replace(/["']/g, '').trim();
     }
   }
@@ -429,7 +428,7 @@ function extractPrimaryHtml(html: string): { html: string; source: string } {
     if (!match) {
       continue;
     }
-    const extracted = match[candidate.group]?.trim();
+    const extracted = match[candidate.group].trim();
     if (extracted) {
       return { html: extracted, source: candidate.source };
     }

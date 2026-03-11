@@ -428,7 +428,7 @@ export class ToolRegistry {
     const sorted = Object.entries(args).sort(([a], [b]) =>
       a.localeCompare(b)
     );
-    const parts = [name, ...sorted.map(([k, v]) => `${k}=${v}`)];
+    const parts = [name, ...sorted.map(([k, v]) => `${k}=${String(v)}`)];
     return parts.join('|');
   }
 

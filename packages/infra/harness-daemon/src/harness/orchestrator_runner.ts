@@ -1,6 +1,5 @@
 import type { AgentHooks, AgentRegistry, EventEmitCallback, ModelSelection } from 'agent';
 import type { ContextWindow } from 'context';
-import type { Effect} from 'effect';
 import type { ManagedRuntime } from 'effect';
 import type { LLMAdapter } from 'llm';
 import {

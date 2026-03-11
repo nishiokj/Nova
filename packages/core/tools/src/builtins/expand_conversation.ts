@@ -27,9 +27,9 @@ function resolveBaseUrl(args: Record<string, unknown>, context?: ToolExecutionCo
   const env = { ...process.env, ...(context?.envOverrides ?? {}) };
   const baseUrlOverride = typeof args.base_url === 'string' ? args.base_url : undefined;
   const candidate = baseUrlOverride
-    || env.AGENT_MEMORY_BASE_URL
-    || env.AGENT_MEMORY_URL
-    || 'http://localhost:3001';
+    ?? env.AGENT_MEMORY_BASE_URL
+    ?? env.AGENT_MEMORY_URL
+    ?? 'http://localhost:3001';
   return candidate.replace(/\/+$/, '');
 }
 
@@ -58,7 +58,7 @@ async function fetchJson(url: string, timeoutMs: number): Promise<unknown> {
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} ${res.statusText}`);
     }
-    return res.json();
+    return await res.json();
   } finally {
     clearTimeout(timeout);
   }
@@ -72,7 +72,7 @@ export async function executeExpandConversation(
   context?: ToolExecutionContext
 ): Promise<ToolResult> {
   const startTime = Date.now();
-  const conversationId = String(args.conversation_id ?? '').trim();
+  const conversationId = (typeof args.conversation_id === 'string' ? args.conversation_id : '').trim();
   if (!conversationId) {
     return errorResult('ExpandConversation', 'conversation_id is required', Date.now() - startTime);
   }
@@ -133,7 +133,7 @@ export async function executeExpandConversation(
     for (let i = 0; i < messages.length; i++) {
       const message = messages[i];
       const index = actualOffset + i + 1;
-      const timestamp = message.sent_at || message.received_at || message.source_timestamp || message.created_at;
+      const timestamp = message.sent_at ?? message.received_at ?? message.source_timestamp ?? message.created_at;
       const sender = message.sender_identity_id ? `sender:${message.sender_identity_id}` : '';
       const headerParts = [
         `### ${index}.`,

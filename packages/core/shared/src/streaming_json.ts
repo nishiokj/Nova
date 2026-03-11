@@ -53,8 +53,8 @@ export class StreamingJsonExtractor {
         const startPos = match.index + match[0].length;
         this.parseStringContent(startPos);
       }
-    } else if (this.state === 'in_string') {
-      // Continue parsing from where we left off
+    } else {
+      // state === 'in_string': continue parsing from where we left off
       this.parseStringContent(0);
     }
 

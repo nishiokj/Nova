@@ -213,7 +213,7 @@ export class PermissionChecker {
       return { granted: false, reason: 'path_traversal' };
     }
 
-    if ((tool === 'Write' || tool === 'Edit') && this.restrictWriteToPathsEnabled) {
+    if (this.restrictWriteToPathsEnabled) {
       const normalizedTarget = this.normalizePathKey(resolvedTarget);
       if (this.restrictWriteToPaths.has(normalizedTarget)) {
         return { granted: true, reason: 'allow_rule' };
@@ -456,7 +456,7 @@ export class PermissionChecker {
       // Add to session grants using suggested pattern (e.g., "cd *" not "cd /specific/path")
       // This allows similar commands for the rest of the session
       this.state.sessionGrants.push({ tool: request.tool, pattern });
-    } else if (response.decision === 'deny') {
+    } else {
       // Add to session denials using suggested pattern for consistency
       this.state.sessionDenials.push({ tool: request.tool, pattern });
     }
@@ -509,8 +509,8 @@ export class PermissionChecker {
       // Validate and parse permission rules
       const permissions = parsed.permissions ?? { allow: [], deny: [] };
       return {
-        allow: this.parseRules(permissions.allow ?? []),
-        deny: this.parseRules(permissions.deny ?? []),
+        allow: this.parseRules(permissions.allow),
+        deny: this.parseRules(permissions.deny),
       };
     } catch (err) {
       // Log warning but don't crash - continue with other config files
@@ -561,10 +561,10 @@ export class PermissionChecker {
       let config: PermissionSettings;
       if (fs.existsSync(configPath)) {
         const content = fs.readFileSync(configPath, 'utf-8');
-        config = JSON.parse(content) as PermissionSettings;
-        if (!config.permissions) {
-          config.permissions = { allow: [], deny: [] };
-        }
+        const parsed = JSON.parse(content) as Partial<PermissionSettings>;
+        config = {
+          permissions: parsed.permissions ?? { allow: [], deny: [] },
+        };
       } else {
         config = { ...DEFAULT_PERMISSION_SETTINGS };
       }
@@ -580,7 +580,7 @@ export class PermissionChecker {
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
       process.stderr.write(`[permissions] Added ${type} rule: ${ruleString}\n`);
     } catch (err) {
-      process.stderr.write(`[permissions] Failed to persist rule to ${configPath}: ${err}\n`);
+      process.stderr.write(`[permissions] Failed to persist rule to ${configPath}: ${String(err)}\n`);
     }
   }
 
@@ -590,10 +590,10 @@ export class PermissionChecker {
   static extractTarget(tool: PermissionedTool, args: Record<string, unknown>): string {
     switch (tool) {
       case 'Bash':
-        return String(args.command ?? '');
+        return typeof args.command === 'string' ? args.command : '';
       case 'Write':
       case 'Edit':
-        return String(args.file_path ?? args.path ?? '');
+        return typeof args.file_path === 'string' ? args.file_path : (typeof args.path === 'string' ? args.path : '');
     }
   }
 }

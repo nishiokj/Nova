@@ -258,7 +258,7 @@ export type EventEmitCallback = (event: AgentEvent) => void;
 /**
  * Noop emit callback for testing or when events aren't needed.
  */
-export const noopEmit: EventEmitCallback = () => {};
+export const noopEmit: EventEmitCallback = () => { /* noop */ };
 
 // ============================================
 // TOOL HOOKS
@@ -475,7 +475,7 @@ export interface InternalHookQueue {
  * Noop hook queue for when hooks are disabled.
  */
 export const noopHookQueue: InternalHookQueue = {
-  enqueue: () => {},
+  enqueue: () => { /* noop */ },
 };
 
 // ============================================

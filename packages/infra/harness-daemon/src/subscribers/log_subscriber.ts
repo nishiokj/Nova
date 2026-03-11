@@ -64,7 +64,7 @@ export class LogSubscriber {
       this.logEvent(event);
     }
 
-    if (this.pendingEvents.length > 0 && !this.flushScheduled && !this.closed) {
+    if (this.pendingEvents.length > 0 && !this.closed) {
       this.flushScheduled = true;
       queueMicrotask(() => this.flushPending());
     }
@@ -76,7 +76,7 @@ export class LogSubscriber {
     const suffix = event.workItemId ? ` workItem=${event.workItemId}` : '';
     const message = `[${event.type}]${suffix}`;
 
-    this.logger[level](message, { requestId: event.requestId, ...(event.data ?? {}) });
+    this.logger[level](message, { requestId: event.requestId, ...((event.data ?? {}) as Record<string, unknown>) });
   }
 
   private inferLevel(eventType: string): LogLevel {

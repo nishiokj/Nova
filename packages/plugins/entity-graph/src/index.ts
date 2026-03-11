@@ -28,22 +28,42 @@ import {
   dependentsOf,
   unusedExports,
   graphStats,
+  callTreeFrom,
+  boundaries as queryBoundaries,
+  envVarsInTree,
+  depsOf,
+  indexedTestFactsForFiles,
+  testFilesFor,
 } from './queries.js'
-import type { BlastRadiusEntry } from './queries.js'
+import type { BlastRadiusEntry, CallTreeRow, BoundaryRow, EnvVarRow, DepRow, IndexedTestFactsBundle } from './queries.js'
 import { reviewDiff } from './pr-review/review.js'
 import type { PRReview } from './pr-review/types.js'
 import { cleanExpiredLeases } from './leasing.js'
 import { createEntityGraphHooks } from './hooks.js'
+import { TestHealthModule } from './test-health.js'
+import type { BoundaryInfo, ReadinessVerdict, GapReport } from './test-health.js'
+import type { BoundaryCandidate, BoundaryDossier, SkepticConfig } from './skeptic/types.js'
 
 export class EntityGraph {
   private sql: Sql
   private config: EntityGraphConfig
   private hooks: EntityGraphHooks | null = null
   private scanPromise: Promise<{ files: number; entities: number; edges: number; durationMs: number } | null> | null = null
+  private _testHealth: TestHealthModule | null = null
 
   constructor(sql: Sql, config: EntityGraphConfig) {
     this.sql = sql
     this.config = config
+  }
+
+  /**
+   * Get the TestHealthModule instance (lazy-created).
+   */
+  get testHealth(): TestHealthModule {
+    if (!this._testHealth) {
+      this._testHealth = new TestHealthModule(this.sql, this.config.sourceRoot)
+    }
+    return this._testHealth
   }
 
   /**
@@ -146,6 +166,51 @@ export class EntityGraph {
     return graphStats(this.sql)
   }
 
+  // --- Test Health Query Delegation ---
+
+  async callTreeFrom(entityId: string, maxDepth?: number): Promise<CallTreeRow[]> {
+    return callTreeFrom(this.sql, entityId, maxDepth)
+  }
+
+  async boundaries(filepath?: string): Promise<BoundaryRow[]> {
+    return queryBoundaries(this.sql, filepath)
+  }
+
+  async envVarsInTree(entityId: string, maxDepth?: number): Promise<EnvVarRow[]> {
+    return envVarsInTree(this.sql, entityId, maxDepth)
+  }
+
+  async depsOf(entityId: string): Promise<DepRow[]> {
+    return depsOf(this.sql, entityId)
+  }
+
+  async testFilesFor(entityId: string): Promise<Entity[]> {
+    return testFilesFor(this.sql, entityId)
+  }
+
+  async indexedTestFactsForFiles(filepaths: string[]): Promise<IndexedTestFactsBundle> {
+    return indexedTestFactsForFiles(this.sql, filepaths)
+  }
+
+  async skepticTargets(
+    selector?: string,
+    opts?: {
+      maxDepth?: number
+      recentPaths?: string[]
+    },
+  ): Promise<BoundaryCandidate[]> {
+    return this.testHealth.skepticTargets(selector, opts)
+  }
+
+  async skepticDossier(
+    boundaryId: string,
+    opts?: {
+      maxDepth?: number
+    },
+  ): Promise<BoundaryDossier> {
+    return this.testHealth.skepticDossier(boundaryId, opts)
+  }
+
   /**
    * Run the full PR review pipeline from a unified diff string.
    */
@@ -178,6 +243,19 @@ export type {
   FileLease,
   BlastRadiusResult,
   GraphStats,
+  EnvRead,
+  ConstructorDep,
+  FunctionDep,
+  TestAssertionKind,
+  TestMockKind,
+  TestSeamOverrideKind,
+  TestCaseCallKind,
+  IndexedTestCase,
+  IndexedTestCaseImport,
+  IndexedTestCaseCall,
+  IndexedTestCaseAssertion,
+  IndexedTestCaseMock,
+  IndexedTestCaseSeamOverride,
   Sql,
 } from './types.js'
 
@@ -195,8 +273,14 @@ export {
   dependentsOf,
   unusedExports,
   graphStats,
+  callTreeFrom,
+  boundaries,
+  envVarsInTree,
+  depsOf,
+  indexedTestFactsForFiles,
+  testFilesFor,
 } from './queries.js'
-export type { BlastRadiusEntry } from './queries.js'
+export type { BlastRadiusEntry, CallTreeRow, BoundaryRow, EnvVarRow, DepRow, IndexedTestFactsBundle } from './queries.js'
 
 // --- PR Review ---
 export { parseDiff, parseHunkHeader } from './pr-review/diff.js'
@@ -216,3 +300,25 @@ export { createEntityGraphHooks } from './hooks.js'
 export { entityId } from './parser/extractor.js'
 export { initParser, isParserInitialized, languageForFile, createParser, parseSource } from './parser/parser.js'
 export type { SupportedLanguage } from './parser/parser.js'
+
+// --- Test Health ---
+export { TestHealthModule, loadRegistry, parseRegistryYaml } from './test-health.js'
+export type {
+  SubstitutionEntry,
+  SubstitutionRegistry,
+  BoundaryInfo,
+  CallTreeNode,
+  DependencyInfo,
+  EnvVarInfo,
+  ReadinessVerdict,
+  GapReport,
+  ProjectIndex,
+  IndexBoundary,
+  IndexDep,
+  IndexEnvVar,
+  IndexCallTree,
+  IndexCallTreeNode,
+} from './test-health.js'
+export { selectBoundaryCandidates, hydrateBoundaryCandidate } from './skeptic/selection.js'
+export { buildBoundaryDossier } from './skeptic/boundary_dossier.js'
+export type { BoundaryCandidate, BoundaryDossier, SkepticConfig } from './skeptic/types.js'

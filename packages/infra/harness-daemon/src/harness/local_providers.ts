@@ -5,7 +5,7 @@
  * No authentication required - uses a fixed local user ID for CLI use.
  */
 
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
+import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
@@ -194,14 +194,15 @@ export class LocalProviderManager {
       );
 
       // Strip any bracketed paste markers that may have been saved before sanitization was added
+      const ESC = String.fromCharCode(0x1b);
       return decrypted
-        ?.replace(/\x1b\[200~/g, '')
-        .replace(/\x1b\[201~/g, '')
-        .replace(/\[200~/g, '')
-        .replace(/\[201~/g, '')
-        .trim() ?? null;
+        .replaceAll(`${ESC}[200~`, '')
+        .replaceAll(`${ESC}[201~`, '')
+        .replaceAll('[200~', '')
+        .replaceAll('[201~', '')
+        .trim();
     } catch (err) {
-      this.logger.error(`[local-providers] Failed to get ${provider} key: ${err}`);
+      this.logger.error(`[local-providers] Failed to get ${provider} key: ${String(err)}`);
       return null;
     }
   }

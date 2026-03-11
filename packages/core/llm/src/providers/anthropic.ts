@@ -9,6 +9,8 @@ import type {
   TokenUsage,
   StopReason,
   LLMResponse,
+  LLMItem,
+  LLMMessageItem,
   RespondParams,
   StreamParams,
   LLMExecutionError,
@@ -62,12 +64,10 @@ export class AnthropicProvider implements LLMProviderAdapter {
           Stream.fromAsyncIterable(
             {
               [Symbol.asyncIterator]: async function* () {
-                while (true) {
+                for (;;) {
                   const next = await generator.next();
                   if (next.done) {
-                    if (next.value) {
-                      params.onComplete?.(next.value);
-                    }
+                    params.onComplete?.(next.value);
                     return;
                   }
                   yield next.value;
@@ -96,22 +96,21 @@ export class AnthropicProvider implements LLMProviderAdapter {
       }));
   }
 
-  formatMessages(messages: any[]): { role: string; content: string | unknown[] }[] {
+  formatMessages(messages: LLMItem[]): { role: string; content: string | unknown[] }[] {
     return messages
-      .filter((m) => m && m.role !== 'system' && m.content != null)
+      .filter((m): m is LLMMessageItem => m.type === 'message' && m.role !== 'system')
       .map((m) => ({
         role: m.role,
         content:
           typeof m.content === 'string'
             ? m.content
-            : Array.isArray(m.content)
-              ? m.content.filter((block: unknown) => block != null).map((block: Record<string, unknown>) => {
+            : m.content.map((block) => {
                   if (block.type === 'text') {
-                    return { type: 'text', text: block.text };
+                    return { type: 'text' as const, text: block.text };
                   }
                   if (block.type === 'tool_use') {
                     return {
-                      type: 'tool_use',
+                      type: 'tool_use' as const,
                       id: block.id,
                       name: block.name,
                       input: block.input,
@@ -119,15 +118,14 @@ export class AnthropicProvider implements LLMProviderAdapter {
                   }
                   if (block.type === 'tool_result') {
                     return {
-                      type: 'tool_result',
+                      type: 'tool_result' as const,
                       tool_use_id: block.toolUseId,
                       content: block.content,
                       is_error: block.isError,
                     };
                   }
                   return block;
-                })
-              : [],
+                }),
       }));
   }
 
@@ -141,6 +139,10 @@ export class AnthropicProvider implements LLMProviderAdapter {
   ): Promise<LLMResponse> {
     const { config, logger } = context;
     const resolved = config;
+
+    if (!resolved.apiKey) {
+      throw new Error('Anthropic API key is required');
+    }
 
     const systemMessage = params.messages.find((m) => m.role === 'system');
     let systemPrompt =
@@ -176,7 +178,7 @@ export class AnthropicProvider implements LLMProviderAdapter {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': resolved.apiKey!,
+        'x-api-key': resolved.apiKey,
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(body),
@@ -214,19 +216,19 @@ export class AnthropicProvider implements LLMProviderAdapter {
     };
 
     const content = data.content
-      .filter((c): c is { type: string; text?: string } => c?.type === 'text' && typeof c.text === 'string')
+      .filter((c): c is { type: string; text?: string } => c.type === 'text' && typeof c.text === 'string')
       .map((c) => c.text ?? '')
       .join('');
 
     const toolUseBlocks = data.content
-      .filter((c): c is { type: string; id?: string; name?: string; input?: Record<string, unknown> } =>
-        c?.type === 'tool_use' &&
+      .filter((c): c is { type: string; id: string; name: string; input?: Record<string, unknown> } =>
+        c.type === 'tool_use' &&
         typeof c.id === 'string' && c.id.length > 0 &&
         typeof c.name === 'string' && c.name.length > 0
       );
     const toolCalls: ToolCall[] = toolUseBlocks.map((c) => ({
-      id: c.id!,
-      name: c.name!,
+      id: c.id,
+      name: c.name,
       arguments: (c.input && typeof c.input === 'object') ? c.input : {},
     }));
 
@@ -268,6 +270,10 @@ export class AnthropicProvider implements LLMProviderAdapter {
     const { config, logger } = context;
     const resolved = config;
 
+    if (!resolved.apiKey) {
+      throw new Error('Anthropic API key is required');
+    }
+
     const systemMessage = params.messages.find((m) => m.role === 'system');
     let systemPrompt =
       params.system ??
@@ -303,7 +309,7 @@ export class AnthropicProvider implements LLMProviderAdapter {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': resolved.apiKey!,
+        'x-api-key': resolved.apiKey,
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(body),
@@ -339,7 +345,7 @@ export class AnthropicProvider implements LLMProviderAdapter {
     let buffer = '';
 
     try {
-      while (true) {
+      for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
 

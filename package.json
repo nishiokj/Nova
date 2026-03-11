@@ -79,6 +79,11 @@
     "test:coverage": "vitest run --coverage",
     "test:orchestrator": "vitest run tests/orchestrator",
     "test:dashboard": "vitest run --project dashboard",
+    "db:start": "bun run --cwd packages/plugins/agent-memory db:start",
+    "db:migrate": "bun run --cwd packages/plugins/agent-memory db:migrate",
+    "db:setup": "bun run db:start && bun run db:migrate",
+    "db:graph": "bun run scripts/build-graph.ts",
+    "db:index": "bun run packages/plugins/entity-graph/src/cli.ts index",
     "profile": "PROFILE=1 bun run start",
     "profile:daemon": "PROFILE=1 bun run start:daemon"
   },

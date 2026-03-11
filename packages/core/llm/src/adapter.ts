@@ -127,7 +127,7 @@ class LLMRouterAdapter implements LLMAdapter {
    */
   private resolveRequestConfig(llm: LLMRequestConfig): Effect.Effect<ResolvedRequestConfig, Error> {
     return Effect.gen(this, function* () {
-      if (!llm?.model) {
+      if (!llm.model) {
         return yield* Effect.fail(new Error('LLM request missing model'));
       }
 
@@ -282,8 +282,8 @@ class LLMRouterAdapter implements LLMAdapter {
 
       if (Exit.isSuccess(exit)) {
         profiler.asyncEnd(`llm:${resolved.provider}:${resolved.model}`, asyncId, 'llm', {
-          promptTokens: exit.value.usage?.promptTokens,
-          completionTokens: exit.value.usage?.completionTokens,
+          promptTokens: exit.value.usage.promptTokens,
+          completionTokens: exit.value.usage.completionTokens,
         });
         return exit.value;
       }
@@ -328,8 +328,8 @@ class LLMRouterAdapter implements LLMAdapter {
             Effect.sync(() => {
               if (finalResponse) {
                 profiler.asyncEnd(`llm:stream:${resolved.provider}:${resolved.model}`, asyncId, 'llm', {
-                  promptTokens: finalResponse.usage?.promptTokens,
-                  completionTokens: finalResponse.usage?.completionTokens,
+                  promptTokens: finalResponse.usage.promptTokens,
+                  completionTokens: finalResponse.usage.completionTokens,
                 });
               } else {
                 profiler.asyncEnd(`llm:stream:${resolved.provider}:${resolved.model}`, asyncId, 'llm', {

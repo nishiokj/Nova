@@ -77,7 +77,7 @@ export class EventBus implements EventBusProtocol {
       this.dispatchEvent(event);
     }
 
-    if (this.pendingEvents.length > 0 && !this.flushScheduled) {
+    if (this.pendingEvents.length > 0) {
       this.scheduleFlush();
     }
   }
@@ -85,7 +85,7 @@ export class EventBus implements EventBusProtocol {
   private dispatchEvent(event: AnyEvent): void {
     // Snapshot handlers at dispatch time so subscription changes affect the next event,
     // and we avoid allocating arrays at publish-time.
-    const runId = (event as any).runId ?? event.requestId;
+    const runId = ('runId' in event ? (event as { runId?: string }).runId : undefined) ?? event.requestId;
     const runHandlers = runId ? this.runHandlers.get(runId) : undefined;
 
     // Optimized: fast-path for agent_message/reasoning events (high-frequency streaming)
@@ -124,10 +124,12 @@ export class EventBus implements EventBusProtocol {
   }
 
   subscribeRun(runId: string, handler: (event: AnyEvent) => void): () => void {
-    if (!this.runHandlers.has(runId)) {
-      this.runHandlers.set(runId, new Set());
+    let handlers = this.runHandlers.get(runId);
+    if (!handlers) {
+      handlers = new Set();
+      this.runHandlers.set(runId, handlers);
     }
-    this.runHandlers.get(runId)!.add(handler);
+    handlers.add(handler);
     return () => {
       this.runHandlers.get(runId)?.delete(handler);
       if (this.runHandlers.get(runId)?.size === 0) {
@@ -161,7 +163,7 @@ export function createEventEmitCallback(
       requestId,
       runId: runId ?? requestId,
       sessionKey: sessionKey ?? event.sessionKey,
-      timestamp: event.timestamp ?? Date.now() / 1000,
+      timestamp: event.timestamp,
     };
     eventBus.publish(taggedEvent);
   };

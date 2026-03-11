@@ -13,8 +13,6 @@ import {
   GRAPHD_SCHEMA_VERSION,
   GRAPHD_SCHEMA_DDL,
   ENABLE_FOREIGN_KEYS,
-  ENABLE_WAL,
-  ENABLE_NORMAL_SYNC,
   EXPORTABLE_TABLES,
   isExportableTable,
   V6_MIGRATION_STATEMENTS,
@@ -90,8 +88,8 @@ export class GraphStore {
     this.db = new Database(dbPath);
 
     // Enable WAL mode for concurrent reads
-    this.db.exec('PRAGMA journal_mode = WAL;');
-    this.db.exec('PRAGMA synchronous = NORMAL;');
+    this.db.run('PRAGMA journal_mode = WAL;');
+    this.db.run('PRAGMA synchronous = NORMAL;');
   }
 
   /**
@@ -106,7 +104,7 @@ export class GraphStore {
    * This makes writes visible to other processes reading the database.
    */
   checkpoint(): void {
-    this.db.exec('PRAGMA wal_checkpoint(PASSIVE);');
+    this.db.run('PRAGMA wal_checkpoint(PASSIVE);');
   }
 
   /**
@@ -155,15 +153,15 @@ export class GraphStore {
     }
 
     // Create all tables (IF NOT EXISTS is idempotent) - safely adds new tables
-    this.db.exec(GRAPHD_SCHEMA_DDL);
-    this.db.exec(ENABLE_FOREIGN_KEYS);
+    this.db.run(GRAPHD_SCHEMA_DDL);
+    this.db.run(ENABLE_FOREIGN_KEYS);
 
     // Run v6 migrations (add columns to existing tables)
     // These fail gracefully if columns already exist
     if (existingNum < 6) {
       for (const stmt of V6_MIGRATION_STATEMENTS) {
         try {
-          this.db.exec(stmt);
+          this.db.run(stmt);
         } catch (err) {
           // Ignore "duplicate column name" errors - column already exists
           const msg = err instanceof Error ? err.message : String(err);
@@ -178,7 +176,7 @@ export class GraphStore {
     // Uses CREATE TABLE/INDEX IF NOT EXISTS so idempotent
     if (existingNum < 7) {
       for (const stmt of V7_MIGRATION_STATEMENTS) {
-        this.db.exec(stmt);
+        this.db.run(stmt);
       }
     }
 
@@ -492,7 +490,7 @@ export class GraphStore {
    * Rebuild database to reclaim space and defragment.
    */
   vacuum(): void {
-    this.db.exec('VACUUM;');
+    this.db.run('VACUUM;');
   }
 
   /**
@@ -694,7 +692,7 @@ export class GraphStore {
           && Array.isArray(existing[key])
           && APPEND_ONLY_METADATA_ARRAY_KEYS.has(key)
         ) {
-          existing[key] = [...(existing[key] as unknown[]), ...value];
+          existing[key] = [...(existing[key] as unknown[]), ...(value as unknown[])];
         } else {
           existing[key] = value;
         }
@@ -898,7 +896,7 @@ export class GraphStore {
       return nextIdx;
     } catch (err) {
       if ((err as Error).message.includes('FOREIGN KEY constraint')) {
-        throw new Error(`Session '${sessionKey}' does not exist`);
+        throw new Error(`Session '${sessionKey}' does not exist`, { cause: err });
       }
       throw err;
     }
@@ -991,7 +989,7 @@ export class GraphStore {
       return nextVer;
     } catch (err) {
       if ((err as Error).message.includes('FOREIGN KEY constraint')) {
-        throw new Error(`Session '${sessionKey}' does not exist`);
+        throw new Error(`Session '${sessionKey}' does not exist`, { cause: err });
       }
       throw err;
     }
@@ -1146,7 +1144,7 @@ export class GraphStore {
       return Number(result.lastInsertRowid);
     } catch (err) {
       if ((err as Error).message.includes('FOREIGN KEY constraint')) {
-        throw new Error(`Session '${sessionKey}' does not exist`);
+        throw new Error(`Session '${sessionKey}' does not exist`, { cause: err });
       }
       throw err;
     }
@@ -1254,7 +1252,7 @@ export class GraphStore {
     let oldContent: string | null = null;
     let oldContentSizeBytes: number | null = null;
     let oldContentTruncated = 0;
-    if (trace.oldContent != null) {
+    if (trace.oldContent !== undefined) {
       const oldBytes = Buffer.byteLength(trace.oldContent, 'utf-8');
       oldContentSizeBytes = oldBytes;
       oldContent = trace.oldContent;
@@ -1292,7 +1290,7 @@ export class GraphStore {
       return Number(result.lastInsertRowid);
     } catch (err) {
       if ((err as Error).message.includes('FOREIGN KEY constraint')) {
-        throw new Error(`Session '${sessionKey}' does not exist`);
+        throw new Error(`Session '${sessionKey}' does not exist`, { cause: err });
       }
       throw err;
     }
@@ -1402,7 +1400,9 @@ export class GraphStore {
         .run(id, email, name ?? null, pictureUrl ?? null, now, now);
     }
 
-    return this.getUser(id)!;
+    const user = this.getUser(id);
+    if (!user) throw new Error(`Failed to retrieve user after upsert: ${id}`);
+    return user;
   }
 
   /**
@@ -1474,7 +1474,9 @@ export class GraphStore {
       )
       .run(id, userId, deviceName ?? null, now, now, expiresAt ?? null);
 
-    return this.getUserSession(id)!;
+    const session = this.getUserSession(id);
+    if (!session) throw new Error(`Failed to retrieve user session after insert: ${id}`);
+    return session;
   }
 
   /**
@@ -1602,7 +1604,9 @@ export class GraphStore {
            WHERE user_id = ? AND provider = ?;`
         )
         .run(encryptedKey, iv, now, userId, provider);
-      return this.getProviderCredential(userId, provider)!;
+      const updated = this.getProviderCredential(userId, provider);
+      if (!updated) throw new Error(`Failed to retrieve credential after update: ${userId}/${provider}`);
+      return updated;
     }
 
     this.db
@@ -1612,7 +1616,9 @@ export class GraphStore {
       )
       .run(id, userId, provider, encryptedKey, iv, now, now);
 
-    return this.getProviderCredential(userId, provider)!;
+    const created = this.getProviderCredential(userId, provider);
+    if (!created) throw new Error(`Failed to retrieve credential after insert: ${userId}/${provider}`);
+    return created;
   }
 
   /**
@@ -1715,7 +1721,7 @@ export class GraphStore {
 
       // 2. Copy latest context snapshot
       const latestSnapshot = this.getLatestContextSnapshot(sourceSessionKey);
-      if (latestSnapshot && latestSnapshot.contextJson) {
+      if (latestSnapshot?.contextJson) {
         this.db
           .query(
             `INSERT INTO context_snapshots (session_key, snapshot_version, created_at, context_json)
@@ -1762,6 +1768,7 @@ export class GraphStore {
    * Get a user preference value by key.
    * Returns the parsed JSON value or null if not found.
    */
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
   getUserPreference<T = unknown>(key: string): T | null {
     const row = this.db
       .query('SELECT value FROM graphd_metadata WHERE key = ?;')

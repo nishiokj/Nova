@@ -7,6 +7,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'http';
+import type { Socket } from 'net';
 import { URL } from 'url';
 import type { GraphDManager } from './manager.js';
 import { safeInt } from './utils.js';
@@ -31,12 +32,12 @@ export class GraphDRequestHandler {
 
     try {
       if (method === 'GET') {
-        await this.handleGet(path, url.searchParams, res);
+        this.handleGet(path, url.searchParams, res);
       } else if (method === 'POST') {
         const payload = await this.readJson(req);
-        await this.handlePost(path, payload, res);
+        this.handlePost(path, payload, res);
       } else if (method === 'DELETE') {
-        await this.handleDelete(path, res);
+        this.handleDelete(path, res);
       } else {
         this.sendJson(res, { error: 'method_not_allowed' }, 405);
       }
@@ -46,11 +47,11 @@ export class GraphDRequestHandler {
     }
   }
 
-  private async handleGet(
+  private handleGet(
     path: string,
     params: URLSearchParams,
     res: ServerResponse
-  ): Promise<void> {
+  ): void {
     // Control-plane routes
     if (path.startsWith('/control-plane/')) {
       this.handleControlPlaneGet(path, params, res);
@@ -124,7 +125,7 @@ export class GraphDRequestHandler {
     if (path === '/control-plane/sessions') {
       const limit = safeInt(params.get('limit'), 50);
       const result = this.manager.sessionsList({ limit });
-      const sessions = ((result as { sessions?: unknown[] }).sessions ?? []).map(this.formatSession);
+      const sessions = ((result as { sessions?: unknown[] }).sessions ?? []).map((row) => this.formatSession(row));
       this.sendJson(res, { sessions });
       return;
     }
@@ -150,7 +151,7 @@ export class GraphDRequestHandler {
       const projects = Array.from(projectMap.entries())
         .map(([p, data]) => ({
           id: p,
-          name: p.split('/').pop() || p,
+          name: p.split('/').pop() ?? p,
           path: p,
           sessionCount: data.count,
           activeGoals: 0,
@@ -166,7 +167,7 @@ export class GraphDRequestHandler {
     if (messagesMatch) {
       const sessionKey = decodeURIComponent(messagesMatch[1]);
       const result = this.manager.messagesGet(sessionKey, 200, 0);
-      const messages = ((result as { messages?: unknown[] }).messages ?? []).map(this.formatMessage);
+      const messages = ((result as { messages?: unknown[] }).messages ?? []).map((row) => this.formatMessage(row));
       this.sendJson(res, { messages });
       return;
     }
@@ -227,11 +228,11 @@ export class GraphDRequestHandler {
     };
   }
 
-  private async handlePost(
+  private handlePost(
     path: string,
     payload: Record<string, unknown>,
     res: ServerResponse
-  ): Promise<void> {
+  ): void {
     switch (path) {
       case '/impact':
         this.sendJson(res, this.manager.handleImpact(payload));
@@ -279,7 +280,7 @@ export class GraphDRequestHandler {
     }
   }
 
-  private async handleDelete(path: string, res: ServerResponse): Promise<void> {
+  private handleDelete(path: string, res: ServerResponse): void {
     if (path.startsWith('/session/')) {
       const sessionKey = path.slice('/session/'.length);
       if (!sessionKey) {
@@ -297,7 +298,7 @@ export class GraphDRequestHandler {
   private async readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
     return new Promise((resolve) => {
       let body = '';
-      req.on('data', (chunk) => {
+      req.on('data', (chunk: Buffer) => {
         body += chunk.toString();
       });
       req.on('end', () => {
@@ -342,7 +343,7 @@ export class GraphDHTTPServer {
   private server: Server | null = null;
   private readonly handler: GraphDRequestHandler;
   private shutdownRequested = false;
-  private connections = new Set<import('net').Socket>();
+  private connections = new Set<Socket>();
 
   constructor(
     private readonly host: string,
@@ -359,7 +360,7 @@ export class GraphDHTTPServer {
     return new Promise((resolve, reject) => {
       this.server = createServer((req, res) => {
         // Don't log requests (matching Python behavior)
-        this.handler.handle(req, res).catch((err) => {
+        this.handler.handle(req, res).catch((err: unknown) => {
           console.error('Request handler error:', err);
           if (!res.headersSent) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -433,7 +434,7 @@ export class GraphDHTTPServer {
    * Check if server is running.
    */
   get isRunning(): boolean {
-    return this.server !== null && this.server.listening;
+    return this.server?.listening ?? false;
   }
 }
 

@@ -8,7 +8,7 @@
 import http from 'http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { profiler } from 'shared';
-import type { BusClientMessage, BusServerMessage, BusMessage } from './bus_types.js';
+import type { BusClientMessage, BusServerMessage } from './bus_types.js';
 import type { EventBusProtocol } from './event_bus.js';
 
 export type BusPublishHandler = (
@@ -22,7 +22,7 @@ export type BusPublishHandler = (
  * Translates internal events to wire format. Returns null to filter out events.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type EventTranslator = (event: any) => unknown | null;
+export type EventTranslator = (event: any) => unknown;
 
 export interface BusServerOptions {
   host: string;
@@ -219,18 +219,20 @@ export class BusServer {
       return this.getAddress();
     }
 
-    this.httpServer = http.createServer();
-    this.wss = new WebSocketServer({ noServer: true });
+    const httpServer = http.createServer();
+    const wss = new WebSocketServer({ noServer: true });
+    this.httpServer = httpServer;
+    this.wss = wss;
 
-    this.httpServer.on('upgrade', (req, socket, head) => {
-      this.wss!.handleUpgrade(req, socket, head, (ws) => {
-        this.wss!.emit('connection', ws);
+    httpServer.on('upgrade', (req, socket, head) => {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws);
       });
     });
 
     await new Promise<void>((resolve, reject) => {
-      this.httpServer!.once('error', reject);
-      this.httpServer!.listen(this.port, this.host, () => resolve());
+      httpServer.once('error', reject);
+      httpServer.listen(this.port, this.host, () => resolve());
     });
 
     this.wss.on('connection', (ws) => this.handleConnection(ws));
@@ -258,9 +260,10 @@ export class BusServer {
     this.wss = null;
 
     if (this.httpServer) {
-      this.httpServer.closeAllConnections();
+      const server = this.httpServer;
+      server.closeAllConnections();
       await new Promise<void>((resolve) => {
-        this.httpServer!.close(() => resolve());
+        server.close(() => resolve());
       });
       this.httpServer = null;
     }
@@ -348,20 +351,15 @@ export class BusServer {
 
   private handleMessage(connection: ConnectionState, data: string): void {
     profiler.begin('bus.server.parse', 'bus');
-    let message: BusMessage;
+    let message: BusClientMessage;
     try {
-      message = JSON.parse(data) as BusMessage;
+      message = JSON.parse(data) as BusClientMessage;
     } catch (error) {
       profiler.end('bus.server.parse', 'bus');
       this.sendError(connection, 'invalid_json', String(error));
       return;
     }
     profiler.end('bus.server.parse', 'bus');
-
-    if (!message || typeof message !== 'object' || !('type' in message)) {
-      this.sendError(connection, 'invalid_message');
-      return;
-    }
 
     profiler.begin(`bus.server.dispatch:${message.type}`, 'bus');
     switch (message.type) {
@@ -397,7 +395,7 @@ export class BusServer {
         try {
           const result = this.onPublish(connection.id, message.channel, message.payload);
           if (result && typeof (result).catch === 'function') {
-            (result).catch((error) => {
+            (result).catch((error: unknown) => {
               this.sendError(connection, 'publish_failed', String(error));
             });
           }
@@ -406,9 +404,6 @@ export class BusServer {
         }
         profiler.end(`bus.server.dispatch:${message.type}`, 'bus');
         return;
-      default:
-        profiler.end(`bus.server.dispatch:${message.type}`, 'bus');
-        this.sendError(connection, 'unsupported_message', message);
     }
   }
 
@@ -488,8 +483,10 @@ export class BusServer {
       runId?: unknown;
       requestId?: unknown;
     };
-    const streamType = String(payload.type ?? 'event');
-    const streamId = String(payload.sessionKey ?? payload.runId ?? payload.requestId ?? 'default');
+    const streamType = typeof payload.type === 'string' ? payload.type : 'event';
+    const streamId = typeof payload.sessionKey === 'string' ? payload.sessionKey
+      : typeof payload.runId === 'string' ? payload.runId
+      : typeof payload.requestId === 'string' ? payload.requestId : 'default';
     return `${metadata.channel ?? 'unknown'}:${streamType}:${streamId}`;
   }
 
@@ -614,7 +611,6 @@ export class BusServer {
 
       let sendIndex = 0;
       let next = connection.outboundQueue[sendIndex];
-      if (!next) break;
 
       if (next.priority === 'lossy') {
         const ageMs = Date.now() - next.createdAtMs;
@@ -632,10 +628,6 @@ export class BusServer {
           }
           sendIndex = prioritized;
           next = connection.outboundQueue[sendIndex];
-          if (!next) {
-            this.scheduleFlush(connection, BusServer.FLUSH_RETRY_MS);
-            return;
-          }
         }
       }
 
@@ -674,10 +666,6 @@ export class BusServer {
       profiler.begin(spanName, 'bus');
     }
     const [dropped] = connection.outboundQueue.splice(index, 1);
-    if (!dropped) {
-      if (spanName) profiler.end(spanName, 'bus');
-      return;
-    }
 
     connection.queuedBytes = Math.max(0, connection.queuedBytes - dropped.bytes);
     if (

@@ -15,7 +15,7 @@ import type {
 } from './contracts.js';
 
 export interface UnifiedHookRegistry {
-  register<T extends UnifiedHookRegistration>(hook: T): void;
+  register(hook: UnifiedHookRegistration): void;
   unregister(hookId: string): void;
   has(hookId: string): boolean;
   getHook(hookId: string): RegisteredUnifiedHook | undefined;
@@ -28,7 +28,7 @@ export interface UnifiedHookRegistry {
 }
 
 export interface SessionScopedUnifiedHookRegistry {
-  register<T extends UnifiedHookRegistration>(sessionKey: string, hook: T): void;
+  register(sessionKey: string, hook: UnifiedHookRegistration): void;
   unregister(sessionKey: string, hookId: string): void;
   has(sessionKey: string, hookId: string): boolean;
   getHook(sessionKey: string, hookId: string): RegisteredUnifiedHook | undefined;
@@ -46,10 +46,10 @@ export function createUnifiedHookRegistry(): UnifiedHookRegistry {
   const byEvent = new Map<UnifiedEventType, Set<string>>();
   let registrationIndex = 0;
 
-  function register<T extends UnifiedHookRegistration>(hook: T): void {
+  function register(hook: UnifiedHookRegistration): void {
     validateHookRegistration(hook, hooks);
 
-    const registered: RegisteredUnifiedHook<T> = {
+    const registered: RegisteredUnifiedHook = {
       ...hook,
       registeredAt: Date.now(),
       registrationIndex,
@@ -61,7 +61,7 @@ export function createUnifiedHookRegistry(): UnifiedHookRegistry {
     if (!byEvent.has(hook.event)) {
       byEvent.set(hook.event, new Set());
     }
-    byEvent.get(hook.event)!.add(hook.id);
+    byEvent.get(hook.event)?.add(hook.id);
   }
 
   function getSorted<E extends UnifiedEventType>(event: E): RegisteredUnifiedHook<Extract<UnifiedHookRegistration, { event: E }>>[] {
@@ -162,7 +162,7 @@ export function createSessionScopedUnifiedHookRegistry(): SessionScopedUnifiedHo
   }
 
   return {
-    register<T extends UnifiedHookRegistration>(sessionKey: string, hook: T): void {
+    register(sessionKey: string, hook: UnifiedHookRegistration): void {
       getOrCreateSessionRegistry(sessionKey).register(hook);
     },
 
@@ -220,13 +220,13 @@ function validateHookRegistration(
   hook: UnifiedHookRegistration,
   existing: Map<string, RegisteredUnifiedHook>
 ): void {
-  if (!hook.id?.trim()) {
+  if (!hook.id.trim()) {
     throw new Error('Unified hook id is required');
   }
   if (existing.has(hook.id)) {
     throw new Error(`Unified hook id already registered: ${hook.id}`);
   }
-  if (!hook.source?.trim()) {
+  if (!hook.source.trim()) {
     throw new Error(`Unified hook ${hook.id} must declare source`);
   }
   if (!Number.isFinite(hook.priority)) {

@@ -17,7 +17,7 @@ export interface RpcContext<State> {
   emit: (event: BridgeEvent, channel?: string) => void;
 }
 
-type RpcHandler<State> = (params: unknown, ctx: RpcContext<State>) => unknown | Promise<unknown>;
+type RpcHandler<State> = (params: unknown, ctx: RpcContext<State>) => unknown;
 
 export class RpcDispatcher<State> {
   private readonly handlers = new Map<string, RpcHandler<State>>();

@@ -9,6 +9,7 @@ import type {
   TokenUsage,
   StopReason,
   LLMResponse,
+  LLMItem,
   RespondParams,
   StreamParams,
   LLMExecutionError,
@@ -66,12 +67,10 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
           Stream.fromAsyncIterable(
             {
               [Symbol.asyncIterator]: async function* () {
-                while (true) {
+                for (;;) {
                   const next = await generator.next();
                   if (next.done) {
-                    if (next.value) {
-                      params.onComplete?.(next.value);
-                    }
+                    params.onComplete?.(next.value);
                     return;
                   }
                   yield next.value;
@@ -101,7 +100,7 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
     }));
   }
 
-  formatMessages(messages: any[], systemPrompt?: string): Record<string, unknown>[] {
+  formatMessages(messages: LLMItem[], systemPrompt?: string): Record<string, unknown>[] {
     const result: Record<string, unknown>[] = [];
 
     if (systemPrompt) {
@@ -112,27 +111,25 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
     let pendingReasoningContent = '';
 
     for (const msg of messages) {
-      if (!msg || msg.role === 'system') continue;
-      const item = msg as unknown as Record<string, unknown>;
+      if (msg.role === 'system') continue;
 
-      if (item.type === 'reasoning') {
-        const content = item.content as string;
-        if (content) {
-          pendingReasoningContent += (pendingReasoningContent ? '\n' : '') + content;
+      if (msg.type === 'reasoning') {
+        if (msg.content) {
+          pendingReasoningContent += (pendingReasoningContent ? '\n' : '') + msg.content;
         }
         continue;
       }
 
-      if (item.type === 'function_call') {
-        const callId = (item.call_id ?? item.callId) as string;
-        const name = item.name as string;
-        const args = item.arguments;
-        const argsStr = typeof args === 'string' ? args : JSON.stringify(args);
-        functionCalls.push({ callId, name, argumentsStr: argsStr });
+      if (msg.type === 'function_call') {
+        functionCalls.push({
+          callId: msg.call_id,
+          name: msg.name,
+          argumentsStr: msg.arguments,
+        });
         continue;
       }
 
-      if (item.type === 'function_call_output') {
+      if (msg.type === 'function_call_output') {
         if (functionCalls.length > 0) {
           const assistantMsg: Record<string, unknown> = {
             role: 'assistant',
@@ -154,43 +151,34 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
           functionCalls.length = 0;
         }
 
-        const outputCallId = (item.call_id ?? item.callId) as string;
-        const rawOutput = item.output as string;
-        const isError = item.isError as boolean | undefined;
+        const rawOutput = msg.output;
+        const isError = msg.isError;
         const output = isError && rawOutput && !rawOutput.startsWith('Error')
           ? `Error: ${rawOutput}`
           : rawOutput;
         result.push({
           role: 'tool',
-          tool_call_id: outputCallId,
+          tool_call_id: msg.call_id,
           content: output,
         });
         continue;
       }
 
-      if (msg.content === undefined || msg.content === null) {
-        continue;
-      }
-
+      // msg.type === 'message' at this point
       if (typeof msg.content === 'string') {
         result.push({ role: msg.role, content: msg.content });
-      } else if (Array.isArray(msg.content)) {
-        const content = msg.content
-          .filter((block: unknown) => block != null)
-          .map((block: Record<string, unknown>) => {
+      } else {
+        const content = msg.content.map((block) => {
             if (block.type === 'text') {
-              return { type: 'text', text: block.text };
+              return { type: 'text' as const, text: block.text };
             }
             if (block.type === 'image') {
-              const source = block.source as { mediaType?: string; data?: string } | undefined;
-              if (source?.mediaType && source?.data) {
-                return {
-                  type: 'image_url',
-                  image_url: {
-                    url: `data:${source.mediaType};base64,${source.data}`,
-                  },
-                };
-              }
+              return {
+                type: 'image_url' as const,
+                image_url: {
+                  url: `data:${block.source.mediaType};base64,${block.source.data}`,
+                },
+              };
             }
             return block;
           });
@@ -311,12 +299,12 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
       totalTokens: 0,
     };
 
-    const usageData = data.usage as Record<string, unknown> | undefined;
+    const usageData = data.usage as { input_tokens?: number; output_tokens?: number; total_tokens?: number } | undefined;
     if (usageData) {
       usage = {
-        promptTokens: (usageData.input_tokens as number) ?? 0,
-        completionTokens: (usageData.output_tokens as number) ?? 0,
-        totalTokens: (usageData.total_tokens as number) ?? 0,
+        promptTokens: usageData.input_tokens ?? 0,
+        completionTokens: usageData.output_tokens ?? 0,
+        totalTokens: usageData.total_tokens ?? 0,
       };
     }
 
@@ -327,7 +315,7 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
       stopReason,
       usage,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      model: (data.model as string) ?? resolved.model,
+      model: (data.model as string | undefined) ?? resolved.model,
       durationMs: Date.now() - context.startTime,
       responseId,
     };
@@ -449,7 +437,7 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
     let buffer = '';
 
     try {
-      while (true) {
+      for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -517,15 +505,15 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
                   toolCalls.length = 0;
                   toolCalls.push(...parsedCalls.filter((call) => !!call.name));
                 }
-                const usageData = responseObj.usage as Record<string, unknown> | undefined;
+                const usageData = responseObj.usage as { input_tokens?: number; output_tokens?: number; total_tokens?: number } | undefined;
                 if (usageData) {
                   usage = {
-                    promptTokens: (usageData.input_tokens as number) ?? 0,
-                    completionTokens: (usageData.output_tokens as number) ?? 0,
-                    totalTokens: (usageData.total_tokens as number) ?? 0,
+                    promptTokens: usageData.input_tokens ?? 0,
+                    completionTokens: usageData.output_tokens ?? 0,
+                    totalTokens: usageData.total_tokens ?? 0,
                   };
                 }
-                model = (responseObj.model as string) ?? model;
+                model = (responseObj.model as string | undefined) ?? model;
               }
             }
           } catch {
@@ -686,17 +674,20 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
     };
 
     const choice = data.choices[0];
-    const content = this.normalizeContent(choice?.message?.content);
-    const reasoningContent = choice?.message?.reasoning_content ?? undefined;
+    const content = this.normalizeContent(choice.message.content);
+    const reasoningContent = choice.message.reasoning_content ?? undefined;
 
     const toolCalls: ToolCall[] = [];
-    if (choice?.message?.tool_calls) {
+    if (choice.message.tool_calls) {
       for (const tc of choice.message.tool_calls) {
         let args: Record<string, unknown> = {};
         try {
-          args = JSON.parse(tc.function.arguments);
+          const parsed: unknown = JSON.parse(tc.function.arguments);
+          if (parsed && typeof parsed === 'object') {
+            args = parsed as Record<string, unknown>;
+          }
         } catch {
-          args = {};
+          // keep empty args
         }
         toolCalls.push({
           id: tc.id,
@@ -713,7 +704,7 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
       content_filter: 'end_turn',
     };
     const stopReason: StopReason =
-      stopReasonMap[choice?.finish_reason ?? 'stop'] ?? 'end_turn';
+      stopReasonMap[choice.finish_reason] ?? 'end_turn';
 
     const usage: TokenUsage = {
       promptTokens: data.usage?.prompt_tokens ?? 0,
@@ -726,7 +717,7 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
       stopReason,
       usage,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      model: data.model ?? resolved.model,
+      model: data.model,
       durationMs: Date.now() - context.startTime,
       reasoningContent,
     };
@@ -824,7 +815,7 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
     let buffer = '';
 
     try {
-      while (true) {
+      for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -871,13 +862,13 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
 
             const choice = event.choices?.[0];
             if (choice) {
-              if (choice.delta?.reasoning_content) {
+              if (choice.delta.reasoning_content) {
                 const reasoningChunk = choice.delta.reasoning_content;
                 fullReasoningContent += reasoningChunk;
                 params.onReasoningChunk?.(reasoningChunk);
               }
 
-              const deltaContent = (choice.delta as { content?: unknown }).content;
+              const deltaContent = choice.delta.content;
               if (deltaContent !== undefined) {
                 const normalized = this.normalizeContent(deltaContent);
                 if (normalized) {
@@ -887,16 +878,17 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
                 }
               }
 
-              if (choice.delta?.tool_calls) {
+              if (choice.delta.tool_calls) {
                 for (const tc of choice.delta.tool_calls) {
-                  if (!toolCallBuilders.has(tc.index)) {
-                    toolCallBuilders.set(tc.index, {
+                  let builder = toolCallBuilders.get(tc.index);
+                  if (!builder) {
+                    builder = {
                       id: tc.id ?? '',
                       name: tc.function?.name ?? '',
                       arguments: '',
-                    });
+                    };
+                    toolCallBuilders.set(tc.index, builder);
                   }
-                  const builder = toolCallBuilders.get(tc.index)!;
                   if (tc.id) builder.id = tc.id;
                   if (tc.function?.name) builder.name = tc.function.name;
                   if (tc.function?.arguments) builder.arguments += tc.function.arguments;
@@ -931,9 +923,12 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
       for (const builder of toolCallBuilders.values()) {
         let args: Record<string, unknown> = {};
         try {
-          args = JSON.parse(builder.arguments);
+          const parsed: unknown = JSON.parse(builder.arguments);
+          if (parsed && typeof parsed === 'object') {
+            args = parsed as Record<string, unknown>;
+          }
         } catch {
-          args = {};
+          // keep empty args
         }
         partialToolCalls.push({
           id: builder.id,
@@ -966,9 +961,12 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
         if (!builder.name) continue;
         let args: Record<string, unknown> = {};
         try {
-          args = JSON.parse(builder.arguments);
+          const parsed: unknown = JSON.parse(builder.arguments);
+          if (parsed && typeof parsed === 'object') {
+            args = parsed as Record<string, unknown>;
+          }
         } catch {
-          args = {};
+          // keep empty args
         }
         toolCalls.push({
           id: builder.id,
@@ -993,7 +991,7 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
   // HELPERS
   // ============================================
 
-  private normalizeInput(messages: any[], systemPrompt?: string): Record<string, unknown>[] {
+  private normalizeInput(messages: LLMItem[], systemPrompt?: string): Record<string, unknown>[] {
     const input: Record<string, unknown>[] = [];
     const isValidToolName = (name: unknown): name is string =>
       typeof name === 'string' && /^[A-Za-z0-9_-]+$/.test(name);
@@ -1007,66 +1005,59 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
     }
 
     for (const msg of messages) {
-      if (!msg) continue;
       if (msg.role === 'system') continue;
-      const item = msg as unknown as Record<string, unknown>;
-      const callId = (item.call_id ?? item.id ?? item.callId) as string;
 
-      if (item.type === 'function_call') {
-        if (!isValidToolName(item.name)) {
+      if (msg.type === 'function_call') {
+        if (!isValidToolName(msg.name)) {
           continue;
         }
         input.push({
           type: 'function_call',
-          call_id: callId,
-          name: item.name,
-          arguments: item.arguments,
+          call_id: msg.call_id,
+          name: msg.name,
+          arguments: msg.arguments,
         });
         continue;
       }
 
-      if (item.type === 'function_call_output') {
-        const outputCallId = (item.call_id ?? item.callId) as string;
-        const rawOutput = item.output as string;
-        const isError = item.isError as boolean | undefined;
+      if (msg.type === 'function_call_output') {
+        const rawOutput = msg.output;
+        const isError = msg.isError;
         const output = isError && rawOutput && !rawOutput.startsWith('Error')
           ? `Error: ${rawOutput}`
           : rawOutput;
         input.push({
           type: 'function_call_output',
-          call_id: outputCallId,
+          call_id: msg.call_id,
           output,
         });
         continue;
       }
 
-      if (msg.content === undefined || msg.content === null) {
+      if (msg.type === 'reasoning') {
+        // Reasoning items don't get sent as input
         continue;
       }
 
+      // msg.type === 'message' at this point
       if (typeof msg.content === 'string') {
         input.push({
           type: 'message',
           role: msg.role,
           content: msg.content,
         });
-      } else if (Array.isArray(msg.content)) {
-        const content = msg.content
-          .filter((block: unknown) => block != null)
-          .map((block: Record<string, unknown>) => {
+      } else {
+        const content = msg.content.map((block) => {
             if (block.type === 'text') {
-              return { type: 'text', text: block.text };
+              return { type: 'text' as const, text: block.text };
             }
             if (block.type === 'image') {
-              const source = block.source as { mediaType?: string; data?: string } | undefined;
-              if (source?.mediaType && source?.data) {
-                return {
-                  type: 'image_url',
-                  image_url: {
-                    url: `data:${source.mediaType};base64,${source.data}`,
-                  },
-                };
-              }
+              return {
+                type: 'image_url' as const,
+                image_url: {
+                  url: `data:${block.source.mediaType};base64,${block.source.data}`,
+                },
+              };
             }
             return block;
           });
@@ -1127,7 +1118,6 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
 
     let content = '';
     for (const item of output) {
-      if (!item || typeof item !== 'object') continue;
       const itemType = item.type as string | undefined;
 
       if (itemType === 'message') {
@@ -1141,7 +1131,7 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
         for (const block of contentBlocks) {
           const blockType = block.type as string | undefined;
           if (blockType === 'output_text' || blockType === 'text') {
-            content += (block.text as string) ?? '';
+            content += (block.text as string | undefined) ?? '';
           } else if (blockType === 'output_json' || blockType === 'json') {
             const jsonPayload = (block.json as Record<string, unknown> | undefined)
               ?? (block.output as Record<string, unknown> | undefined);
@@ -1149,14 +1139,14 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
               content += JSON.stringify(jsonPayload);
             }
           } else if (blockType === 'refusal') {
-            content += (block.refusal as string) ?? '';
+            content += (block.refusal as string | undefined) ?? '';
           }
         }
         continue;
       }
 
       if (itemType === 'output_text' || itemType === 'text') {
-        content += (item.text as string) ?? '';
+        content += (item.text as string | undefined) ?? '';
         continue;
       }
 
@@ -1170,7 +1160,7 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
       }
 
       if (itemType === 'refusal') {
-        content += (item.refusal as string) ?? '';
+        content += (item.refusal as string | undefined) ?? '';
       }
     }
 
@@ -1189,8 +1179,6 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
       typeof id === 'string' && id.length > 0;
 
     for (const item of output) {
-      if (!item || typeof item !== 'object') continue;
-
       if (item.type === 'function_call') {
         const callId = (item.call_id ?? item.id) as string;
         const name = item.name as string;
@@ -1200,7 +1188,7 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
         const argsJson = item.arguments as string;
         if (typeof argsJson === 'string' && argsJson.length > 0) {
           try {
-            const parsed = JSON.parse(argsJson);
+            const parsed: unknown = JSON.parse(argsJson);
             if (parsed && typeof parsed === 'object') {
               args = parsed as Record<string, unknown>;
             }
@@ -1227,7 +1215,7 @@ export class VercelGatewayProvider implements LLMProviderAdapter {
         const argsJson = block.arguments as string;
         if (typeof argsJson === 'string' && argsJson.length > 0) {
           try {
-            const parsed = JSON.parse(argsJson);
+            const parsed: unknown = JSON.parse(argsJson);
             if (parsed && typeof parsed === 'object') {
               args = parsed as Record<string, unknown>;
             }

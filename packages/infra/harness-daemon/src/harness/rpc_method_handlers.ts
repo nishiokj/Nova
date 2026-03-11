@@ -21,6 +21,7 @@ import {
   type HookInput,
 } from './skills_loader.js';
 import { RpcHandlerError } from './rpc_dispatcher.js';
+import type { ModelSelection } from 'agent';
 import type { HarnessLike } from './bridge_gateway.js';
 
 const GATEWAY_PROVIDER_ID = 'vercel-gateway';
@@ -102,8 +103,8 @@ export class RpcMethodHandlers {
 
     return {
       success: true,
-      llm_provider: defaultAgent?.llm.provider ?? 'unknown',
-      model: defaultAgent?.llm.model ?? 'unknown',
+      llm_provider: defaultAgent.llm.provider,
+      model: defaultAgent.llm.model,
       default_agent: config.defaultAgent,
       agent_count: Object.keys(config.agents).length,
       graphd_enabled: config.graphd.enabled,
@@ -126,7 +127,7 @@ export class RpcMethodHandlers {
     const graphd = this.harness.getGraphD?.();
 
     // Get hidden models from user preferences
-    const hiddenModels = (graphd?.getUserPreference?.('user_prefs:hidden_models') ?? []) as string[];
+    const hiddenModels = graphd?.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
     const hiddenModelSet = new Set(hiddenModels);
     const accessCache = new Map<string, boolean>();
     const hasAccess = (provider: string) => {
@@ -150,8 +151,8 @@ export class RpcMethodHandlers {
 
     // If Vercel Gateway is configured, surface gateway variants for supported providers
     if (hasAccess(GATEWAY_PROVIDER_ID)) {
-      const seen = new Set(models.map((model) => `${model.provider ?? ''}:${model.id}`));
-      const availableSeen = new Set(availableModels.map((model) => `${model.provider ?? ''}:${model.id}`));
+      const seen = new Set(models.map((model) => `${model.provider}:${model.id}`));
+      const availableSeen = new Set(availableModels.map((model) => `${model.provider}:${model.id}`));
       for (const model of baseModels) {
         if (!GATEWAY_MODEL_PROVIDERS.has(model.provider)) continue;
 
@@ -219,7 +220,7 @@ export class RpcMethodHandlers {
     }
 
     // Get current hidden models and add the new one
-    const hiddenModels = (graphd.getUserPreference?.('user_prefs:hidden_models') ?? []) as string[];
+    const hiddenModels = graphd.getUserPreference<string[]>('user_prefs:hidden_models') ?? [];
     if (!hiddenModels.includes(modelId)) {
       hiddenModels.push(modelId);
       graphd.setUserPreference('user_prefs:hidden_models', hiddenModels);
@@ -230,13 +231,12 @@ export class RpcMethodHandlers {
     const clearedAgentTypes: string[] = [];
 
     // Clear from model_selections user preference if any agent type matches
-    const modelSelections = (
-      graphd.getUserPreference?.('user_prefs:model_selections') ?? {}
-    ) as Record<string, { provider?: string; model?: string; reasoning?: string; contextWindow?: number }>;
+    type SelectionRecord = Record<string, { provider?: string; model?: string; reasoning?: string; contextWindow?: number }>;
+    const modelSelections = graphd.getUserPreference<SelectionRecord>('user_prefs:model_selections') ?? {};
     let modelSelectionsUpdated = false;
     for (const [agentType, selection] of Object.entries(modelSelections)) {
-      if (selection?.model?.trim().toLowerCase() === normalizedModelId) {
-        delete modelSelections[agentType];
+      if (selection.model?.trim().toLowerCase() === normalizedModelId) {
+        Reflect.deleteProperty(modelSelections, agentType);
         modelSelectionsUpdated = true;
       }
     }
@@ -250,21 +250,24 @@ export class RpcMethodHandlers {
 
     // Clear session selections if they match the deleted model
     if (sessionKey) {
-      const inMemorySelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+      const inMemorySelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map<string, ModelSelection>();
       for (const [agentType, selection] of inMemorySelections) {
-        const selectionModel = typeof selection?.model === 'string' ? selection.model.trim().toLowerCase() : '';
+        const selectionModel = selection.model.trim().toLowerCase();
         if (selectionModel === normalizedModelId && !clearedAgentTypes.includes(agentType)) {
           clearedAgentTypes.push(agentType);
         }
       }
 
       const session = graphd.sessionGet(sessionKey);
-      const metadata = session?.metadata as Record<string, unknown> | undefined;
-      const sessionSelections = (metadata?.model_selections as Record<string, { provider?: string; model?: string; reasoning?: string; contextWindow?: number }>) ?? {};
+      const metadata = session.metadata as Record<string, unknown> | undefined;
+      const rawSelections = metadata?.model_selections;
+      const sessionSelections = (
+        rawSelections !== null && rawSelections !== undefined && typeof rawSelections === 'object' ? rawSelections : {}
+      ) as Record<string, { provider?: string; model?: string; reasoning?: string; contextWindow?: number }>;
       let sessionSelectionsUpdated = false;
       for (const [agentType, selection] of Object.entries(sessionSelections)) {
-        if (selection?.model?.trim().toLowerCase() === normalizedModelId) {
-          delete sessionSelections[agentType];
+        if (selection.model?.trim().toLowerCase() === normalizedModelId) {
+          Reflect.deleteProperty(sessionSelections, agentType);
           sessionSelectionsUpdated = true;
           clearedAgentTypes.push(agentType);
         }
@@ -358,7 +361,7 @@ export class RpcMethodHandlers {
 
   private handleSkillsCreate(data: Record<string, unknown> | undefined): Record<string, unknown> {
     const skill = data?.skill as SkillInput | undefined;
-    if (!skill?.name || !skill?.instructions) {
+    if (!skill?.name || !skill.instructions) {
       return { action: 'create', success: false, error: 'Missing required fields: name, instructions' };
     }
 
@@ -418,7 +421,7 @@ export class RpcMethodHandlers {
 
   private handleHooksCreate(data: Record<string, unknown> | undefined): Record<string, unknown> {
     const hook = data?.hook as HookInput | undefined;
-    if (!hook?.name || !hook?.trigger || !hook?.hooks) {
+    if (!hook?.name) {
       return { action: 'create', success: false, error: 'Missing required fields: name, trigger, hooks' };
     }
 
@@ -549,9 +552,10 @@ export class RpcMethodHandlers {
     const provider = typeof data?.provider === 'string' ? data.provider : '';
     // Strip bracketed paste markers that may have slipped through from terminal input
     const rawKey = typeof data?.apiKey === 'string' ? data.apiKey : '';
+    const ESC = String.fromCharCode(0x1b);
     const apiKey = rawKey
-      .replace(/\x1b\[200~/g, '')
-      .replace(/\x1b\[201~/g, '')
+      .replaceAll(`${ESC}[200~`, '')
+      .replaceAll(`${ESC}[201~`, '')
       .replace(/\[200~/g, '')
       .replace(/\[201~/g, '')
       .trim();
@@ -848,16 +852,14 @@ export class RpcMethodHandlers {
     if (!graphd) {
       return;
     }
-    const globalSelections = (
-      graphd.getUserPreference?.('user_prefs:model_selections') ?? {}
-    ) as Record<string, PersistedModelSelection>;
+    const globalSelections = graphd.getUserPreference<Record<string, PersistedModelSelection>>('user_prefs:model_selections') ?? {};
     const updatedSelections = { ...globalSelections, [agentType]: selection };
     graphd.sessionUpdateMetadata(sessionKey, { model_selections: updatedSelections });
     graphd.setUserPreference('user_prefs:model_selections', updatedSelections);
   }
 
   private clearAllModelSelections(sessionKey: string): string[] {
-    const existingSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+    const existingSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map<string, ModelSelection>();
     const clearedAgentTypes = Array.from(existingSelections.keys());
 
     if (this.harness.clearAllSessionSelectedModels) {
@@ -890,7 +892,7 @@ export class RpcMethodHandlers {
   ): PersistedModelSelection | null {
     const selection = this.harness.getSessionSelectedModel?.(sessionKey, agentType) as PersistedModelSelection | null | undefined;
     const contextWindow = Math.trunc(selection?.contextWindow ?? NaN);
-    if (!selection?.provider || !selection?.model || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    if (!selection?.provider || !selection.model || !Number.isFinite(contextWindow) || contextWindow <= 0) {
       return null;
     }
 
@@ -1092,7 +1094,7 @@ export class RpcMethodHandlers {
 
     if (returnAll) {
       // Return all model selections
-      const allSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+      const allSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map<string, ModelSelection>();
       const selectionsObject: Record<string, { provider?: string; model?: string; reasoning?: string; contextWindow?: number }> = {};
       for (const [type, selection] of allSelections) {
         selectionsObject[type] = selection;
@@ -1191,7 +1193,7 @@ export class RpcMethodHandlers {
         sessionKey: input.sessionKey,
         workingDir,
       });
-      void runHandle.result.catch((error) => {
+      void runHandle.result.catch((error: unknown) => {
         console.error('[harness-daemon] control-plane dispatch run failed', {
           sessionKey: input.sessionKey,
           requestId,
@@ -1395,10 +1397,10 @@ export class RpcMethodHandlers {
     if (!sessionKey) {
       return { success: false, error: 'Missing session_key' };
     }
-    const selections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map();
+    const selections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map<string, ModelSelection>();
     const selectionsObject: Record<string, { provider: string; model: string; reasoning?: string; contextWindow: number }> = {};
-    for (const [type, selection] of selections) {
-      selectionsObject[type] = selection;
+    for (const [agentType, selection] of selections) {
+      selectionsObject[agentType] = selection;
     }
     return {
       success: true,
@@ -1443,11 +1445,11 @@ export class RpcMethodHandlers {
   // Async Session Handler
   // =========================================================================
 
-  private async handleAsyncStart(
+  private handleAsyncStart(
     connectionId: string,
     data: Record<string, unknown> | undefined,
     state: RpcConnectionState
-  ): Promise<Record<string, unknown>> {
+  ): Record<string, unknown> {
     const explicitSessionKey = typeof data?.session_key === 'string' ? data.session_key.trim() : '';
     const sessionKey = explicitSessionKey || state.sessionKey;
     if (!sessionKey) {
@@ -1502,7 +1504,7 @@ export class RpcMethodHandlers {
     // when a standard selection already exists.
     const activeSelection = this.harness.getSessionSelectedModel?.(sessionKey, 'standard');
     if (!explicitSessionKey) {
-      if (!activeSelection?.model || !activeSelection?.provider) {
+      if (!activeSelection?.model || !activeSelection.provider) {
         return sendFailure('No model selected. Use /models to choose one before starting an async session.');
       }
       if (!this.harness.hasApiKey(activeSelection.provider)) {
@@ -1517,7 +1519,7 @@ export class RpcMethodHandlers {
         return sendFailure(`No API key configured for provider: ${activeSelection.provider}`);
       }
       this.ensureAsyncCompanionSelections(sessionKey, activeSelection);
-    } else if (activeSelection?.model && activeSelection?.provider) {
+    } else if (activeSelection?.model && activeSelection.provider) {
       this.ensureAsyncCompanionSelections(sessionKey, activeSelection);
     }
 
@@ -1558,7 +1560,7 @@ export class RpcMethodHandlers {
         workingDir,
       });
 
-      this.streamRunEvents(requestId, handle, (result) => {
+      this.streamRunEvents(requestId, handle, (_result) => {
         const currentAsyncRun = this.harness.getSessionAsyncRun?.(sessionKey);
         if (currentAsyncRun?.requestId === requestId) {
           this.harness.clearSessionAsyncRun?.(sessionKey);

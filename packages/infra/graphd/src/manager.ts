@@ -10,7 +10,7 @@ import { execSync } from 'child_process';
 import { GraphStore, SchemaVersionError } from './store.js';
 import { GraphDHTTPServer, checkHealthy } from './server.js';
 import { GRAPHD_VERSION, GRAPHD_SCHEMA_VERSION } from './schema.js';
-import type { GraphDStats, HealthResponse } from './types.js';
+import type { FileTraceInput, HealthResponse } from './types.js';
 import { normalizePath, generateSessionKey, nowSeconds } from './utils.js';
 
 /**
@@ -1063,7 +1063,7 @@ export class GraphDManager {
    */
   fileTraceAdd(
     sessionKey: string,
-    trace: import('./types.js').FileTraceInput
+    trace: FileTraceInput
   ): Record<string, unknown> {
     if (!this.store) {
       return { success: false, error: 'reusing_existing_instance' };
@@ -1151,6 +1151,7 @@ export class GraphDManager {
   /**
    * Get a user preference value.
    */
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
   getUserPreference<T = unknown>(key: string): T | null {
     if (!this.store) return null;
     try {

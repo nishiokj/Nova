@@ -7,6 +7,45 @@
 import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, rmSync } from 'fs';
 import { resolve, join, dirname } from 'path';
 import type { EffectEventType } from 'orchestrator';
+import { z } from 'zod';
+
+// ============================================
+// ZOD SCHEMAS — ingress validation for JSON.parse
+// ============================================
+
+const SkillJsonSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().optional(),
+  description: z.string().optional(),
+  enabled: z.boolean().optional(),
+  type: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+  instructions: z.string().optional(),
+  prompt: z.string().optional(),
+  allowedTools: z.array(z.string()).optional(),
+  'allowed-tools': z.union([z.string(), z.array(z.string())]).optional(),
+  model: z.enum(['inherit', 'sonnet', 'opus', 'haiku']).optional(),
+}).loose();
+
+const HookActionSchema = z.union([
+  z.object({ type: z.literal('command'), command: z.string(), env: z.record(z.string(), z.string()).optional() }),
+  z.object({ type: z.literal('script'), path: z.string(), interpreter: z.string().optional(), args: z.array(z.string()).optional(), env: z.record(z.string(), z.string()).optional() }),
+  z.object({ type: z.literal('prompt'), prompt: z.string(), model: z.string().optional(), decision: z.enum(['block', 'allow', 'modify']).optional() }),
+]);
+
+const HookJsonSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().optional(),
+  description: z.string().optional(),
+  enabled: z.boolean().optional(),
+  trigger: z.string().optional(),
+  matcher: z.string().optional(),
+  priority: z.number().optional(),
+  timeout_ms: z.number().optional(),
+  fail_open: z.boolean().optional(),
+  hooks: z.array(HookActionSchema).optional(),
+  action: HookActionSchema.optional(),
+}).loose();
 
 // ============================================
 // SKILL TYPES
@@ -242,7 +281,7 @@ export function loadSkillDefinitions(skillsDir: string): SkillDefinitionStub[] {
         if (entry.isFile() && entry.name.endsWith('.json')) {
           // Direct JSON file
           const content = readFileSync(join(dir, entry.name), 'utf-8');
-          const skill = JSON.parse(content);
+          const skill = SkillJsonSchema.parse(JSON.parse(content));
           skills.push({
             id: skill.id ?? entry.name.replace('.json', ''),
             name: skill.name ?? skill.id ?? entry.name.replace('.json', ''),
@@ -259,7 +298,7 @@ export function loadSkillDefinitions(skillsDir: string): SkillDefinitionStub[] {
 
           if (existsSync(skillJsonPath)) {
             const content = readFileSync(skillJsonPath, 'utf-8');
-            const skill = JSON.parse(content);
+            const skill = SkillJsonSchema.parse(JSON.parse(content));
             skills.push({
               id: skill.id ?? entry.name,
               name: skill.name ?? entry.name,
@@ -348,15 +387,20 @@ function parseSkillMd(
   const allowedToolsRaw = metadata['allowed-tools'] ?? metadata.allowedTools;
   const allowedTools = typeof allowedToolsRaw === 'string'
     ? allowedToolsRaw.split(',').map(s => s.trim())
-    : Array.isArray(allowedToolsRaw) ? allowedToolsRaw : undefined;
+    : Array.isArray(allowedToolsRaw) ? (allowedToolsRaw as string[]) : undefined;
+
+  const str = (key: string): string | undefined => {
+    const v = metadata[key];
+    return typeof v === 'string' ? v : undefined;
+  };
 
   const stub: SkillDefinitionStub = {
-    id: (metadata.id as string) ?? defaultId,
-    name: (metadata.name as string) ?? defaultId,
-    description: (metadata.description as string) ?? '',
-    enabled: (metadata.enabled as boolean) ?? true,
-    type: (metadata.type as string) ?? 'instructions',
-    tags: Array.isArray(metadata.tags) ? metadata.tags : [],
+    id: str('id') ?? defaultId,
+    name: str('name') ?? defaultId,
+    description: str('description') ?? '',
+    enabled: typeof metadata.enabled === 'boolean' ? metadata.enabled : true,
+    type: str('type') ?? 'instructions',
+    tags: Array.isArray(metadata.tags) ? (metadata.tags as string[]) : [],
   };
 
   if (!full) return stub;
@@ -364,11 +408,17 @@ function parseSkillMd(
   // Extract instructions (everything after frontmatter)
   const instructions = lines.slice(frontmatterEnd).join('\n').trim();
 
+  type SkillModel = 'inherit' | 'sonnet' | 'opus' | 'haiku';
+  const VALID_MODELS = new Set<string>(['inherit', 'sonnet', 'opus', 'haiku']);
+  const rawModel = str('model');
+  const model: SkillModel | undefined = rawModel && VALID_MODELS.has(rawModel)
+    ? (rawModel as SkillModel)
+    : undefined;
   return {
     ...stub,
     instructions,
     allowedTools,
-    model: metadata.model as 'inherit' | 'sonnet' | 'opus' | 'haiku' | undefined,
+    model,
     sourcePath,
     sourceType: 'markdown',
   };
@@ -398,8 +448,8 @@ export function loadHookDefinitions(hooksDir: string): HookDefinitionStub[] {
     for (const file of files) {
       try {
         const content = readFileSync(join(dir, file), 'utf-8');
-        const hook = JSON.parse(content);
-        const rawTrigger = typeof hook.trigger === 'string' ? hook.trigger : DEFAULT_HOOK_TRIGGER;
+        const hook = HookJsonSchema.parse(JSON.parse(content));
+        const rawTrigger = hook.trigger ?? DEFAULT_HOOK_TRIGGER;
         const trigger = normalizeHookTrigger(rawTrigger) ?? rawTrigger;
         hooks.push({
           id: hook.id ?? file.replace('.json', ''),
@@ -444,7 +494,7 @@ export function getSkillDefinition(skillsDir: string, id: string): SkillDefiniti
   const skillJsonPath = join(dir, id, 'skill.json');
   if (existsSync(skillJsonPath)) {
     const content = readFileSync(skillJsonPath, 'utf-8');
-    const skill = JSON.parse(content);
+    const skill = SkillJsonSchema.parse(JSON.parse(content));
     return {
       id: skill.id ?? id,
       name: skill.name ?? id,
@@ -464,7 +514,7 @@ export function getSkillDefinition(skillsDir: string, id: string): SkillDefiniti
   const directJsonPath = join(dir, `${id}.json`);
   if (existsSync(directJsonPath)) {
     const content = readFileSync(directJsonPath, 'utf-8');
-    const skill = JSON.parse(content);
+    const skill = SkillJsonSchema.parse(JSON.parse(content));
     return {
       id: skill.id ?? id,
       name: skill.name ?? id,
@@ -615,8 +665,8 @@ export function getHookDefinition(hooksDir: string, id: string): HookDefinition 
 
   try {
     const content = readFileSync(hookPath, 'utf-8');
-    const hook = JSON.parse(content);
-    const rawTrigger = typeof hook.trigger === 'string' ? hook.trigger : DEFAULT_HOOK_TRIGGER;
+    const hook = HookJsonSchema.parse(JSON.parse(content));
+    const rawTrigger = hook.trigger ?? DEFAULT_HOOK_TRIGGER;
     const trigger = normalizeHookTrigger(rawTrigger);
     if (!trigger) {
       return null;

@@ -4,7 +4,7 @@
 
 import type {
   LLMProvider,
-  Message,
+  LLMItem,
   ToolDefinition,
   ToolCall,
   LLMResponse,
@@ -117,7 +117,7 @@ export interface LLMProviderAdapter {
   /**
    * Format messages for this provider's API.
    */
-  formatMessages?(messages: Message[]): Record<string, unknown>[];
+  formatMessages?(messages: LLMItem[]): Record<string, unknown>[];
 }
 
 function inferExecutionErrorType(
@@ -149,12 +149,8 @@ export function toLLMExecutionError(
   }
   if (error instanceof Error) {
     const decorated = error as Error & Partial<LLMExecutionError>;
-    if (!decorated.type) {
-      decorated.type = inferExecutionErrorType(error);
-    }
-    if (!decorated.metadata) {
-      decorated.metadata = { provider, model };
-    }
+    decorated.type ??= inferExecutionErrorType(error);
+    decorated.metadata ??= { provider, model };
     return decorated as unknown as LLMExecutionError;
   }
   return {

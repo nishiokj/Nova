@@ -6,7 +6,6 @@
 
 import { writeFile, readFile, mkdir, stat, rename, unlink } from 'fs/promises';
 import { resolve, dirname } from 'path';
-import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import { Effect } from 'effect';
 import type { ToolResult } from 'types';
@@ -64,9 +63,7 @@ export async function executeWrite(
   const cwd = context?.workdirOverride ?? process.cwd();
   const content = args.content as string;
 
-  if (content === undefined || content === null) {
-    return errorResult('Write', "Must provide 'content' to create a new file", 0);
-  }
+  // content is always a string via the `as string` cast above
 
   const startTime = Date.now();
   const resolvedPath = resolve(cwd, path);
@@ -130,9 +127,9 @@ export async function executeEdit(
   const cwd = context?.workdirOverride ?? process.cwd();
   const oldString = args.oldString as string;
   const newString = args.newString as string;
-  const replaceAll = (args.replaceAll as boolean) ?? false;
+  const replaceAll = typeof args.replaceAll === 'boolean' ? args.replaceAll : false;
 
-  if (!oldString || newString === undefined) {
+  if (!oldString) {
     return errorResult(
       'Edit',
       "Must provide 'oldString' and 'newString' for edit",
@@ -350,7 +347,7 @@ export async function executeBatchEdit(
   const cwd = context?.workdirOverride ?? process.cwd();
   const edits = args.edits as EditOperation[];
 
-  if (!edits || !Array.isArray(edits) || edits.length === 0) {
+  if (edits.length === 0) {
     return errorResult('BatchEdit', 'Must provide non-empty edits array', 0);
   }
 
@@ -362,10 +359,10 @@ export async function executeBatchEdit(
 
   for (let i = 0; i < edits.length; i++) {
     const edit = edits[i];
-    if (!edit.path || !edit.oldString || edit.newString === undefined) {
+    if (!edit.path || !edit.oldString) {
       validationErrors.push({
         index: i,
-        path: edit.path ?? '<missing>',
+        path: edit.path || '<missing>',
         error: 'Missing required fields (path, oldString, newString)',
       });
       continue;
@@ -391,7 +388,8 @@ export async function executeBatchEdit(
       }
     }
 
-    const content = fileContents.get(resolvedPath)!;
+    const content = fileContents.get(resolvedPath);
+    if (content === undefined) continue;
     const count = countOccurrences(content, edit.oldString);
 
     if (count === 0) {
@@ -422,14 +420,14 @@ export async function executeBatchEdit(
     if (!editsByFile.has(resolvedPath)) {
       editsByFile.set(resolvedPath, []);
     }
-    editsByFile.get(resolvedPath)!.push({ edit: edits[i], index: i });
+    editsByFile.get(resolvedPath)?.push({ edit: edits[i], index: i });
   }
 
   const results: { path: string; replacements: number }[] = [];
   let totalReplacements = 0;
 
   for (const [resolvedPath, fileEdits] of editsByFile) {
-    let content = fileContents.get(resolvedPath)!;
+    let content = fileContents.get(resolvedPath) ?? '';
 
     for (const { edit } of fileEdits) {
       const replaceAll = edit.replaceAll ?? false;

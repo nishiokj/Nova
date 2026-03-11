@@ -94,9 +94,9 @@ export async function executeGlob(
 ): Promise<ToolResult> {
   const pattern = args.pattern as string;
   const cwd = context?.workdirOverride ?? process.cwd();
-  const maxResults = (args.maxResults as number) ?? 200;
-  const includeHidden = (args.includeHidden as boolean) ?? false;
-  const maxDepth = (args.maxDepth as number) ?? 20;
+  const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 200;
+  const includeHidden = typeof args.includeHidden === 'boolean' ? args.includeHidden : false;
+  const maxDepth = typeof args.maxDepth === 'number' ? args.maxDepth : 20;
 
   const startTime = Date.now();
   const resolvedCwd = resolve(cwd);

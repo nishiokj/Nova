@@ -19,7 +19,7 @@ const PROVIDERS: Record<string, LLMProviderAdapter> = {
 };
 
 export function getProvider(name: string): LLMProviderAdapter {
-  const provider = PROVIDERS[name];
+  const provider = (PROVIDERS as Partial<Record<string, LLMProviderAdapter>>)[name];
   if (!provider) {
     throw new Error(`Unsupported provider: ${name}`);
   }

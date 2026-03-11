@@ -6,6 +6,8 @@
  *   - https://ui.perfetto.dev (drag & drop JSON)
  */
 
+import { writeFileSync } from 'node:fs';
+
 interface TraceEvent {
   name: string;
   cat: string;
@@ -58,15 +60,15 @@ class Profiler {
 
     if (!this.shutdownRegistered) {
       this.shutdownRegistered = true;
-      process.on('SIGINT', () => this.flush());
-      process.on('SIGTERM', () => this.flush());
+      process.on('SIGINT', () => this.flushSync());
+      process.on('SIGTERM', () => this.flushSync());
       process.on('exit', () => this.flushSync());
     }
 
     // Record startup event so we always have at least one event
     this.instant('profiler:init', 'profiler', 'g', { processName });
 
-    console.log(`[profiler] Enabled for ${processName}, output: ${this.outputPath}`);
+    console.warn(`[profiler] Enabled for ${processName}, output: ${this.outputPath}`);
   }
 
   /** High-resolution timestamp in microseconds */
@@ -207,18 +209,22 @@ class Profiler {
 
   /** Create a method decorator for tracing */
   traceMethod(category = 'method'): MethodDecorator {
-    const profiler = this;
-    return function (_target, propertyKey, descriptor: PropertyDescriptor) {
-      const original = descriptor.value;
+    type AnyFn = (...args: unknown[]) => unknown;
+
+    // Arrow function captures `this` (Profiler instance) via lexical scope
+    return (_target, propertyKey, descriptor: PropertyDescriptor) => {
+      const original = descriptor.value as AnyFn;
       const name = String(propertyKey);
 
       if (original.constructor.name === 'AsyncFunction') {
-        descriptor.value = async function (...args: unknown[]) {
-          return profiler.traceAsync(name, () => original.apply(this, args), category);
+        const traceAsync = this.traceAsync.bind(this);
+        descriptor.value = function (this: unknown, ...args: unknown[]) {
+          return traceAsync(name, () => original.apply(this, args) as Promise<unknown>, category);
         };
       } else {
-        descriptor.value = function (...args: unknown[]) {
-          return profiler.trace(name, () => original.apply(this, args), category);
+        const traceFn = this.trace.bind(this);
+        descriptor.value = function (this: unknown, ...args: unknown[]) {
+          return traceFn(name, () => original.apply(this, args), category);
         };
       }
       return descriptor;
@@ -251,7 +257,7 @@ class Profiler {
     try {
       const fs = await import('fs/promises');
       await fs.writeFile(this.outputPath, json, 'utf-8');
-      console.log(`[profiler] Wrote ${this.events.length} events to ${this.outputPath}`);
+      console.warn(`[profiler] Wrote ${this.events.length} events to ${this.outputPath}`);
     } catch (error) {
       console.error('[profiler] Failed to write profile:', error);
     }
@@ -263,7 +269,7 @@ class Profiler {
       return;
     }
     if (this.events.length === 0) {
-      console.log(`[profiler] No events to write for ${this.processName}`);
+      console.warn(`[profiler] No events to write for ${this.processName}`);
       return;
     }
 
@@ -271,17 +277,8 @@ class Profiler {
     const json = JSON.stringify(output, null, 2);
 
     try {
-      // Use Bun.write if available (Bun runtime), otherwise fs.writeFileSync
-      if (typeof Bun !== 'undefined') {
-        // Bun.write returns a promise, use writeFileSync for sync behavior
-        const fs = require('fs');
-        fs.writeFileSync(this.outputPath, json, 'utf-8');
-      } else {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const fs = require('fs');
-        fs.writeFileSync(this.outputPath, json, 'utf-8');
-      }
-      console.log(`[profiler] Wrote ${this.events.length} events to ${this.outputPath}`);
+      writeFileSync(this.outputPath, json, 'utf-8');
+      console.warn(`[profiler] Wrote ${this.events.length} events to ${this.outputPath}`);
     } catch (error) {
       console.error('[profiler] Failed to write profile:', error);
     }

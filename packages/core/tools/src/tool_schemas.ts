@@ -182,7 +182,7 @@ export const WebSearchArgsSchema = z.object({
 /**
  * Registry of tool argument schemas.
  */
-export const TOOL_SCHEMAS: Record<string, z.ZodType> = {
+export const TOOL_SCHEMAS: Partial<Record<string, z.ZodType>> = {
   Bash: BashArgsSchema,
   Read: ReadArgsSchema,
   Write: WriteArgsSchema,
@@ -218,14 +218,14 @@ export type WebSearchArgs = z.infer<typeof WebSearchArgsSchema>;
  * Validate tool arguments against a schema.
  * Returns validated args or null on failure.
  */
-export function validateToolArgs<T>(
+export function validateToolArgs(
   toolName: string,
   args: Record<string, unknown>
-): { success: true; data: T } | { success: false; error: string } {
+): { success: true; data: Record<string, unknown> } | { success: false; error: string } {
   const schema = TOOL_SCHEMAS[toolName];
   if (!schema) {
     // No schema defined - pass through
-    return { success: true, data: args as T };
+    return { success: true, data: args };
   }
 
   const result = schema.safeParse(args);
@@ -234,7 +234,7 @@ export function validateToolArgs<T>(
     return { success: false, error: `Invalid arguments for ${toolName}: ${issues}` };
   }
 
-  return { success: true, data: result.data as T };
+  return { success: true, data: result.data as Record<string, unknown> };
 }
 
 /**

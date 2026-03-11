@@ -56,7 +56,7 @@ function testRegistry(types: string[] = ['standard']): AgentRegistry {
   } as any)));
 }
 
-const defaultModelSelection = () => ({ provider: 'openai', model: 'test' });
+const defaultModelSelection = () => ({ provider: 'openai', model: 'test', contextWindow: 200_000 });
 
 // ── Agent result builders ────────────────────────────────────────
 
@@ -100,7 +100,7 @@ function createOrch(
     emit?: (e: AgentEvent) => void;
     logger?: OrchestratorLogger;
     registry?: AgentRegistry;
-    getModelSelection?: (t: string) => { provider: string; model: string } | null;
+    getModelSelection?: (t: string) => { provider: string; model: string; contextWindow: number } | null;
   } = {},
 ) {
   return new Orchestrator(
@@ -862,7 +862,7 @@ describe('Orchestrator', () => {
       let receivedType: string | undefined;
       const getModelSelection = (t: string) => {
         receivedType = t;
-        return { provider: 'openai', model: 'test' };
+        return { provider: 'openai', model: 'test', contextWindow: 200_000 };
       };
       spySequence(goalResult());
       const registry = testRegistry(['custom']);
