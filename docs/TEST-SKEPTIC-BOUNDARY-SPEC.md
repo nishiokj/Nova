@@ -32,7 +32,7 @@ It should behave like a scored attacker:
 Keep the split clean:
 
 - `test-health` remains the structural index and boundary-discovery layer
-- `test-skeptic` remains a separate agent/skill that consumes that structure and attacks tests
+- `test-red-team` remains a separate agent/skill that consumes that structure and attacks tests
 
 The current `entity-graph` / `test-health` code already exposes most of the needed structural primitives:
 
@@ -49,6 +49,7 @@ Keep responsibility split explicit:
 
 - The skeptic agent proposes mutations. It does not get to stop at vague prose, and it does not mutate the live workspace.
 - The validator/executor agent consumes a `MutationProposal`, checks that it is a real behavioral change, applies it in a temp worktree or temp copy, runs the narrowest relevant tests, and returns `survived`, `killed`, or `invalid`.
+- The on-disk handoff is `.tmp/test-red-team/proposals/<id>/proposal.json`, with validator output at `.tmp/test-red-team/proposals/<id>/validation.json`.
 
 This avoids two bad outcomes:
 
@@ -86,7 +87,8 @@ skeptic:
     timeout_sec: 60
     env: {}
   mutation:
-    worktree_dir: ".tmp/test-skeptic"
+    worktree_dir: ".tmp/test-red-team"
+    proposal_dir: ".tmp/test-red-team/proposals"
     max_mutants_per_boundary: 2
     max_boundaries_per_run: 5
   selection:
@@ -99,6 +101,7 @@ Why:
 - the skeptic needs deterministic runner and environment setup
 - this belongs with test-health because it is repo-specific, not skill-specific
 - the skill should not guess how to run tests
+- proposal persistence must be stable and machine-readable so a separate validator can consume it
 
 ### 2. Add skeptic analysis types
 
@@ -193,6 +196,18 @@ export interface MutationProposal {
   predictedSurvival: number
 }
 ```
+
+Proposal persistence layout:
+
+```text
+.tmp/test-red-team/proposals/
+  <proposal-id>/
+    proposal.json
+    validation.json
+```
+
+`proposal.json` is written by the skeptic.
+`validation.json` is written later by the validator/executor after temp-workspace evaluation.
 
 ### 3. Add AST-based test fact extraction
 
@@ -357,7 +372,7 @@ Expected JSON contracts:
 - `skeptic-dossier`: `BoundaryDossier`
 - `skeptic-mutate`: `{ boundaryId, mutation, result, testsRun, stdoutSummary }`
 
-The existing `.agents/test-skeptic/scripts/skeptic_tools.py` should become a thin wrapper over these commands or be retired.
+The existing `.agents/test-red-team/scripts/skeptic_tools.py` should become a thin wrapper over these commands or be retired.
 
 ## Mutation Selection Rules
 
@@ -457,7 +472,7 @@ Outcome:
 
 ### Phase 4
 
-- simplify `.agents/test-skeptic/SKILL.md`
+- simplify `.agents/test-red-team/SKILL.md`
 - make it consume the dossier and mutation commands rather than inventing its own heuristics
 
 Outcome:

@@ -1,10 +1,10 @@
 ---
-name: test-skeptic
+name: test-red-team
 description: >
   Adversarial skeptic for test suites. Targets recent or specified test additions,
   measures gaming signals, compares tests to source behavior, and tries to
   falsify the suite with focused probes and actionable mutation proposals. Invoke with
-  /test-skeptic recent or /test-skeptic <path>.
+  /test-red-team recent or /test-red-team <path>.
 user-invocable: true
 ---
 
@@ -30,9 +30,9 @@ Your job is to find:
 Use one of these:
 
 ```text
-/test-skeptic recent
-/test-skeptic <test-file>
-/test-skeptic <dir-or-module>
+/test-red-team recent
+/test-red-team <test-file>
+/test-red-team <dir-or-module>
 ```
 
 If no target is provided, default to `recent`.
@@ -42,9 +42,9 @@ If no target is provided, default to `recent`.
 Use the bundled script first. It is optimized for quick targeting and triage.
 
 ```bash
-python3 .agents/test-skeptic/scripts/skeptic_tools.py recent
-python3 .agents/test-skeptic/scripts/skeptic_tools.py summary --selector recent
-python3 .agents/test-skeptic/scripts/skeptic_tools.py smells tests/foo/bar.test.ts
+python3 .agents/test-red-team/scripts/skeptic_tools.py recent
+python3 .agents/test-red-team/scripts/skeptic_tools.py summary --selector recent
+python3 .agents/test-red-team/scripts/skeptic_tools.py smells tests/foo/bar.test.ts
 ```
 
 What it gives you:
@@ -80,7 +80,7 @@ Your own scoring discipline:
 ### 1. Resolve targets
 
 If the user says `recent`, or gives no target:
-1. Run `python3 .agents/test-skeptic/scripts/skeptic_tools.py recent`
+1. Run `python3 .agents/test-red-team/scripts/skeptic_tools.py recent`
 2. Start with files that have the highest penalty score from `summary`
 
 If the user gives a path, directory, or module:
@@ -134,6 +134,14 @@ Do not mutate the live repo in place. The proposals are for a separate validator
 - run the narrowest relevant tests
 - classify it as `survived`, `killed`, or `invalid`
 
+Persist every proposal to this canonical handoff path under the repo root:
+- `.tmp/test-red-team/proposals/<id>/proposal.json`
+
+The validator/executor should read from that path and write its result next to it:
+- `.tmp/test-red-team/proposals/<id>/validation.json`
+
+Do not leave mutation proposals only in chat output. The on-disk proposal is the interface.
+
 Each `Mutation Proposal` must be specific enough that another agent can execute it without guessing. Include:
 - `id`: stable short identifier
 - `target_file`: repo-relative path
@@ -167,6 +175,7 @@ Return findings first, ordered by severity. For each finding include:
 Then include:
 - `Penalty Summary`: total points lost and why
 - `Mutation Proposals`: 1 to 5 concrete mutation objects
+  Include the on-disk path for each proposal.
 - `Coverage Evasion`: which riskier boundaries were ignored in favor of easy ones
 
 ## Rules
@@ -183,8 +192,8 @@ Then include:
 ## Example Chain
 
 ```text
-/test packages/core/llm/src/response_schemas.ts
-/test-skeptic recent
+/test-blue-team packages/core/llm/src/response_schemas.ts
+/test-red-team recent
 ```
 
 The writer optimizes for broad behavioral coverage. You optimize for falsification.

@@ -499,6 +499,7 @@ export function parseRegistryYaml(content: string): SubstitutionRegistry {
         continue
       }
       if (key === 'worktree_dir') registry.skeptic.mutation.worktreeDir = value
+      else if (key === 'proposal_dir') registry.skeptic.mutation.proposalDir = value
       else if (key === 'max_mutants_per_boundary') registry.skeptic.mutation.maxMutantsPerBoundary = parseInt(value, 10)
       else if (key === 'max_boundaries_per_run') registry.skeptic.mutation.maxBoundariesPerRun = parseInt(value, 10)
       i++

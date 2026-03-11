@@ -108,7 +108,7 @@ The build script produces the left column. lab-cli copies manifest fields into r
 
 ```json
 {
-  "schema_version": "agent_artifact_v2",
+  "schema_version": "agent_artifact_v1",
   "id": "rex-greedy-compaction",
   "platform": "linux-x64",
   "entrypoint": "bin/rex",
@@ -123,7 +123,7 @@ The build script produces the left column. lab-cli copies manifest fields into r
 }
 ```
 
-Schema version bumped to `v2` to distinguish from current manifests that have `source_commit: "local"` and no digest fields.
+Same schema version — new fields are additive. Consumers ignore fields they don't recognize.
 
 ## Capabilities Needed
 

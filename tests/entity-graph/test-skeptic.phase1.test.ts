@@ -125,6 +125,7 @@ skeptic:
       NODE_ENV: test
   mutation:
     worktree_dir: ".tmp/custom-skeptic"
+    proposal_dir: ".tmp/custom-skeptic/proposals"
     max_mutants_per_boundary: 1
     max_boundaries_per_run: 3
   selection:
@@ -142,6 +143,7 @@ skeptic:
     expect(registry.skeptic.runner.timeoutSec).toBe(15)
     expect(registry.skeptic.runner.env).toEqual({ NODE_ENV: 'test' })
     expect(registry.skeptic.mutation.worktreeDir).toBe('.tmp/custom-skeptic')
+    expect(registry.skeptic.mutation.proposalDir).toBe('.tmp/custom-skeptic/proposals')
     expect(registry.skeptic.mutation.maxMutantsPerBoundary).toBe(1)
     expect(registry.skeptic.mutation.maxBoundariesPerRun).toBe(3)
     expect(registry.skeptic.selection.preferRecent).toBe(false)

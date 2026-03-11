@@ -13,6 +13,7 @@ export interface SkepticRunnerConfig {
 
 export interface SkepticMutationConfig {
   worktreeDir: string
+  proposalDir: string
   maxMutantsPerBoundary: number
   maxBoundariesPerRun: number
 }
@@ -131,7 +132,8 @@ export const DEFAULT_SKEPTIC_CONFIG: SkepticConfig = {
     env: {},
   },
   mutation: {
-    worktreeDir: '.tmp/test-skeptic',
+    worktreeDir: '.tmp/test-red-team',
+    proposalDir: '.tmp/test-red-team/proposals',
     maxMutantsPerBoundary: 2,
     maxBoundariesPerRun: 5,
   },
@@ -151,6 +153,7 @@ export function cloneDefaultSkepticConfig(): SkepticConfig {
     },
     mutation: {
       worktreeDir: DEFAULT_SKEPTIC_CONFIG.mutation.worktreeDir,
+      proposalDir: DEFAULT_SKEPTIC_CONFIG.mutation.proposalDir,
       maxMutantsPerBoundary: DEFAULT_SKEPTIC_CONFIG.mutation.maxMutantsPerBoundary,
       maxBoundariesPerRun: DEFAULT_SKEPTIC_CONFIG.mutation.maxBoundariesPerRun,
     },

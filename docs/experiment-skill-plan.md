@@ -80,7 +80,7 @@ Each variant should resolve to a machine-readable manifest with:
 - **Descriptor surface**
   - a short human mutation summary used in the notebook
 
-The system should expose a stable **variant ref** (for example `variant_digest`) derived from the normalized code surface + runtime surface. This is what Baseline should point to.
+The system should expose a stable **variant_digest** derived from the normalized code surface + runtime surface. This is what Baseline should point to.
 
 The system should also expose a packaged diff surface for agents:
 
@@ -107,7 +107,7 @@ Notebooks live at `.lab/notebooks/<benchmark_id>.md`. One notebook per `(project
 
 ## Baseline
 - Established by: <experiment_id> (run: <run_id>, variant: <variant_id>)
-- Variant ref: <variant_digest>
+- Variant digest: <variant_digest>
 - Provenance: artifact=<artifact_digest>, source_tree=<source_tree_digest>, commit=<source_commit|dirty>
 - Pass rate: <X> (N=<tasks>)
 - Description: <1-2 line human description of this configuration>
@@ -135,7 +135,7 @@ Notebooks live at `.lab/notebooks/<benchmark_id>.md`. One notebook per `(project
 
 ### Notebook Rules
 1. The notebook is the durable **narrative index** across sessions. It explains the progression in human terms.
-2. Exact provenance lives in run artifacts and resolved variant manifests. When precision matters, the skill dereferences the notebook's `run_id` / `variant ref` into those manifests.
+2. Exact provenance lives in run artifacts and resolved variant manifests. When precision matters, the skill dereferences the notebook's `run_id` / `variant_digest` into those manifests.
 3. One progression entry per analyzed experiment. Entries are immutable once written (append-only log).
 4. The baseline section is updated only when a completed run is accepted.
 5. Open Questions is a mutable scratchpad — the agent adds and removes freely.
@@ -174,7 +174,7 @@ Purpose: Orient. Where are we in the progression?
 4. Cross-reference runs against notebook entries. Flag:
    - Completed runs not yet in the notebook (need analysis)
    - Running experiments (show status)
-   - The current baseline variant ref and its establishing run
+   - The current baseline variant_digest and its establishing run
 5. Output: "Baseline is X at pass_rate Y. Last experiment tested Z, result was W. There are N unanalyzed runs."
 6. Recommend next mode based on state:
    - Unanalyzed completed runs → `/experiment analyze <run_id>`
@@ -276,7 +276,7 @@ Purpose: Generate the next mutation to test, informed by past results.
 Purpose: Create the experiment YAML that tests the hypothesis.
 
 1. Read notebook for the current hypothesis.
-2. Resolve the current baseline from the notebook's `run_id` + `variant ref`. Use the resolved experiment/package that produced that accepted variant as the starting point.
+2. Resolve the current baseline from the notebook's `run_id` + `variant_digest`. Use the resolved experiment/package that produced that accepted variant as the starting point.
 3. Fork that YAML. Apply the mutation:
 
    **Binding mutation:** Change values in `baseline.bindings` or `variants[].config`.
