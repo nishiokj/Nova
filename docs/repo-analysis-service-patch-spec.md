@@ -54,7 +54,7 @@ It does **not** need:
 
 ## Proposed Runtime Boundary
 
-Use the existing `packages/apps/pr-review-service` package as the service shell, but repurpose it into a generic repo-analysis service.
+Use the existing `packages/apps/metarepo` package as the service shell, but repurpose it into a generic repo-analysis service.
 
 This keeps the existing Docker/deployment path and avoids creating a second deployable app.
 
@@ -260,16 +260,16 @@ Notes:
 ### Mutate existing service package
 
 Update:
-- `packages/apps/pr-review-service/src/index.ts`
-- `packages/apps/pr-review-service/src/config.ts`
-- `packages/apps/pr-review-service/src/types.ts`
-- `packages/apps/pr-review-service/README.md`
+- `packages/apps/metarepo/src/index.ts`
+- `packages/apps/metarepo/src/config.ts`
+- `packages/apps/metarepo/src/types.ts`
+- `packages/apps/metarepo/README.md`
 
 Add:
-- `packages/apps/pr-review-service/src/workspace_manager.ts`
-- `packages/apps/pr-review-service/src/database_manager.ts`
-- `packages/apps/pr-review-service/src/analysis_routes.ts`
-- `packages/apps/pr-review-service/src/pr_review.ts`
+- `packages/apps/metarepo/src/service.ts`
+- `packages/apps/metarepo/src/database_manager.ts`
+- `packages/apps/metarepo/src/analysis_routes.ts`
+- `packages/apps/metarepo/src/pr_review.ts`
 
 Delete or retire:
 - webhook-specific request handling in `src/index.ts`
@@ -282,7 +282,7 @@ Add a shared PR review library module, either under:
 - `packages/plugins/entity-graph/src/pr-review/service.ts`
 
 or, if you want zero package API churn:
-- `packages/apps/pr-review-service/src/pr_review_core.ts`
+- `packages/apps/metarepo/src/pr_review_core.ts`
 
 Prefer the first option if the logic should be callable outside this service.
 

@@ -1,0 +1,12 @@
+{
+  "scope": "packages/apps/tui",
+  "boundaryId": "function:packages/apps/tui/theme.ts:getColors",
+  "testFiles": ["tests/behavioral/tui/theme.behavior.test.ts"],
+  "changedFiles": [
+    "tests/behavioral/tui/theme.behavior.test.ts"
+  ],
+  "testCommand": ["npx", "vitest", "run", "tests/behavioral/tui/theme.behavior.test.ts"],
+  "summary": "23 tests covering getColors, getCurrentTheme, getCurrentThemeName, getThemeNames, setTheme — exact color values, filesystem persistence, all-theme completeness invariants (error≠success, diffAdd=success, diffRemove=error)",
+  "notes": "Filesystem side-effect tested via real ~/.config/jesus-tui/preferences.json with save/restore. Module-level state reset via setTheme('mocha') in beforeEach.",
+  "bugIds": []
+}

@@ -49,6 +49,7 @@ auth-states/
 .haiku/
 .watcher/
 .meta/
+.metarepo/
 .lab/
 data/
 logs/

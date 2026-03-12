@@ -12,4 +12,4 @@ RUN bun install --frozen-lockfile
 
 EXPOSE 8080
 
-CMD ["bun", "run", "--cwd", "packages/apps/pr-review-service", "start"]
+CMD ["bun", "run", "--cwd", "packages/apps/metarepo", "start"]

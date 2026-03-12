@@ -7,8 +7,9 @@
  * Requires one-time async initialization via initParser() before use.
  */
 
+import { readFile } from 'node:fs/promises'
 import { Parser, Language } from 'web-tree-sitter'
-import { createRequire } from 'module'
+import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 
@@ -32,6 +33,13 @@ function resolveWasmPath(packageName: string, wasmFile: string): string {
   return `${pkgDir}/${wasmFile}`
 }
 
+/** Read a .wasm file and load it as a Language via buffer (avoids web-tree-sitter's broken ESM require shim) */
+async function loadLanguageFromWasm(packageName: string, wasmFile: string): Promise<Language> {
+  const wasmPath = resolveWasmPath(packageName, wasmFile)
+  const buf = await readFile(wasmPath)
+  return Language.load(buf)
+}
+
 let initialized = false
 const languageCache = new Map<SupportedLanguage, Language>()
 const parserCache = new Map<SupportedLanguage, Parser>()
@@ -47,9 +55,9 @@ export async function initParser(): Promise<void> {
   await Parser.init()
 
   const [tsLang, tsxLang, jsLang] = await Promise.all([
-    Language.load(resolveWasmPath('tree-sitter-typescript', 'tree-sitter-typescript.wasm')),
-    Language.load(resolveWasmPath('tree-sitter-typescript', 'tree-sitter-tsx.wasm')),
-    Language.load(resolveWasmPath('tree-sitter-javascript', 'tree-sitter-javascript.wasm')),
+    loadLanguageFromWasm('tree-sitter-typescript', 'tree-sitter-typescript.wasm'),
+    loadLanguageFromWasm('tree-sitter-typescript', 'tree-sitter-tsx.wasm'),
+    loadLanguageFromWasm('tree-sitter-javascript', 'tree-sitter-javascript.wasm'),
   ])
 
   languageCache.set('typescript', tsLang)

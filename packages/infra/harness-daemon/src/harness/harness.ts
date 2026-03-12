@@ -599,7 +599,10 @@ export class AgentHarness {
    * Check if an API key exists for a provider.
    * Accepts the actual provider name (e.g., 'z.ai-coder', 'cerebras'), not canonical.
    */
-  hasApiKey(provider: string): boolean {
+  hasApiKey(provider: string, explicitApiKey?: string | null): boolean {
+    if (typeof explicitApiKey === 'string' && explicitApiKey.trim().length > 0) {
+      return true;
+    }
     return this.providerKeyService.hasApiKey(provider);
   }
 
@@ -1199,10 +1202,11 @@ export class AgentHarness {
   }
 
   private normalizeModelSelection(
-    selection: { provider?: string; model?: string; reasoning?: string; contextWindow?: number } | null | undefined
+    selection: { provider?: string; model?: string; reasoning?: string; contextWindow?: number; apiKey?: string } | null | undefined
   ): ModelSelection | null {
     const model = selection?.model?.trim();
     const provider = selection?.provider?.trim();
+    const apiKey = selection?.apiKey?.trim();
     if (!model || !provider) {
       return null;
     }
@@ -1220,6 +1224,7 @@ export class AgentHarness {
       provider: modelEntry.provider,
       model: modelEntry.id,
       contextWindow,
+      ...(apiKey ? { apiKey } : {}),
       ...(typeof selection?.reasoning === 'string' && selection.reasoning.trim().length > 0
         ? { reasoning: selection.reasoning }
         : {}),
@@ -1417,6 +1422,7 @@ export class AgentHarness {
     model: string;
     reasoning?: string;
     contextWindow?: number;
+    apiKey?: string;
   } | null): void {
     const store = this.getOrCreateSessionStore(sessionKey);
     if (selectedModel) {

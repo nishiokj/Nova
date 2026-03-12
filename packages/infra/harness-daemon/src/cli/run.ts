@@ -40,6 +40,7 @@ interface ModelSelection {
   model: string;
   reasoning?: string;
   agentType: string;
+  apiKey?: string;
 }
 
 interface RunInputPayload {
@@ -68,6 +69,7 @@ interface RunCliOptions {
   timeoutMs: number;
   dangerous: boolean;
   providerEnv: ProviderEnvBinding[];
+  apiKey?: string;
   modelSelection?: ModelSelection;
 }
 
@@ -96,6 +98,7 @@ Options:
   --dangerous
   --provider <provider>
   --model <model>
+  --api-key <key>
   --agent-type <agent_type>
   --reasoning <reasoning>
   --bindings-file <path> (legacy)
@@ -174,6 +177,7 @@ function parseRunArgs(rawArgs: string[]): RunCliOptions {
   let dangerous = false;
   let modelProvider: string | undefined;
   let model: string | undefined;
+  let apiKey: string | undefined;
   let reasoning: string | undefined;
   let agentType = 'standard';
   const providerEnv: ProviderEnvBinding[] = [];
@@ -239,6 +243,10 @@ function parseRunArgs(rawArgs: string[]): RunCliOptions {
     } else if (arg === '--model') {
       if (!next) failUsage('--model requires a value');
       model = next;
+      i += 1;
+    } else if (arg === '--api-key') {
+      if (!next) failUsage('--api-key requires a value');
+      apiKey = next;
       i += 1;
     } else if (arg === '--reasoning') {
       if (!next) failUsage('--reasoning requires a value');
@@ -331,12 +339,14 @@ function parseRunArgs(rawArgs: string[]): RunCliOptions {
     timeoutMs,
     dangerous,
     providerEnv,
+    apiKey,
     modelSelection:
       modelProvider && model
         ? {
             provider: modelProvider,
             model,
             agentType,
+            ...(apiKey ? { apiKey } : {}),
             ...(reasoning ? { reasoning } : {}),
           }
         : undefined,
@@ -562,9 +572,13 @@ function waitForRunResponse(
 
 async function maybeSaveProviderKeys(
   client: HarnessClient,
-  mappings: ProviderEnvBinding[]
+  mappings: ProviderEnvBinding[],
+  selectedProviders: ReadonlySet<string> | null
 ): Promise<void> {
   for (const mapping of mappings) {
+    if (selectedProviders && !selectedProviders.has(mapping.provider)) {
+      continue;
+    }
     const key = process.env[mapping.envName];
     if (!key) {
       throw new Error(
@@ -611,7 +625,19 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
   }
 
   const ids = resolveIds(prepared.ids, options.sessionKey);
-  const modelSelection = options.modelSelection ?? extractModelSelection(prepared.bindings);
+  const baseModelSelection = options.modelSelection ?? extractModelSelection(prepared.bindings);
+  const modelSelection = baseModelSelection
+    ? {
+        ...baseModelSelection,
+        ...(options.apiKey ? { apiKey: options.apiKey } : {}),
+      }
+    : null;
+  if (options.apiKey && !modelSelection) {
+    throw new Error('--api-key requires a model selection (via --provider/--model or input bindings)');
+  }
+  const selectedProviders = modelSelection?.provider
+    ? new Set([modelSelection.provider])
+    : null;
 
   const daemon = new HarnessDaemon({
     host: options.host,
@@ -739,13 +765,14 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
       }
     }
 
-    await maybeSaveProviderKeys(client, options.providerEnv);
+    await maybeSaveProviderKeys(client, options.providerEnv, selectedProviders);
 
     if (modelSelection) {
       const setModel = await client.request<{ success?: boolean; error?: string }>('model.set', {
         agent_type: modelSelection.agentType,
         provider: modelSelection.provider,
         model: modelSelection.model,
+        ...(modelSelection.apiKey ? { api_key: modelSelection.apiKey } : {}),
         ...(modelSelection.reasoning ? { reasoning: modelSelection.reasoning } : {}),
       });
       if (!setModel.success) {

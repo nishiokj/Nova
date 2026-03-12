@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE=""
+ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --env-file)
+      if [[ $# -lt 2 ]]; then
+        echo "metarepo: --env-file requires a path" >&2
+        exit 1
+      fi
+      ENV_FILE="$2"
+      shift 2
+      ;;
+    *)
+      ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+COMMAND="${ARGS[0]:-}"
+case "${COMMAND}" in
+  build|lint|clean)
+    exec bun run --cwd "${SCRIPT_DIR}/packages/apps/metarepo" "${COMMAND}"
+    ;;
+  test)
+    exec bun run test -- tests/metarepo tests/behavioral/metarepo
+    ;;
+esac
+
+if [[ -z "${ENV_FILE}" ]]; then
+  if [[ -f "${SCRIPT_DIR}/.env.metarepo" ]]; then
+    ENV_FILE="${SCRIPT_DIR}/.env.metarepo"
+  elif [[ -f "${SCRIPT_DIR}/.env" ]]; then
+    ENV_FILE="${SCRIPT_DIR}/.env"
+  fi
+fi
+
+if [[ -n "${ENV_FILE}" ]]; then
+  exec bun --env-file="${ENV_FILE}" "${SCRIPT_DIR}/packages/apps/metarepo/src/cli.ts" "${ARGS[@]}"
+fi
+
+exec bun "${SCRIPT_DIR}/packages/apps/metarepo/src/cli.ts" "${ARGS[@]}"

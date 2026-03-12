@@ -35,13 +35,14 @@ export interface HarnessLike {
   shutdown(): Promise<void>;
   updateApiKey?(provider: string, apiKey: string): void;
   resetCircuitBreaker?(): void;
-  hasApiKey(provider: string): boolean;
+  hasApiKey(provider: string, explicitApiKey?: string | null): boolean;
   getLocalProviders?(): LocalProviderManager | null;
   setSessionSelectedModel?(sessionKey: string, agentType: string, selectedModel: {
     provider: string;
     model: string;
     reasoning?: string;
     contextWindow?: number;
+    apiKey?: string;
   } | null): void;
   getSessionSelectedModel?(sessionKey: string, agentType: string): ModelSelection | null;
   getAllSessionSelectedModels?(sessionKey: string): Map<string, ModelSelection>;
@@ -386,7 +387,7 @@ export class BridgeGateway {
         return;
       }
     }
-    if (!this.harness.hasApiKey(activeSelection.provider)) {
+    if (!this.harness.hasApiKey(activeSelection.provider, activeSelection.apiKey)) {
       this.sendEvent(connectionId, {
         type: 'provider_key_required',
         data: {

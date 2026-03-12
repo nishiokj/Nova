@@ -352,8 +352,19 @@ export class SessionStore {
     if (!this.isGraphDReady() || !this.graphd) return;
 
     try {
+      const persistedSelections = Object.fromEntries(
+        Array.from(this.modelSelections.entries()).map(([agentType, selection]) => [
+          agentType,
+          {
+            provider: selection.provider,
+            model: selection.model,
+            contextWindow: selection.contextWindow,
+            ...(selection.reasoning ? { reasoning: selection.reasoning } : {}),
+          },
+        ])
+      );
       const metadata: Record<string, unknown> = {
-        model_selections: Object.fromEntries(this.modelSelections),
+        model_selections: persistedSelections,
         permission_state: this.permissionChecker.getState(),
         permission_flags: this.permissionChecker.getRuntimeFlags(),
       };

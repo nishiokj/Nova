@@ -63,7 +63,7 @@ export interface Procedures {
   'usage.summary': { input: { status?: string | string[]; limit?: number }; output: { success: boolean; usage?: { provider: string; model: string; totalTokens: number; sessionCount: number }[]; sessions?: { sessionKey: string; clientType: string; createdAt: number; lastAccessedAt: number; workingDir: string | null; status: string; metadataJson: string | null; metadata?: Record<string, unknown>; lastUserMessagePreview?: string | null; goal?: string | null; currentWorkItemId?: string | null; currentObjective?: string | null }[]; error?: string } };
 
   'context.compact': { input: Record<string, never>; output: Record<string, unknown> };
-  'model.set': { input: { agent_type?: string; provider?: string; model?: string; reasoning?: string; reset?: boolean }; output: Record<string, unknown> };
+  'model.set': { input: { agent_type?: string; provider?: string; model?: string; reasoning?: string; api_key?: string; reset?: boolean }; output: Record<string, unknown> };
   'model.get': { input: { agent_type?: string; all?: boolean }; output: Record<string, unknown> };
 
   'dangerous_mode.set': { input: { enabled: boolean }; output: { success: boolean; enabled?: boolean; sessionKey?: string; error?: string } };
@@ -79,7 +79,7 @@ export interface Procedures {
   'control.permissions.update': { input: { session_key: string; working_dir?: string; update: Record<string, unknown> }; output: Record<string, unknown> };
   'control.memory_info': { input: Record<string, never>; output: Record<string, unknown> };
   'control.model.get': { input: { session_key: string }; output: Record<string, unknown> };
-  'control.model.set': { input: { session_key: string; agent_type?: string; provider: string; model: string; reasoning?: string }; output: Record<string, unknown> };
+  'control.model.set': { input: { session_key: string; agent_type?: string; provider: string; model: string; reasoning?: string; api_key?: string }; output: Record<string, unknown> };
 
   'voice.start': { input: Record<string, never>; output: Record<string, unknown> };
   'voice.stop': { input: Record<string, never>; output: Record<string, unknown> };

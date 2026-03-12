@@ -14,6 +14,7 @@ import {
   callTreeFrom,
   envVarsInTree,
   depsOf,
+  entityBlastRadius,
   indexedTestFactsForFiles,
   testFilesFor,
   graphStats,
@@ -640,6 +641,20 @@ export class TestHealthModule {
 
   async indexedTestFacts(filepaths: string[]): Promise<IndexedTestFactsBundle> {
     return indexedTestFactsForFiles(this.sql, filepaths)
+  }
+
+  /**
+   * Compute transitive reverse-dependency counts for a batch of entities.
+   * Returns a map from entity ID to the number of entities that transitively depend on it.
+   */
+  async blastRadiusCounts(entityIds: string[], maxDepth?: number): Promise<Map<string, number>> {
+    if (entityIds.length === 0) return new Map()
+    const entries = await entityBlastRadius(this.sql, entityIds, maxDepth ?? 5)
+    const counts = new Map<string, number>()
+    for (const entry of entries) {
+      counts.set(entry.seedId, (counts.get(entry.seedId) ?? 0) + 1)
+    }
+    return counts
   }
 
   async boundaryInfo(entityId: string): Promise<BoundaryInfo | null> {
