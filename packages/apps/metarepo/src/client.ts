@@ -14,8 +14,12 @@ import type {
   CreateSecretRefInput,
   DependencyInfo,
   EnvProfileRecord,
+  EventLedgerRecord,
   EnvVarInfo,
   GapReport,
+  MutationVerdictInput,
+  MutationVerdictRecord,
+  MutationVerdictRequest,
   RedDossierRequest,
   RedMutateRequest,
   RedTargetsRequest,
@@ -38,6 +42,8 @@ import type {
   MutationEvaluationResult,
   BugRecord,
   RefereeRunRequest,
+  RunRecord,
+  RunStartResponse,
   WorkflowResponse,
 } from './types.js'
 
@@ -141,6 +147,24 @@ export async function createBlueHandoff(
 export async function getLatestBlueHandoff(baseUrl: string, repoId: string): Promise<BlueHandoffRecord> {
   return requestJson<BlueHandoffRecord>(baseUrl, {
     path: `/repos/${encodeURIComponent(repoId)}/blue-handoffs/latest`,
+  })
+}
+
+export async function getRun(baseUrl: string, runId: string): Promise<RunRecord> {
+  return requestJson<RunRecord>(baseUrl, {
+    path: `/runs/${encodeURIComponent(runId)}`,
+  })
+}
+
+export async function listRunEvents(baseUrl: string, runId: string): Promise<EventLedgerRecord[]> {
+  return requestJson<EventLedgerRecord[]>(baseUrl, {
+    path: `/runs/${encodeURIComponent(runId)}/events`,
+  })
+}
+
+export async function listRunArtifacts(baseUrl: string, runId: string): Promise<ArtifactRecord[]> {
+  return requestJson<ArtifactRecord[]>(baseUrl, {
+    path: `/runs/${encodeURIComponent(runId)}/artifacts`,
   })
 }
 
@@ -255,6 +279,14 @@ export async function redDossier(baseUrl: string, input: RedDossierRequest): Pro
   })
 }
 
+export async function startRedMutate(baseUrl: string, input: RedMutateRequest): Promise<RunStartResponse> {
+  return requestJson<RunStartResponse>(baseUrl, {
+    path: '/rpc/red.mutate.start',
+    method: 'POST',
+    body: input,
+  })
+}
+
 export async function redMutate(baseUrl: string, input: RedMutateRequest): Promise<WorkflowResponse<MutationEvaluationResult>> {
   return requestJson<WorkflowResponse<MutationEvaluationResult>>(baseUrl, {
     path: '/rpc/red.mutate',
@@ -266,6 +298,14 @@ export async function redMutate(baseUrl: string, input: RedMutateRequest): Promi
 export async function refereeRun(baseUrl: string, input: RefereeRunRequest): Promise<WorkflowResponse<MutationEvaluationResult>> {
   return requestJson<WorkflowResponse<MutationEvaluationResult>>(baseUrl, {
     path: '/rpc/referee.run',
+    method: 'POST',
+    body: input,
+  })
+}
+
+export async function refereeVerdict(baseUrl: string, input: MutationVerdictRequest): Promise<MutationVerdictRecord> {
+  return requestJson<MutationVerdictRecord>(baseUrl, {
+    path: '/rpc/referee.verdict',
     method: 'POST',
     body: input,
   })

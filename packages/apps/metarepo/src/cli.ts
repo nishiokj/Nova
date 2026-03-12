@@ -12,6 +12,7 @@ import {
   createEnvProfile,
   createSecretRef,
   ensureLocalRepo,
+  getRun,
   getLatestBlueHandoff,
   graphBoundaries,
   graphDeps,
@@ -21,18 +22,28 @@ import {
   graphReadiness,
   graphTree,
   listRepoArtifacts,
+  listRunArtifacts,
+  listRunEvents,
   redDossier,
-  redMutate,
   redTargets,
   refereeRun,
+  refereeVerdict,
+  startRedMutate,
   testRecentPaths,
   testSmells,
   updateRepo,
 } from './client.js'
 import { main as serveMain } from './index.js'
 import {
+  type ArtifactRecord,
+  type EventLedgerRecord,
   MUTATION_PROPOSAL_EXAMPLE,
   MUTATION_PROPOSAL_JSON_SCHEMA,
+  MUTATION_VERDICT_JSON_SCHEMA,
+  type MutationEvaluationResult,
+  type MutationVerdictInput,
+  type RunRecord,
+  type WorkflowResponse,
 } from './types.js'
 
 type ClientRepoConfig = {
@@ -46,7 +57,7 @@ type ClientState = {
 }
 
 const DEFAULT_PORT = process.env.PORT?.trim() ? process.env.PORT.trim() : '8080'
-const DEFAULT_BASE_URL = process.env.METAREPO_BASE_URL ?? `http://127.0.0.1:${DEFAULT_PORT}`
+const DEFAULT_BASE_URL = process.env.METAREPO_BASE_URL?.trim() || `http://127.0.0.1:${DEFAULT_PORT}`
 
 function explicitStatePath(): string | null {
   const configured = process.env.METAREPO_CLIENT_STATE_PATH?.trim()
@@ -213,13 +224,19 @@ function printUsage(): void {
     '  metarepo red dossier <boundary-id> [--max-depth 5]',
     '  metarepo red mutate --file payload.json',
     '  metarepo referee <proposal-artifact-id>',
-    '  metarepo artifacts [--kind mutation_proposal]',
+    '  metarepo referee schema',
+    '  metarepo referee verdict --file payload.json',
+    '  metarepo artifacts [--kind mutation_proposal|mutation_verdict]',
     '  metarepo bug create --title "..." [--description "..."] [--status open]',
   ].join('\n'))
 }
 
 function printJson(payload: unknown): void {
   console.log(JSON.stringify(payload, null, 2))
+}
+
+function printProgress(message: string): void {
+  console.error(`[metarepo] ${message}`)
 }
 
 function parsePositiveInt(value: string | undefined, field: string): number | undefined {
@@ -229,6 +246,105 @@ function parsePositiveInt(value: string | undefined, field: string): number | un
     throw new Error(`${field} must be a positive integer`)
   }
   return parsed
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function formatRunEvent(event: EventLedgerRecord): string {
+  const payload = event.payload && typeof event.payload === 'object'
+    ? event.payload as Record<string, unknown>
+    : {}
+
+  switch (event.eventType) {
+    case 'run.created':
+      return `run created for ${String(payload.workflow ?? 'workflow')}`
+    case 'graph.database.created':
+      return `graph database created`
+    case 'graph.build.started':
+      return `building graph`
+    case 'graph.built':
+      return `graph built (${String(payload.files ?? '?')} files, ${String(payload.durationMs ?? '?')}ms)`
+    case 'mutation.workspace.prepared':
+      return `mutation workspace prepared`
+    case 'mutation.proposal.persisted':
+      return `proposal persisted for ${String(payload.targetSymbol ?? 'target')}`
+    case 'mutation.evaluation.started':
+      return `starting mutation evaluation`
+    case 'mutation.baseline.started':
+      return `running baseline test target`
+    case 'mutation.baseline.finished':
+      return `baseline finished (exit ${String(payload.exitCode ?? '?')}, ${String(payload.durationMs ?? '?')}ms)`
+    case 'mutation.patch.started':
+      return `applying mutation patch`
+    case 'mutation.patch.applied':
+      return `mutation patch applied`
+    case 'mutation.patch.rejected':
+      return `mutation patch rejected: ${String(payload.reason ?? 'unknown reason')}`
+    case 'mutation.test.started':
+      return `running mutated test target`
+    case 'mutation.test.finished':
+      return `mutated test target finished (exit ${String(payload.exitCode ?? '?')}, ${String(payload.durationMs ?? '?')}ms)`
+    case 'mutation.result':
+      return `mutation result: ${String(payload.status ?? 'unknown')}`
+    case 'mutation.result.recorded':
+      return `mutation artifacts recorded (${String(payload.status ?? 'unknown')})`
+    case 'run.succeeded':
+      return `run succeeded`
+    case 'run.failed':
+      return `run failed: ${String(payload.error ?? 'unknown error')}`
+    default:
+      return `${event.eventType}`
+  }
+}
+
+async function waitForRunCompletion(baseUrl: string, runId: string): Promise<{
+  run: RunRecord
+  events: EventLedgerRecord[]
+}> {
+  const seen = new Set<string>()
+  let lastVisibleActivityAt = Date.now()
+
+  for (;;) {
+    const [run, events] = await Promise.all([
+      getRun(baseUrl, runId),
+      listRunEvents(baseUrl, runId),
+    ])
+
+    let sawNewEvent = false
+    for (const event of events) {
+      if (seen.has(event.id)) continue
+      seen.add(event.id)
+      sawNewEvent = true
+      lastVisibleActivityAt = Date.now()
+      printProgress(formatRunEvent(event))
+    }
+
+    if (run.status === 'succeeded' || run.status === 'failed') {
+      return { run, events }
+    }
+
+    if (!sawNewEvent && Date.now() - lastVisibleActivityAt >= 10000) {
+      printProgress(`still waiting on run ${run.id} (${run.status})`)
+      lastVisibleActivityAt = Date.now()
+    }
+
+    await sleep(1000)
+  }
+}
+
+function extractMutationWorkflowResponse(run: RunRecord, artifacts: ArtifactRecord[]): WorkflowResponse<MutationEvaluationResult> {
+  const resultArtifact = [...artifacts].reverse().find(artifact => artifact.kind === 'mutation_result')
+  if (!resultArtifact) {
+    throw new Error(`run ${run.id} completed without a mutation_result artifact`)
+  }
+
+  return {
+    run,
+    artifacts,
+    result: resultArtifact.payload as MutationEvaluationResult,
+  }
 }
 
 async function assertMetarepoAvailable(baseUrl: string): Promise<void> {
@@ -572,30 +688,61 @@ async function commandRed(subcommand: string | undefined, args: string[]): Promi
       return
     case 'mutate':
       if (!values.file) throw new Error('red mutate requires --file payload.json')
-      printJson(await redMutate(baseUrl, {
-        ...JSON.parse(await readFile(path.resolve(values.file), 'utf-8')),
-        repoId: repo.id,
-        requestedBy: 'metarepo-cli:red.mutate',
-      }))
+      {
+        const payload = JSON.parse(await readFile(path.resolve(values.file), 'utf-8'))
+        const started = await startRedMutate(baseUrl, {
+          ...payload,
+          repoId: repo.id,
+          requestedBy: 'metarepo-cli:red.mutate',
+        })
+        printProgress(`started red mutate run ${started.run.id}`)
+        const { run } = await waitForRunCompletion(baseUrl, started.run.id)
+        const artifacts = await listRunArtifacts(baseUrl, started.run.id)
+        if (run.status === 'failed') {
+          throw new Error(run.errorMessage || `red mutate run ${run.id} failed`)
+        }
+        printJson(extractMutationWorkflowResponse(run, artifacts))
+      }
       return
   }
 }
 
-async function commandReferee(args: string[]): Promise<void> {
+async function commandReferee(subcommand: string | undefined, args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
     options: {
+      file: { type: 'string' },
       'base-url': { type: 'string' },
     },
   })
-  if (!positionals[0]) {
-    throw new Error('referee requires <proposal-artifact-id>')
+
+  if (subcommand === 'schema') {
+    printJson({ schema: MUTATION_VERDICT_JSON_SCHEMA })
+    return
+  }
+
+  if (subcommand === 'verdict') {
+    if (!values.file) throw new Error('referee verdict requires --file payload.json')
+    const { baseUrl, repo } = await resolveCurrentRepo(values['base-url'])
+    const verdict = JSON.parse(await readFile(path.resolve(values.file), 'utf-8')) as MutationVerdictInput
+    printJson(await refereeVerdict(baseUrl, {
+      repoId: repo.id,
+      verdict,
+      requestedBy: 'metarepo-cli:referee.verdict',
+    }))
+    return
+  }
+
+  // Default: treat subcommand as a proposal-artifact-id for re-evaluation
+  const proposalId = subcommand
+  if (!proposalId) {
+    throw new Error('referee requires <proposal-artifact-id>, or: referee schema, referee verdict --file payload.json')
   }
   const baseUrl = values['base-url'] ?? DEFAULT_BASE_URL
   await assertMetarepoAvailable(baseUrl)
   printJson(await refereeRun(baseUrl, {
-    proposalArtifactId: positionals[0],
+    proposalArtifactId: proposalId,
     requestedBy: 'metarepo-cli:referee',
   }))
 }
@@ -677,7 +824,7 @@ export async function runCli(argv: string[]): Promise<void> {
     return
   }
   if (command === 'referee') {
-    await commandReferee([subcommand, ...rest].filter(Boolean))
+    await commandReferee(subcommand, rest)
     return
   }
   if (command === 'artifacts') {

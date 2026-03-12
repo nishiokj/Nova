@@ -196,12 +196,9 @@ export interface BlueAssignedBoundary {
   readiness: BoundaryCandidate['readiness']
   hasTests: boolean
   testFileCount: number
-  depCount: number
-  envVarCount: number
-  injectedNodeCount: number
-  callTreeNodeCount: number
-  recent: boolean
-  recentPaths: string[]
+  blastRadiusCount: number
+  defended: boolean
+  approvedSurvivals: number
   defenseValueScore: number
   reasons: string[]
 }
@@ -477,6 +474,103 @@ export interface RefereeRunRequest {
   requestedBy?: string
 }
 
+// --- Mutation Verdict (referee 3rd-party disposition) ---
+
+/**
+ * What the referee decided about a survived mutation.
+ * - fixed:     gap was real, a test was written to kill it
+ * - dismissed: gap is not worth closing
+ * - blocked:   gap is real but can't be closed with tests alone
+ */
+export type VerdictDisposition = 'fixed' | 'dismissed' | 'blocked'
+
+/**
+ * Why the referee made that decision. Each basis is valid only for
+ * specific dispositions. The vocabulary is intentionally small and
+ * precise so verdicts are queryable without reading free text.
+ *
+ * fixed:
+ *   untested_path      — no test exercises this code path
+ *   weak_assertion     — test reaches the path but doesn't assert the relevant output
+ *   partial_coverage   — behavior tested for some input classes but not the one the mutation exploits
+ *
+ * dismissed:
+ *   not_contractual       — behavior isn't part of the boundary's public contract
+ *   already_specified     — behavior is covered by tests at this or another scope
+ *   no_observable_effect  — mutation doesn't change any output observable to consumers
+ *
+ * blocked:
+ *   not_observable_at_boundary — contractual but not testable through the boundary's interface
+ *   requires_source_change    — test would require production code changes
+ */
+export type VerdictBasis =
+  | 'untested_path'
+  | 'weak_assertion'
+  | 'partial_coverage'
+  | 'not_contractual'
+  | 'already_specified'
+  | 'no_observable_effect'
+  | 'not_observable_at_boundary'
+  | 'requires_source_change'
+
+export const VERDICT_BASIS_BY_DISPOSITION: Record<VerdictDisposition, VerdictBasis[]> = {
+  fixed: ['untested_path', 'weak_assertion', 'partial_coverage'],
+  dismissed: ['not_contractual', 'already_specified', 'no_observable_effect'],
+  blocked: ['not_observable_at_boundary', 'requires_source_change'],
+}
+
+export interface MutationVerdictInput {
+  proposalArtifactId: string
+  disposition: VerdictDisposition
+  basis: VerdictBasis
+  reasoning: string
+  testFile?: string
+  testName?: string
+}
+
+export interface MutationVerdictRecord {
+  artifact: ArtifactRecord
+  verdict: MutationVerdictInput
+}
+
+export interface MutationVerdictRequest {
+  repoId: string
+  verdict: MutationVerdictInput
+  requestedBy?: string
+}
+
+export const MUTATION_VERDICT_JSON_SCHEMA = {
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $id: 'metarepo/mutation-verdict.schema.json',
+  title: 'Metarepo Mutation Verdict',
+  type: 'object',
+  additionalProperties: false,
+  required: ['proposalArtifactId', 'disposition', 'basis', 'reasoning'],
+  properties: {
+    proposalArtifactId: { type: 'string', minLength: 1 },
+    disposition: { enum: ['fixed', 'dismissed', 'blocked'] },
+    basis: {
+      enum: [
+        'untested_path',
+        'weak_assertion',
+        'partial_coverage',
+        'not_contractual',
+        'already_specified',
+        'no_observable_effect',
+        'not_observable_at_boundary',
+        'requires_source_change',
+      ],
+    },
+    reasoning: { type: 'string', minLength: 1 },
+    testFile: { type: 'string' },
+    testName: { type: 'string' },
+  },
+} as const
+
+export interface RunStartResponse {
+  run: RunRecord
+}
+
 export interface GraphBuildStats {
   files: number
   entities: number
@@ -552,6 +646,7 @@ export interface MetarepoApi {
   createEnvProfile(repoId: string, input: CreateEnvProfileInput): Promise<EnvProfileRecord>
   createSecretRef(repoId: string, input: CreateSecretRefInput): Promise<SecretRefRecord>
   getRun(id: string): Promise<RunRecord>
+  listRunEvents(id: string): Promise<EventLedgerRecord[]>
   listRunArtifacts(id: string): Promise<ArtifactRecord[]>
   getArtifact(id: string): Promise<ArtifactRecord>
   graphBoundaries(input: GraphBoundariesRequest): Promise<WorkflowResponse<BoundaryInfo[]>>
@@ -566,6 +661,8 @@ export interface MetarepoApi {
   reviewRun(input: ReviewRunRequest): Promise<WorkflowResponse<ReviewWorkflowResult>>
   redTargets(input: RedTargetsRequest): Promise<WorkflowResponse<BoundaryCandidate[]>>
   redDossier(input: RedDossierRequest): Promise<WorkflowResponse<BoundaryDossier>>
+  startRedMutate(input: RedMutateRequest): Promise<RunStartResponse>
   redMutate(input: RedMutateRequest): Promise<WorkflowResponse<MutationEvaluationResult>>
   refereeRun(input: RefereeRunRequest): Promise<WorkflowResponse<MutationEvaluationResult>>
+  refereeVerdict(input: MutationVerdictRequest): Promise<MutationVerdictRecord>
 }

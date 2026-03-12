@@ -79,6 +79,17 @@ function makeArtifact(id = 'artifact-1', kind = 'review'): ArtifactRecord {
   }
 }
 
+function makeEvent(id = 'event-1', eventType = 'run.created') {
+  return {
+    id,
+    repoId: 'repo-local',
+    runId: 'run-1',
+    eventType,
+    payload: { workflow: 'red.mutate' },
+    createdAt: '2026-03-11T00:00:01.000Z',
+  }
+}
+
 function makeBlueHandoff() {
   return {
     artifact: makeArtifact('artifact-blue', 'blue_handoff'),
@@ -97,14 +108,11 @@ function makeBlueHandoff() {
         readiness: 'ready',
         hasTests: false,
         testFileCount: 0,
-        depCount: 2,
-        envVarCount: 1,
-        injectedNodeCount: 2,
-        callTreeNodeCount: 7,
-        recent: true,
-        recentPaths: ['src/orders/process.ts'],
-        defenseValueScore: 164,
-        reasons: ['ready', 'recent-change:src/orders/process.ts'],
+        blastRadiusCount: 15,
+        defended: false,
+        approvedSurvivals: 0,
+        defenseValueScore: 400,
+        reasons: ['blast-radius=15', 'fan-in=3'],
       },
       testFiles: ['tests/behavioral/orders/process.behavior.test.ts'],
       changedFiles: ['tests/behavioral/orders/process.behavior.test.ts'],
@@ -146,14 +154,11 @@ function makeApi(): MetarepoApi {
           readiness: 'ready',
           hasTests: false,
           testFileCount: 0,
-          depCount: 2,
-          envVarCount: 1,
-          injectedNodeCount: 2,
-          callTreeNodeCount: 7,
-          recent: true,
-          recentPaths: ['src/orders/process.ts'],
-          defenseValueScore: 164,
-          reasons: ['ready', 'recent-change:src/orders/process.ts'],
+          blastRadiusCount: 15,
+          defended: false,
+          approvedSurvivals: 0,
+          defenseValueScore: 400,
+          reasons: ['blast-radius=15', 'fan-in=3'],
         },
       },
     }),
@@ -194,6 +199,7 @@ function makeApi(): MetarepoApi {
       updatedAt: '2026-03-11T00:00:00.000Z',
     }),
     getRun: async () => makeRun(),
+    listRunEvents: async () => [makeEvent()],
     listRunArtifacts: async () => [makeArtifact()],
     getArtifact: async () => makeArtifact(),
     graphBoundaries: async () => makeWorkflowResponse([{ entity: { id: 'function:src/a.ts:run' } }]),
@@ -208,6 +214,7 @@ function makeApi(): MetarepoApi {
     reviewRun: async input => makeWorkflowResponse({ review: { summary: `${input.baseSha}..${input.headSha}` }, markdown: 'rendered' }),
     redTargets: async () => makeWorkflowResponse([{ boundaryId: 'function:src/a.ts:run' }]),
     redDossier: async () => makeWorkflowResponse({ boundary: { boundaryId: 'function:src/a.ts:run' } }),
+    startRedMutate: async () => ({ run: makeRun('run-red-start') }),
     redMutate: async () => makeWorkflowResponse({ id: 'proposal-1', status: 'survived', realMutation: true, preservesIntendedBehavior: null, patchApplied: true, workspacePath: '/tmp/work', testTarget: { command: ['bun', 'test'] }, testsRun: ['bun test'], summary: 'survived', reason: 'tests passed' }),
     refereeRun: async () => makeWorkflowResponse({ id: 'proposal-1', status: 'killed', realMutation: true, preservesIntendedBehavior: null, patchApplied: true, workspacePath: '/tmp/work', testTarget: { command: ['bun', 'test'] }, testsRun: ['bun test'], summary: 'killed', reason: 'tests failed' }),
   }
@@ -331,6 +338,34 @@ describe('metarepo routes', () => {
       handoff: {
         testFiles: ['tests/behavioral/orders/process.behavior.test.ts'],
       },
+    })
+
+    const runEventsResponse = await fetch(`${baseUrl}/runs/run-1/events`)
+    expect(runEventsResponse.status).toBe(200)
+    await expect(runEventsResponse.json()).resolves.toEqual([
+      expect.objectContaining({ id: 'event-1', eventType: 'run.created' }),
+    ])
+
+    const redMutateStartResponse = await fetch(`${baseUrl}/rpc/red.mutate.start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        repoId: 'repo-local',
+        proposal: {
+          family: 'missing_action',
+          targetFile: 'src/orders/process.ts',
+          targetSymbol: 'function:src/orders/process.ts:processOrder',
+          whyThisBoundary: 'attack the export',
+          patch: [{ op: 'replace', file: 'src/orders/process.ts', find: 'a', replace: 'b' }],
+          testTarget: { command: ['bun', 'test', 'tests/behavioral/orders/process.behavior.test.ts'] },
+          predictedOutcome: 'survived',
+          survivalRationale: 'tests are shallow',
+        },
+      }),
+    })
+    expect(redMutateStartResponse.status).toBe(200)
+    await expect(redMutateStartResponse.json()).resolves.toMatchObject({
+      run: { id: 'run-red-start' },
     })
   })
 

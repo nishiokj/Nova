@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import postgres from 'postgres'
 import type { Sql } from 'postgres'
@@ -36,6 +36,7 @@ import type {
   CreateSecretRefInput,
   DependencyInfo,
   EnvProfileRecord,
+  EventLedgerRecord,
   EnvVarInfo,
   GapReport,
   GraphBoundariesRequest,
@@ -50,6 +51,9 @@ import type {
   MutationEvaluationResult,
   MutationPatchOperation,
   MutationProposalInput,
+  MutationVerdictInput,
+  MutationVerdictRecord,
+  MutationVerdictRequest,
   ProjectIndex,
   RedDossierRequest,
   RedMutateRequest,
@@ -60,6 +64,7 @@ import type {
   ReviewRunRequest,
   ReviewWorkflowResult,
   RunRecord,
+  RunStartResponse,
   RunSourceRequest,
   SecretRefRecord,
   ServiceConfig,
@@ -70,6 +75,7 @@ import type {
   UpdateRepoInput,
   WorkflowResponse,
 } from './types.js'
+import { VERDICT_BASIS_BY_DISPOSITION } from './types.js'
 
 type RunCommandInput = {
   cwd: string
@@ -120,6 +126,15 @@ type GraphWorkflowContext = {
   recordEvent: (eventType: string, payload: unknown) => Promise<void>
 }
 
+type MutationWorkflowContext = {
+  repo: RepoRecord
+  run: RunRecord
+  sourceRoot: string
+  sourceFingerprint: SourceFingerprint
+  createArtifact: (kind: string, title: string, payload: unknown) => Promise<ArtifactRecord>
+  recordEvent: (eventType: string, payload: unknown) => Promise<void>
+}
+
 type RepoRow = {
   id: string
   name: string
@@ -158,6 +173,15 @@ type ArtifactRow = {
   title: string
   payload_json: unknown
   source_fingerprint_json: unknown
+  created_at: Date
+}
+
+type EventRow = {
+  id: string
+  repo_id: string
+  run_id: string | null
+  event_type: string
+  payload_json: unknown
   created_at: Date
 }
 
@@ -279,6 +303,17 @@ function mapArtifact(row: ArtifactRow): ArtifactRecord {
   }
 }
 
+function mapEvent(row: EventRow): EventLedgerRecord {
+  return {
+    id: row.id,
+    repoId: row.repo_id,
+    runId: row.run_id,
+    eventType: row.event_type,
+    payload: row.payload_json,
+    createdAt: row.created_at.toISOString(),
+  }
+}
+
 function mapBlueAssignment(artifact: ArtifactRecord): BlueAssignmentRecord {
   return {
     artifact,
@@ -361,7 +396,6 @@ function asOptionalNumber(value: unknown): number | null {
 function normalizeBlueAssignedBoundary(value: unknown, field: string): BlueAssignedBoundary {
   const payload = asObjectRecord(value, field)
   const reasons = normalizeStringList(payload.reasons, `${field}.reasons`)
-  const recentPaths = normalizeStringList(payload.recentPaths, `${field}.recentPaths`)
   return {
     boundaryId: requireTrimmedString(payload.boundaryId, `${field}.boundaryId`),
     file: requireTrimmedString(payload.file, `${field}.file`),
@@ -373,12 +407,9 @@ function normalizeBlueAssignedBoundary(value: unknown, field: string): BlueAssig
     readiness: requireTrimmedString(payload.readiness, `${field}.readiness`) as BlueAssignedBoundary['readiness'],
     hasTests: Boolean(payload.hasTests),
     testFileCount: requireFiniteNumber(payload.testFileCount, `${field}.testFileCount`),
-    depCount: requireFiniteNumber(payload.depCount, `${field}.depCount`),
-    envVarCount: requireFiniteNumber(payload.envVarCount, `${field}.envVarCount`),
-    injectedNodeCount: requireFiniteNumber(payload.injectedNodeCount, `${field}.injectedNodeCount`),
-    callTreeNodeCount: requireFiniteNumber(payload.callTreeNodeCount, `${field}.callTreeNodeCount`),
-    recent: Boolean(payload.recent),
-    recentPaths,
+    blastRadiusCount: requireFiniteNumber(payload.blastRadiusCount, `${field}.blastRadiusCount`),
+    defended: Boolean(payload.defended),
+    approvedSurvivals: requireFiniteNumber(payload.approvedSurvivals, `${field}.approvedSurvivals`),
     defenseValueScore: requireFiniteNumber(payload.defenseValueScore, `${field}.defenseValueScore`),
     reasons,
   }
@@ -532,76 +563,48 @@ function matchesPath(filepath: string, selector: string): boolean {
   return path.posix.basename(normalizedPath) === normalizedSelector
 }
 
-function lineSpan(boundary: BoundaryInfo['entity']): number {
-  if (boundary.startLine == null || boundary.endLine == null || boundary.endLine < boundary.startLine) {
-    return 0
-  }
-  return boundary.endLine - boundary.startLine + 1
-}
+/**
+ * Blue assignment scoring.
+ *
+ * Three signals:
+ * 1. Blast radius  — transitive reverse-dependency count (importance)
+ * 2. Defended      — has a blue_handoff artifact ⇒ discount
+ * 3. Approved survivals — referee-approved survived mutations ⇒ reduce discount (defense is leaky)
+ *
+ * score = blastRadius - defendedDiscount + survivalClawback
+ */
+
+const DEFENDED_DISCOUNT_FRACTION = 0.7
+const CLAWBACK_PER_SURVIVAL = 0.15
 
 function buildBlueAssignedBoundary(input: {
   info: BoundaryInfo
-  recentPaths: string[]
   testFiles: number
-  depCount: number
-  envVarCount: number
-  injectedNodeCount: number
-  callTreeNodeCount: number
+  blastRadiusCount: number
+  defended: boolean
+  approvedSurvivals: number
 }): BlueAssignedBoundary {
   const { info } = input
   const reasons: string[] = []
-  let score = 0
 
-  if (info.readiness === 'ready') {
-    score += 80
-    reasons.push('ready')
-  } else if (info.readiness === 'unknown') {
-    score += 20
-    reasons.push('unknown-readiness')
-  } else {
-    score -= 60
-    reasons.push('blocked')
+  const baseScore = Math.log2(input.blastRadiusCount + 1) * 100
+  reasons.push(`blast-radius=${input.blastRadiusCount}`)
+
+  let discount = 0
+  if (input.defended) {
+    discount = baseScore * DEFENDED_DISCOUNT_FRACTION
+    reasons.push('defended')
   }
 
-  if (input.recentPaths.length > 0) {
-    score += 55
-    reasons.push(`recent-change:${input.recentPaths.join(',')}`)
+  let clawback = 0
+  if (input.defended && input.approvedSurvivals > 0) {
+    const clawbackFraction = Math.min(input.approvedSurvivals * CLAWBACK_PER_SURVIVAL, 1)
+    clawback = discount * clawbackFraction
+    reasons.push(`approved-survivals=${input.approvedSurvivals}`)
   }
 
-  const breadthUnits = input.callTreeNodeCount + input.depCount + input.envVarCount + input.injectedNodeCount
-  score += Math.min(input.callTreeNodeCount, 12) * 6
-  score += Math.min(input.depCount, 6) * 7
-  score += Math.min(input.envVarCount, 5) * 6
-  score += Math.min(input.injectedNodeCount, 6) * 5
-  score += Math.min(info.fanIn, 8) * 2
-  score += Math.min(lineSpan(info.entity), 120) / 6
-  score += info.hasTests ? Math.min(input.testFiles, 4) * 2 : 10
-
-  if (breadthUnits >= 10) {
-    score += 20
-    reasons.push(`broad-surface=${breadthUnits}`)
-  }
-  if (breadthUnits >= 18) {
-    score += 30
-    reasons.push('broad-surface-bonus')
-  }
-  if (
-    input.callTreeNodeCount <= 2
-    && input.depCount === 0
-    && input.envVarCount === 0
-    && input.injectedNodeCount === 0
-    && lineSpan(info.entity) <= 20
-  ) {
-    score -= 40
-    reasons.push('tiny-surface-penalty')
-  }
-
+  const score = baseScore - discount + clawback
   reasons.push(`fan-in=${info.fanIn}`)
-  reasons.push(`call-tree=${input.callTreeNodeCount}`)
-  if (input.depCount > 0) reasons.push(`deps=${input.depCount}`)
-  if (input.envVarCount > 0) reasons.push(`env=${input.envVarCount}`)
-  if (input.injectedNodeCount > 0) reasons.push(`injected=${input.injectedNodeCount}`)
-  reasons.push(`span=${lineSpan(info.entity)}`)
 
   return {
     boundaryId: info.entity.id,
@@ -614,13 +617,10 @@ function buildBlueAssignedBoundary(input: {
     readiness: info.readiness,
     hasTests: info.hasTests,
     testFileCount: input.testFiles,
-    depCount: input.depCount,
-    envVarCount: input.envVarCount,
-    injectedNodeCount: input.injectedNodeCount,
-    callTreeNodeCount: input.callTreeNodeCount,
-    recent: input.recentPaths.length > 0,
-    recentPaths: input.recentPaths,
-    defenseValueScore: score,
+    blastRadiusCount: input.blastRadiusCount,
+    defended: input.defended,
+    approvedSurvivals: input.approvedSurvivals,
+    defenseValueScore: Math.round(score * 100) / 100,
     reasons,
   }
 }
@@ -742,6 +742,7 @@ async function runCommand(input: RunCommandInput): Promise<CommandResult> {
 
 export class MetarepoService implements MetarepoApi {
   private startupPromise: Promise<void> | null = null
+  private backgroundRuns = new Map<string, Promise<void>>()
 
   constructor(
     private config: ServiceConfig,
@@ -1105,6 +1106,18 @@ export class MetarepoService implements MetarepoApi {
     return mapRun(rows[0])
   }
 
+  async listRunEvents(id: string): Promise<EventLedgerRecord[]> {
+    await this.ensureStarted()
+    await this.getRun(id)
+    const sql = this.databaseManager.getAppSql()
+    const rows = await sql<EventRow[]>`
+      SELECT * FROM metarepo.event_ledger
+      WHERE run_id = ${id}
+      ORDER BY created_at ASC, id ASC
+    `
+    return rows.map(mapEvent)
+  }
+
   async listRunArtifacts(id: string): Promise<ArtifactRecord[]> {
     await this.ensureStarted()
     await this.getRun(id)
@@ -1289,26 +1302,51 @@ export class MetarepoService implements MetarepoApi {
     })
   }
 
+  async startRedMutate(input: RedMutateRequest): Promise<RunStartResponse> {
+    await this.ensureStarted()
+    this.validateMutationProposal(input.proposal)
+    const repo = await this.requireRepo(input.repoId)
+    const prepared = await this.prepareSourceRoot(repo, input.source, undefined, true)
+    const run = await this.createRun(repo.id, 'red.mutate', prepared.sourceFingerprint, input.requestedBy)
+    await this.recordEvent(repo.id, run.id, 'run.created', { workflow: 'red.mutate' })
+
+    const task = this.executeStartedRedMutate(run, repo, prepared, input.proposal)
+    this.backgroundRuns.set(run.id, task)
+    void task.finally(() => {
+      this.backgroundRuns.delete(run.id)
+    })
+
+    return { run }
+  }
+
   async redMutate(input: RedMutateRequest): Promise<WorkflowResponse<MutationEvaluationResult>> {
     this.validateMutationProposal(input.proposal)
-    return this.executeGraphWorkflow(
+    return this.executeMutationWorkflow(
       input.repoId,
       'red.mutate',
       input.requestedBy,
       input.source,
       async ctx => {
-        const proposalArtifact = await ctx.createArtifact('mutation_proposal', input.proposal.title ?? input.proposal.targetSymbol, input.proposal)
-        const result = await this.evaluateMutation(ctx, input.proposal, proposalArtifact.id)
-        await ctx.createArtifact('mutation_result', `Mutation result ${proposalArtifact.id}`, result)
-        await ctx.createArtifact('referee_result', `Referee result ${proposalArtifact.id}`, {
-          proposalArtifactId: proposalArtifact.id,
-          result,
-        })
-        return result
+        return this.runSubmittedMutation(ctx, input.proposal)
       },
       undefined,
       true,
     )
+  }
+
+  private async executeStartedRedMutate(
+    run: RunRecord,
+    repo: RepoRecord,
+    prepared: PreparedSourceRoot,
+    proposal: MutationProposalInput,
+  ): Promise<void> {
+    await this.executePreparedMutationWorkflow(
+      run,
+      repo,
+      'red.mutate',
+      prepared,
+      async ctx => this.runSubmittedMutation(ctx, proposal),
+    ).catch(() => {})
   }
 
   private async selectBlueAssignment(
@@ -1317,10 +1355,6 @@ export class MetarepoService implements MetarepoApi {
     maxDepth: number | undefined,
   ): Promise<BlueAssignmentPayload> {
     const normalizedSelector = normalizeSelector(selector)
-    const recentPaths = normalizedSelector === 'recent'
-      ? await this.collectRecentPaths(ctx.sourceRoot)
-      : []
-    const recentSet = new Set(recentPaths.map(normalizeRelPath))
     const allBoundaries = await ctx.testHealth.boundaries()
 
     const boundariesWithTests = await Promise.all(allBoundaries.map(async info => ({
@@ -1329,54 +1363,39 @@ export class MetarepoService implements MetarepoApi {
     })))
 
     const selected = boundariesWithTests.filter(item => {
-      if (normalizedSelector === 'recent') {
-        if (recentSet.size === 0) return true
-        if (recentSet.has(normalizeRelPath(item.info.entity.filepath))) return true
-        return item.tests.some(testFile => recentSet.has(normalizeRelPath(testFile.filepath)))
-      }
+      if (normalizedSelector === 'recent') return true
       if (item.info.entity.id === normalizedSelector) return true
       if (matchesPath(item.info.entity.filepath, normalizedSelector)) return true
       return item.tests.some(testFile => matchesPath(testFile.filepath, normalizedSelector))
     })
 
-    const seeds = selected.length > 0 || normalizedSelector !== 'recent'
-      ? selected
-      : boundariesWithTests
+    const seeds = selected.length > 0 ? selected : boundariesWithTests
 
     if (seeds.length === 0) {
       throw new ValidationError(`no boundary candidates matched selector: ${normalizedSelector}`)
     }
 
-    const scored = await Promise.all(seeds.map(async item => {
-      const [deps, envVars, tree] = await Promise.all([
-        ctx.testHealth.depsFor(item.info.entity.id),
-        ctx.testHealth.envVarsFor(item.info.entity.id),
-        ctx.testHealth.callTree(item.info.entity.id, maxDepth),
-      ])
-      const hitPaths = normalizedSelector === 'recent'
-        ? [
-            ...(recentSet.has(normalizeRelPath(item.info.entity.filepath)) ? [normalizeRelPath(item.info.entity.filepath)] : []),
-            ...item.tests
-              .map(testFile => normalizeRelPath(testFile.filepath))
-              .filter(testPath => recentSet.has(testPath)),
-          ]
-        : []
+    const entityIds = seeds.map(item => item.info.entity.id)
+
+    const [blastCounts, defenseHistory] = await Promise.all([
+      ctx.testHealth.blastRadiusCounts(entityIds, maxDepth ?? 5),
+      this.queryDefenseHistory(ctx.repo.id, entityIds),
+    ])
+
+    const scored = seeds.map(item => {
+      const entityId = item.info.entity.id
       return buildBlueAssignedBoundary({
         info: item.info,
-        recentPaths: [...new Set(hitPaths)],
         testFiles: item.tests.length,
-        depCount: deps.length,
-        envVarCount: envVars.length,
-        injectedNodeCount: tree.filter(node => node.injected).length,
-        callTreeNodeCount: tree.length,
+        blastRadiusCount: blastCounts.get(entityId) ?? 0,
+        defended: defenseHistory.defended.has(entityId),
+        approvedSurvivals: defenseHistory.approvedSurvivals.get(entityId) ?? 0,
       })
-    }))
+    })
 
     scored.sort((a, b) => (
       b.defenseValueScore - a.defenseValueScore
-      || Number(b.readiness === 'ready') - Number(a.readiness === 'ready')
-      || b.callTreeNodeCount - a.callTreeNodeCount
-      || b.depCount - a.depCount
+      || b.blastRadiusCount - a.blastRadiusCount
       || b.fanIn - a.fanIn
       || a.boundaryId.localeCompare(b.boundaryId)
     ))
@@ -1385,6 +1404,42 @@ export class MetarepoService implements MetarepoApi {
       selector: normalizedSelector,
       boundary: scored[0]!,
     }
+  }
+
+  private async queryDefenseHistory(repoId: string, boundaryIds: string[]): Promise<{
+    defended: Set<string>
+    approvedSurvivals: Map<string, number>
+  }> {
+    const sql = this.databaseManager.getAppSql()
+
+    const handoffRows = await sql<Array<{ boundary_id: string }>>`
+      SELECT DISTINCT payload_json->>'boundaryId' AS boundary_id
+      FROM metarepo.artifacts
+      WHERE repo_id = ${repoId}
+        AND kind = 'blue_handoff'
+        AND payload_json->>'boundaryId' = ANY(${boundaryIds})
+    `
+    const defended = new Set(handoffRows.map(r => r.boundary_id))
+
+    const survivalRows = await sql<Array<{ boundary_id: string; count: string }>>`
+      SELECT
+        proposal.payload_json->>'targetSymbol' AS boundary_id,
+        COUNT(*)::text AS count
+      FROM metarepo.artifacts verdict
+      JOIN metarepo.artifacts proposal
+        ON proposal.id = (verdict.payload_json->>'proposalArtifactId')
+      WHERE verdict.repo_id = ${repoId}
+        AND verdict.kind = 'mutation_verdict'
+        AND verdict.payload_json->>'disposition' != 'dismissed'
+        AND proposal.payload_json->>'targetSymbol' = ANY(${boundaryIds})
+      GROUP BY proposal.payload_json->>'targetSymbol'
+    `
+    const approvedSurvivals = new Map<string, number>()
+    for (const row of survivalRows) {
+      approvedSurvivals.set(row.boundary_id, parseInt(row.count, 10))
+    }
+
+    return { defended, approvedSurvivals }
   }
 
   async refereeRun(input: RefereeRunRequest): Promise<WorkflowResponse<MutationEvaluationResult>> {
@@ -1397,22 +1452,93 @@ export class MetarepoService implements MetarepoApi {
     }
 
     const proposal = this.parseMutationProposal(proposalArtifact.payload)
-    return this.executeGraphWorkflow(
+    return this.executeMutationWorkflow(
       proposalArtifact.repoId,
       'referee.run',
       input.requestedBy,
       proposalArtifact.sourceFingerprint.ref ? { ref: proposalArtifact.sourceFingerprint.ref } : undefined,
       async ctx => {
-        const result = await this.evaluateMutation(ctx, proposal, proposalArtifact.id)
-        await ctx.createArtifact('referee_result', `Referee result ${proposalArtifact.id}`, {
-          proposalArtifactId: proposalArtifact.id,
-          result,
-        })
-        return result
+        return this.runRefereeEvaluation(ctx, proposalArtifact.id, proposal)
       },
       undefined,
       true,
     )
+  }
+
+  async refereeVerdict(input: MutationVerdictRequest): Promise<MutationVerdictRecord> {
+    await this.ensureStarted()
+    const repo = await this.requireRepo(input.repoId)
+    const verdict = input.verdict
+
+    if (!verdict.proposalArtifactId) {
+      throw new ValidationError('proposalArtifactId is required')
+    }
+    if (!verdict.disposition) {
+      throw new ValidationError('disposition is required')
+    }
+    if (!verdict.basis) {
+      throw new ValidationError('basis is required')
+    }
+    if (!verdict.reasoning?.trim()) {
+      throw new ValidationError('reasoning is required')
+    }
+
+    const validBases = VERDICT_BASIS_BY_DISPOSITION[verdict.disposition]
+    if (!validBases) {
+      throw new ValidationError(`invalid disposition: ${verdict.disposition}`)
+    }
+    if (!validBases.includes(verdict.basis)) {
+      throw new ValidationError(
+        `basis '${verdict.basis}' is not valid for disposition '${verdict.disposition}'. Valid: ${validBases.join(', ')}`,
+      )
+    }
+
+    if (verdict.disposition === 'fixed' && !verdict.testFile?.trim()) {
+      throw new ValidationError('testFile is required when disposition is fixed')
+    }
+
+    const proposalArtifact = await this.getArtifact(verdict.proposalArtifactId)
+    if (proposalArtifact.kind !== 'mutation_proposal') {
+      throw new ValidationError(`artifact ${proposalArtifact.id} is not a mutation proposal`)
+    }
+    if (proposalArtifact.repoId !== repo.id) {
+      throw new ValidationError(`proposal ${proposalArtifact.id} does not belong to repo ${repo.id}`)
+    }
+
+    const prepared = await this.prepareSourceRoot(repo, undefined, undefined, false)
+    const run = await this.createRun(repo.id, 'referee.verdict', prepared.sourceFingerprint, input.requestedBy)
+    await this.recordEvent(repo.id, run.id, 'run.created', { workflow: 'referee.verdict' })
+
+    try {
+      await this.updateRun(run.id, { status: 'running', startedAt: new Date() })
+      const artifact = await this.insertArtifact(
+        repo.id,
+        run.id,
+        'mutation_verdict',
+        `Verdict for ${verdict.proposalArtifactId}`,
+        verdict,
+        prepared.sourceFingerprint,
+      )
+      await this.recordEvent(repo.id, run.id, 'referee.verdict.recorded', {
+        artifactId: artifact.id,
+        proposalArtifactId: verdict.proposalArtifactId,
+        disposition: verdict.disposition,
+        basis: verdict.basis,
+      })
+      await this.updateRun(run.id, { status: 'succeeded', finishedAt: new Date() })
+      return { artifact, verdict }
+    } catch (error) {
+      await this.updateRun(run.id, {
+        status: 'failed',
+        errorMessage: error instanceof Error ? error.message : String(error),
+        finishedAt: new Date(),
+      }).catch(() => null)
+      throw error
+    } finally {
+      if (prepared.cleanup) {
+        await this.cleanupPreparedSource(prepared.cleanup).catch(() => {})
+      }
+    }
   }
 
   private async ensureStarted(): Promise<void> {
@@ -1544,6 +1670,134 @@ export class MetarepoService implements MetarepoApi {
     return mapArtifact(rows[0]!)
   }
 
+  private async executeMutationWorkflow<T>(
+    repoId: string,
+    workflow: string,
+    requestedBy: string | undefined,
+    source: RunSourceRequest | undefined,
+    runWorkflow: (ctx: MutationWorkflowContext) => Promise<T>,
+    extraGitRefs?: string[],
+    isolatedSource = false,
+  ): Promise<WorkflowResponse<T>> {
+    await this.ensureStarted()
+    const repo = await this.requireRepo(repoId)
+    const prepared = await this.prepareSourceRoot(repo, source, extraGitRefs, isolatedSource)
+    const run = await this.createRun(repoId, workflow, prepared.sourceFingerprint, requestedBy)
+    await this.recordEvent(repo.id, run.id, 'run.created', { workflow })
+    return this.executePreparedMutationWorkflow(run, repo, workflow, prepared, runWorkflow)
+  }
+
+  private async executePreparedMutationWorkflow<T>(
+    run: RunRecord,
+    repo: RepoRecord,
+    workflow: string,
+    prepared: PreparedSourceRoot,
+    runWorkflow: (ctx: MutationWorkflowContext) => Promise<T>,
+  ): Promise<WorkflowResponse<T>> {
+    const createdArtifacts: ArtifactRecord[] = []
+
+    try {
+      const activeRun = await this.updateRun(run.id, {
+        status: 'running',
+        tempRootPath: serializeTempRoot(prepared.cleanup),
+        startedAt: new Date(),
+      })
+      await this.recordEvent(repo.id, run.id, 'mutation.workspace.prepared', {
+        sourceRoot: prepared.sourceRoot,
+      })
+
+      const context: MutationWorkflowContext = {
+        repo,
+        run: activeRun,
+        sourceRoot: prepared.sourceRoot,
+        sourceFingerprint: prepared.sourceFingerprint,
+        createArtifact: async (kind, title, payload) => {
+          const artifact = await this.insertArtifact(repo.id, run.id, kind, title, payload, prepared.sourceFingerprint)
+          createdArtifacts.push(artifact)
+          return artifact
+        },
+        recordEvent: async (eventType, payload) => {
+          await this.recordEvent(repo.id, run.id, eventType, payload)
+        },
+      }
+
+      const result = await runWorkflow(context)
+      const completedRun = await this.updateRun(run.id, {
+        status: 'succeeded',
+        finishedAt: new Date(),
+      })
+      await this.recordEvent(repo.id, run.id, 'run.succeeded', {
+        workflow,
+        artifactCount: createdArtifacts.length,
+      })
+      return {
+        run: completedRun,
+        artifacts: createdArtifacts,
+        result,
+      }
+    } catch (error) {
+      await this.updateRun(run.id, {
+        status: 'failed',
+        errorMessage: stringifyError(error),
+        finishedAt: new Date(),
+      }).catch(() => null)
+      await this.recordEvent(repo.id, run.id, 'run.failed', { error: stringifyError(error) }).catch(() => {})
+      throw error
+    } finally {
+      if (prepared.cleanup) {
+        await this.cleanupPreparedSource(prepared.cleanup).catch(() => {})
+      }
+    }
+  }
+
+  private async runSubmittedMutation(
+    ctx: MutationWorkflowContext,
+    proposal: MutationProposalInput,
+  ): Promise<MutationEvaluationResult> {
+    const proposalArtifact = await ctx.createArtifact(
+      'mutation_proposal',
+      proposal.title ?? proposal.targetSymbol,
+      proposal,
+    )
+    await ctx.recordEvent('mutation.proposal.persisted', {
+      artifactId: proposalArtifact.id,
+      family: proposal.family,
+      targetFile: proposal.targetFile,
+      targetSymbol: proposal.targetSymbol,
+    })
+    const result = await this.evaluateMutation(ctx, proposal, proposalArtifact.id)
+    const mutationResultArtifact = await ctx.createArtifact(
+      'mutation_result',
+      `Mutation result ${proposalArtifact.id}`,
+      result,
+    )
+    await ctx.createArtifact('referee_result', `Referee result ${proposalArtifact.id}`, {
+      proposalArtifactId: proposalArtifact.id,
+      result,
+    })
+    await ctx.recordEvent('mutation.result.recorded', {
+      artifactId: mutationResultArtifact.id,
+      proposalArtifactId: proposalArtifact.id,
+      status: result.status,
+      realMutation: result.realMutation,
+      patchApplied: result.patchApplied,
+    })
+    return result
+  }
+
+  private async runRefereeEvaluation(
+    ctx: MutationWorkflowContext,
+    proposalArtifactId: string,
+    proposal: MutationProposalInput,
+  ): Promise<MutationEvaluationResult> {
+    const result = await this.evaluateMutation(ctx, proposal, proposalArtifactId)
+    await ctx.createArtifact('referee_result', `Referee result ${proposalArtifactId}`, {
+      proposalArtifactId,
+      result,
+    })
+    return result
+  }
+
   private async executeGraphWorkflow<T>(
     repoId: string,
     workflow: string,
@@ -1579,6 +1833,7 @@ export class MetarepoService implements MetarepoApi {
 
       await this.recordEvent(repo.id, run.id, 'graph.database.created', { databaseName: graphDb.databaseName })
       await this.databaseManager.initializeGraphDatabase(graphDb.databaseUrl)
+      await this.recordEvent(repo.id, run.id, 'graph.build.started', { sourceRoot: prepared.sourceRoot })
       const graphBuild = await this.buildGraph(graphDb.databaseUrl, prepared.sourceRoot)
       await this.recordEvent(repo.id, run.id, 'graph.built', graphBuild)
 
@@ -1739,6 +1994,12 @@ export class MetarepoService implements MetarepoApi {
           args: ['worktree', 'add', '--detach', worktreeRoot, headSha || 'HEAD'],
           timeoutMs: this.config.requestTimeoutMs,
         })
+        // Symlink node_modules so the worktree can resolve dependencies
+        const srcNodeModules = path.join(sourceRoot, 'node_modules')
+        const dstNodeModules = path.join(worktreeRoot, 'node_modules')
+        await symlink(srcNodeModules, dstNodeModules).catch(() => {})
+        // Copy dirty (modified + untracked) files so the worktree matches the working tree
+        await this.copyDirtyFiles(sourceRoot, worktreeRoot)
         return {
           sourceRoot: worktreeRoot,
           cleanup: {
@@ -1824,20 +2085,45 @@ export class MetarepoService implements MetarepoApi {
   }
 
   private async evaluateMutation(
-    ctx: GraphWorkflowContext,
+    ctx: MutationWorkflowContext,
     proposal: MutationProposalInput,
     proposalArtifactId: string,
   ): Promise<MutationEvaluationResult> {
+    const commandLabel = proposal.testTarget.command.join(' ')
+    const evaluationStartedAt = Date.now()
+    await ctx.recordEvent('mutation.evaluation.started', {
+      proposalArtifactId,
+      targetFile: proposal.targetFile,
+      targetSymbol: proposal.targetSymbol,
+      command: proposal.testTarget.command,
+    })
+
+    const baselineStartedAt = Date.now()
+    await ctx.recordEvent('mutation.baseline.started', {
+      proposalArtifactId,
+      command: proposal.testTarget.command,
+    })
     const baseline = await runCommand({
       cwd: ctx.sourceRoot,
       command: proposal.testTarget.command[0],
       args: proposal.testTarget.command.slice(1),
-      env: await this.resolveExecutionEnv(ctx.repo, ctx.testHealth),
+      env: await this.resolveExecutionEnv(ctx.repo),
       timeoutMs: this.config.requestTimeoutMs,
       rejectOnNonZero: false,
     })
+    await ctx.recordEvent('mutation.baseline.finished', {
+      proposalArtifactId,
+      exitCode: baseline.exitCode,
+      durationMs: Date.now() - baselineStartedAt,
+    })
 
     if (baseline.exitCode !== 0) {
+      await ctx.recordEvent('mutation.result', {
+        proposalArtifactId,
+        status: 'invalid',
+        stage: 'baseline',
+        durationMs: Date.now() - evaluationStartedAt,
+      })
       return {
         id: proposalArtifactId,
         status: 'invalid',
@@ -1846,7 +2132,7 @@ export class MetarepoService implements MetarepoApi {
         patchApplied: false,
         workspacePath: ctx.sourceRoot,
         testTarget: proposal.testTarget,
-        testsRun: [proposal.testTarget.command.join(' ')],
+        testsRun: [commandLabel],
         summary: 'Baseline target does not pass before mutation',
         reason: 'The named test target failed before the mutation was applied.',
         stdoutSummary: summarizeOutput(baseline.stdout),
@@ -1854,8 +2140,24 @@ export class MetarepoService implements MetarepoApi {
       }
     }
 
+    await ctx.recordEvent('mutation.patch.started', {
+      proposalArtifactId,
+      operationCount: proposal.patch.length,
+    })
     const patchResult = await this.applyMutationPatch(ctx.sourceRoot, proposal.patch)
     if (!patchResult.patchApplied || !patchResult.realMutation) {
+      await ctx.recordEvent('mutation.patch.rejected', {
+        proposalArtifactId,
+        patchApplied: patchResult.patchApplied,
+        realMutation: patchResult.realMutation,
+        reason: patchResult.reason,
+      })
+      await ctx.recordEvent('mutation.result', {
+        proposalArtifactId,
+        status: 'invalid',
+        stage: 'patch',
+        durationMs: Date.now() - evaluationStartedAt,
+      })
       return {
         id: proposalArtifactId,
         status: 'invalid',
@@ -1864,22 +2166,42 @@ export class MetarepoService implements MetarepoApi {
         patchApplied: patchResult.patchApplied,
         workspacePath: ctx.sourceRoot,
         testTarget: proposal.testTarget,
-        testsRun: [proposal.testTarget.command.join(' ')],
+        testsRun: [commandLabel],
         summary: 'Mutation proposal did not apply as a real code change',
         reason: patchResult.reason,
       }
     }
+    await ctx.recordEvent('mutation.patch.applied', {
+      proposalArtifactId,
+      operationCount: proposal.patch.length,
+    })
 
+    const mutatedStartedAt = Date.now()
+    await ctx.recordEvent('mutation.test.started', {
+      proposalArtifactId,
+      command: proposal.testTarget.command,
+    })
     const mutated = await runCommand({
       cwd: ctx.sourceRoot,
       command: proposal.testTarget.command[0],
       args: proposal.testTarget.command.slice(1),
-      env: await this.resolveExecutionEnv(ctx.repo, ctx.testHealth),
+      env: await this.resolveExecutionEnv(ctx.repo),
       timeoutMs: this.config.requestTimeoutMs,
       rejectOnNonZero: false,
     })
+    await ctx.recordEvent('mutation.test.finished', {
+      proposalArtifactId,
+      exitCode: mutated.exitCode,
+      durationMs: Date.now() - mutatedStartedAt,
+    })
 
     if (mutated.exitCode === 0) {
+      await ctx.recordEvent('mutation.result', {
+        proposalArtifactId,
+        status: 'survived',
+        stage: 'mutated-test',
+        durationMs: Date.now() - evaluationStartedAt,
+      })
       return {
         id: proposalArtifactId,
         status: 'survived',
@@ -1888,7 +2210,7 @@ export class MetarepoService implements MetarepoApi {
         patchApplied: true,
         workspacePath: ctx.sourceRoot,
         testTarget: proposal.testTarget,
-        testsRun: [proposal.testTarget.command.join(' ')],
+        testsRun: [commandLabel],
         summary: 'Mutation survived the named test target',
         reason: 'The named test target still passed after applying the mutation.',
         stdoutSummary: summarizeOutput(mutated.stdout),
@@ -1898,6 +2220,12 @@ export class MetarepoService implements MetarepoApi {
 
     const output = `${mutated.stdout}\n${mutated.stderr}`
     if (TEST_FAILURE_INVALID_RE.test(output)) {
+      await ctx.recordEvent('mutation.result', {
+        proposalArtifactId,
+        status: 'invalid',
+        stage: 'mutated-test',
+        durationMs: Date.now() - evaluationStartedAt,
+      })
       return {
         id: proposalArtifactId,
         status: 'invalid',
@@ -1906,7 +2234,7 @@ export class MetarepoService implements MetarepoApi {
         patchApplied: true,
         workspacePath: ctx.sourceRoot,
         testTarget: proposal.testTarget,
-        testsRun: [proposal.testTarget.command.join(' ')],
+        testsRun: [commandLabel],
         summary: 'Mutation caused setup/build failure instead of an observed behavioral failure',
         reason: 'The named target failed before the tests could cleanly evaluate the mutation.',
         stdoutSummary: summarizeOutput(mutated.stdout),
@@ -1914,6 +2242,12 @@ export class MetarepoService implements MetarepoApi {
       }
     }
 
+    await ctx.recordEvent('mutation.result', {
+      proposalArtifactId,
+      status: 'killed',
+      stage: 'mutated-test',
+      durationMs: Date.now() - evaluationStartedAt,
+    })
     return {
       id: proposalArtifactId,
       status: 'killed',
@@ -1922,7 +2256,7 @@ export class MetarepoService implements MetarepoApi {
       patchApplied: true,
       workspacePath: ctx.sourceRoot,
       testTarget: proposal.testTarget,
-      testsRun: [proposal.testTarget.command.join(' ')],
+      testsRun: [commandLabel],
       summary: 'Mutation was killed by the named test target',
       reason: 'The named test target failed after the mutation was applied.',
       stdoutSummary: summarizeOutput(mutated.stdout),
@@ -2008,13 +2342,11 @@ export class MetarepoService implements MetarepoApi {
     }
   }
 
-  private async resolveExecutionEnv(repo: RepoRecord, testHealth: TestHealthModule): Promise<NodeJS.ProcessEnv> {
+  private async resolveExecutionEnv(repo: RepoRecord): Promise<NodeJS.ProcessEnv> {
     const env = pickParentEnv()
     const envProfile = await this.resolveEnvProfile(repo)
     Object.assign(env, envProfile.variables)
     Object.assign(env, await this.resolveSecretBindings(repo.id, envProfile.secretBindings))
-    const registry = await testHealth.getRegistry()
-    Object.assign(env, registry.skeptic.runner.env)
     return env
   }
 
@@ -2066,45 +2398,6 @@ export class MetarepoService implements MetarepoApi {
       }
     }
     return resolved
-  }
-
-  private async collectRecentPaths(sourceRoot: string): Promise<string[]> {
-    const paths = new Set<string>()
-
-    const status = await runGitCommand({
-      cwd: sourceRoot,
-      args: ['status', '--porcelain'],
-      timeoutMs: this.config.requestTimeoutMs,
-      rejectOnNonZero: false,
-    })
-    for (const line of status.stdout.split('\n')) {
-      if (!line) continue
-      const filepath = line.length > 3 ? line.slice(3).trim() : ''
-      if (filepath) paths.add(normalizeRelPath(filepath))
-    }
-
-    const head = await runGitCommand({
-      cwd: sourceRoot,
-      args: ['rev-parse', '--verify', 'HEAD~1'],
-      timeoutMs: this.config.requestTimeoutMs,
-      rejectOnNonZero: false,
-    })
-    if (head.exitCode !== 0 || !head.stdout.trim()) {
-      return [...paths]
-    }
-
-    const diff = await runGitCommand({
-      cwd: sourceRoot,
-      args: ['diff', '--name-only', '--diff-filter=AM', 'HEAD~1', 'HEAD'],
-      timeoutMs: this.config.requestTimeoutMs,
-      rejectOnNonZero: false,
-    })
-    for (const filepath of diff.stdout.split('\n')) {
-      if (!filepath.trim()) continue
-      paths.add(normalizeRelPath(filepath.trim()))
-    }
-
-    return [...paths]
   }
 
   private validateMutationProposal(proposal: MutationProposalInput): void {
@@ -2227,6 +2520,36 @@ export class MetarepoService implements MetarepoApi {
     return result.stdout.trim().length > 0
   }
 
+  private async copyDirtyFiles(sourceRoot: string, worktreeRoot: string): Promise<void> {
+    // Modified + deleted tracked files
+    const modified = await runCommand({
+      command: this.config.gitBin,
+      cwd: sourceRoot,
+      args: ['-C', sourceRoot, 'diff', '--name-only', '--diff-filter=AM'],
+      timeoutMs: this.config.requestTimeoutMs,
+      rejectOnNonZero: false,
+    })
+    // Untracked files (new files not yet committed)
+    const untracked = await runCommand({
+      command: this.config.gitBin,
+      cwd: sourceRoot,
+      args: ['-C', sourceRoot, 'ls-files', '--others', '--exclude-standard'],
+      timeoutMs: this.config.requestTimeoutMs,
+      rejectOnNonZero: false,
+    })
+    const files = [
+      ...modified.stdout.split('\n'),
+      ...untracked.stdout.split('\n'),
+    ].map(f => f.trim()).filter(Boolean)
+
+    for (const relPath of files) {
+      const src = path.join(sourceRoot, relPath)
+      const dst = path.join(worktreeRoot, relPath)
+      await mkdir(path.dirname(dst), { recursive: true }).catch(() => {})
+      await cp(src, dst, { force: true }).catch(() => {})
+    }
+  }
+
   private async canUseGitWorktree(rootPath: string): Promise<boolean> {
     const inside = await runCommand({
       command: this.config.gitBin,
@@ -2235,10 +2558,7 @@ export class MetarepoService implements MetarepoApi {
       timeoutMs: this.config.requestTimeoutMs,
       rejectOnNonZero: false,
     })
-    if (inside.exitCode !== 0 || inside.stdout.trim() !== 'true') {
-      return false
-    }
-    return !(await this.isDirtyGitRepo(rootPath))
+    return inside.exitCode === 0 && inside.stdout.trim() === 'true'
   }
 
 }

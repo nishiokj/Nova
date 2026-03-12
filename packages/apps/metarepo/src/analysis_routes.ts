@@ -15,6 +15,7 @@ import type {
   CreateRepoInput,
   CreateSecretRefInput,
   MetarepoApi,
+  MutationVerdictInput,
   RefereeRunRequest,
   UpdateRepoInput,
 } from './types.js'
@@ -327,6 +328,13 @@ async function dispatchRpc(api: MetarepoApi, method: string, body: unknown): Pro
         requestedBy: optionalString(payload.requestedBy),
         source: payload.source as { ref?: string } | undefined,
       })
+    case 'red.mutate.start':
+      return api.startRedMutate({
+        repoId: asString(payload.repoId, 'repoId'),
+        proposal: asObject(payload.proposal, 'proposal') as never,
+        requestedBy: optionalString(payload.requestedBy),
+        source: payload.source as { ref?: string } | undefined,
+      })
     case 'red.mutate':
       return api.redMutate({
         repoId: asString(payload.repoId, 'repoId'),
@@ -339,6 +347,21 @@ async function dispatchRpc(api: MetarepoApi, method: string, body: unknown): Pro
         proposalArtifactId: asString(payload.proposalArtifactId, 'proposalArtifactId'),
         requestedBy: optionalString(payload.requestedBy),
       } satisfies RefereeRunRequest)
+    case 'referee.verdict': {
+      const verdict = asObject(payload.verdict, 'verdict')
+      return api.refereeVerdict({
+        repoId: asString(payload.repoId, 'repoId'),
+        verdict: {
+          proposalArtifactId: asString(verdict.proposalArtifactId, 'verdict.proposalArtifactId'),
+          disposition: asString(verdict.disposition, 'verdict.disposition'),
+          basis: asString(verdict.basis, 'verdict.basis'),
+          reasoning: asString(verdict.reasoning, 'verdict.reasoning'),
+          testFile: optionalString(verdict.testFile),
+          testName: optionalString(verdict.testName),
+        } as MutationVerdictInput,
+        requestedBy: optionalString(payload.requestedBy),
+      })
+    }
     default:
       throw new HttpError(404, 'unknown rpc method')
   }
@@ -441,6 +464,12 @@ export function createRequestListener(api: MetarepoApi) {
       const runArtifactsMatch = pathname.match(/^\/runs\/([^/]+)\/artifacts$/)
       if (runArtifactsMatch && method === 'GET') {
         sendJson(res, 200, await api.listRunArtifacts(decodeURIComponent(runArtifactsMatch[1])))
+        return
+      }
+
+      const runEventsMatch = pathname.match(/^\/runs\/([^/]+)\/events$/)
+      if (runEventsMatch && method === 'GET') {
+        sendJson(res, 200, await api.listRunEvents(decodeURIComponent(runEventsMatch[1])))
         return
       }
 

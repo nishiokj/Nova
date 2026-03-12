@@ -1,61 +1,95 @@
 ---
 name: test-blue-team
 description: >
-  AST-driven behavioral test writer. Uses the metarepo service to pick ready
-  boundaries, wire real dependencies, and write behavioral tests from the
-  largest observable surface inward. Invoke with /test-blue-team <target>.
+  Behavioral test writer for an assigned boundary. Uses metarepo to select the
+  exact boundary, keeps the real internal call chain intact, and records either
+  a strong test handoff or a real blocker/bug. Invoke with /test-blue-team <target>.
 user-invocable: true
 ---
 
-# Behavioral Test Writer
+# Blue Team
 
-You write behavioral tests for real boundaries. The red team will attack your most recent additions. Weak tests lose.
+You write behavioral tests for the assigned boundary. The red team will attack your most recent additions. Weak, narrow, or boundary-mismatched tests lose.
 
-For the smoke run, optimize for one well-defended boundary at a time. Do not spread effort thinly across many cheap helpers.
+Run this first to get your assignment:
 
-## Core Rules
+```bash
+./metarepo blue assign <target>
+```
 
-1. Start from exported or stateful boundaries, not helpers.
-2. Use the entity graph first. Do not guess coverage from source alone.
-3. Keep the longest real internal call chain practical.
-4. Mock only at true system boundaries.
-5. Assert observable behavior: return values, errors, persisted effects.
-6. If a boundary cannot be wired safely, mark it `blocked`. Do not mock around the blocker.
+This command gives you the assigned boundary. You must test that exact boundary.
+
+Optimize for one well-defended assigned boundary at a time. Smaller tests are allowed only as supplements to that boundary defense, never as a substitute for it.
+
+## Standard Terms
+
+- `assigned boundary`: the exact `boundaryId`, `file`, `lineStart`, and `lineEnd` returned by `./metarepo blue assign`
+- `system boundary`: a true external edge such as a third-party API, external account, network provider, or OS boundary you do not control
+- `boundary interference`: any action that changes behavior inside the assigned boundary or its owned internal call chain instead of observing the real behavior
+- `blocked`: no safe, rule-compliant path remains to test the assigned boundary
+
+Examples of `boundary interference` include, but are not limited to:
+- monkeypatching functions or modules inside the assigned boundary
+- mocking, stubbing, faking, or spying on owned internal collaborators
+- injecting substitute implementations into the assigned boundary's internal call chain
+- seeding or mutating internal state purely to force a path that the real boundary would not reach on its own
+- rewriting control flow, short-circuiting branches, or bypassing real setup within the boundary
+
+Boundary interference is forbidden.
+
+## Hard Rules
+
+1. You MUST test the exact assigned boundary. It is chosen for you.
+2. You MUST NOT substitute a smaller helper, sibling, or easier boundary.
+3. You MUST keep the real internal call chain intact as far as safely practical.
+4. You MUST mock or stub only at true system boundaries.
+5. You MUST NOT use monkeypatching, mocking, fakes, spies, injection overrides, or internal seeding that interferes within the assigned boundary.
+6. Smaller tests MAY exist only in addition to the assigned-boundary test, and they MUST follow the same rules.
+7. If you are truly blocked, you MUST report and persist the blocker or bug. You MUST NOT cheat, cut corners, or break rules to get around it.
+8. If you reveal a real source bug while testing, keep the test honest and persist the bug. Finding and preserving real bugs is valuable.
+9. You MUST record a handoff only for the actual assigned boundary. Persisting an artifact for a different boundary is a massive penalty.
+
+If a rule-compliant path exists, take it. If no such path exists, report `blocked`. There is no third option.
 
 ## Test Placement
 
-- Use Vitest
-- New behavioral tests live under `tests/behavioral/<subsystem>/...`
-- New behavioral test files use the `.behavior.test.ts` suffix
-- Shared behavioral-test setup lives in `tests/_infra/`
-- Reusable payloads and fixtures live in `tests/_fixtures/`
-- Existing behavioral tests outside `tests/behavioral/` are legacy. Extend them only when the file already owns the exact boundary and splitting would add churn.
+- Use Vitest.
+- New behavioral tests live under `tests/behavioral/<subsystem>/...`.
+- New behavioral test files use the `.behavior.test.ts` suffix.
+- Shared behavioral-test setup lives in `tests/_infra/`.
+- Reusable payloads and fixtures live in `tests/_fixtures/`.
+- Existing behavioral tests outside `tests/behavioral/` are legacy. Extend them only when that file already owns the exact assigned boundary and splitting would add churn.
 
 Before writing a new file, inspect in this order:
 1. `tests/behavioral/<subsystem>/`
 2. `tests/_infra/`
 3. `tests/_fixtures/`
-4. legacy tests that already exercise the same boundary family or resource
+4. legacy tests that already exercise the same assigned boundary family or resource
 
 ## Boundary Selection
 
 When invoked with `/test-blue-team <target>`:
 
-1. Run `boundaries <target>` or `gaps <target>`.
-2. Pick the highest fan-in boundary with `readiness=ready`.
-3. Skip lower-value helpers while a higher-risk ready boundary exists.
-4. If the target names a specific entity, test that entity directly.
+1. Run `./metarepo blue assign <target>`.
+2. Treat the returned assigned boundary as mandatory.
+3. Use the returned `file`, `lineStart`, and `lineEnd` as the exact structural boundary you are defending.
+4. Do not narrow the work to a helper, child function, sibling boundary, or easier seam.
+5. If the assigned boundary is blocked, persist a real blocker or bug. Do not silently substitute a smaller target.
 
-Boundary fields:
-- `entity_id`
-- `fan_in`
-- `readiness` = `ready | blocked | unknown`
+Assignment fields:
+- `boundaryId`
+- `file`
+- `lineStart`
+- `lineEnd`
+- `readiness`
+- `defenseValueScore`
+- `reasons`
 
 ## Metarepo
 
 Use `./metarepo` as the query and persistence backend. Do not query `entity-graph` directly and do not manage the graph lifecycle yourself.
 Do not `curl` the metarepo server directly. Do not call HTTP or RPC endpoints yourself.
-The CLI wrapper is the contract. If `./metarepo` cannot do what you need, stop and report the gap instead of bypassing it.
+The CLI wrapper is the contract. If `./metarepo` cannot do what you need, stop and report the gap.
 
 Required env:
 - `METAREPO_BASE_URL`
@@ -70,6 +104,7 @@ Cold-start bootstrap:
 Core queries:
 
 ```bash
+./metarepo blue assign src/orders
 ./metarepo blue latest
 ./metarepo graph gaps src/orders
 ./metarepo graph boundaries src/orders
@@ -83,19 +118,21 @@ Core queries:
 Important:
 - every metarepo workflow rebuilds the graph from the repo filesystem at run start
 - if `metarepo` is unavailable, the workflow is `blocked`
-- `metarepo` does not write tests for you; it only returns structural context and persists artifacts/bugs/secrets
+- `metarepo` does not write tests for you; it returns structural context and persists artifacts, bugs, and secrets
 
-Required per boundary:
-1. `deps`
-2. `tree`
-3. `env`
-4. read the source
+Required per assigned boundary:
+1. `blue assign`
+2. `deps`
+3. `tree`
+4. `env`
+5. read the source
 
 From those, determine:
 - valid outputs
 - invalid outputs
 - thrown errors
-- side effects through injected dependencies
+- observable side effects
+- where the true system boundaries are
 
 ## Persistence Contract
 
@@ -105,11 +142,11 @@ Persist by:
 - writing behavioral test files under `tests/behavioral/...`
 - writing shared fixtures under `tests/_fixtures/` or `tests/_infra/` when needed
 - recording a blue handoff artifact with `./metarepo blue record --file payload.json`
-- creating a metarepo bug record when you confirm a real product defect or a safe local setup blocker
+- creating a metarepo bug record when you confirm a real product defect or a real setup blocker
 
-For each boundary, leave behind:
+For each assigned boundary, leave behind:
 - the exact test file changes
-- a blue handoff artifact naming the defended boundary and changed files
+- a blue handoff artifact linked to the blue assignment artifact and changed files
 - the exact command a reviewer should run to exercise those tests
 - a durable bug only when the boundary is truly blocked or reveals a real defect
 
@@ -117,8 +154,7 @@ Blue handoff payload:
 
 ```json
 {
-  "scope": "src/orders",
-  "boundaryId": "function:src/orders/process.ts:processOrder",
+  "assignmentArtifactId": "artifact-blue-assignment",
   "testFiles": ["tests/behavioral/orders/process.behavior.test.ts"],
   "changedFiles": [
     "tests/behavioral/orders/process.behavior.test.ts",
@@ -131,6 +167,9 @@ Blue handoff payload:
 }
 ```
 
+Use the `assignmentArtifactId` returned by `./metarepo blue assign`.
+Do not invent, swap, or narrow the boundary in the payload. `./metarepo blue record` must correspond to the assigned boundary.
+
 Use this syntax to persist a bug:
 
 ```bash
@@ -138,26 +177,38 @@ Use this syntax to persist a bug:
 ```
 
 Do not:
-- treat `metarepo` query output as the completed task
-- invent `blue-team` report artifacts instead of writing tests
+- treat metarepo query output as the completed task
+- invent report artifacts instead of writing tests
 - leave a blocker only in chat when it should be a durable bug record
 - claim broad coverage when you only defended a tiny helper
+- replace the assigned boundary with a smaller helper because it is easier
 
 ## Dependency Policy
 
 Default wiring rules:
-- value/config objects: pass real values directly
+- value and config objects: pass real values directly
 - internal collaborators you own: use real implementations
 - database connections: use a real test database
 - filesystem: use temp directories and real IO
-- clocks/timers: use fake timers
+- clocks and timers: use fake timers only when time itself is the system boundary being controlled, not as a shortcut around internal behavior
 - third-party integrations: mock or stub at the owned integration boundary
 - env vars: set explicitly and restore after the test
 
-Do not:
-- mock internal collaborators
-- test private functions directly
-- replace a real boundary with a helper-only unit test
+Forbidden boundary interference:
+- monkeypatching code inside the assigned boundary
+- mocking or spying on owned internal collaborators
+- injecting fake implementations into the assigned boundary's internal graph
+- seeding hidden internal state to bypass real setup or real control flow
+- testing a private function directly instead of the assigned boundary
+- replacing the assigned boundary with a helper-only unit test
+
+Allowed setup is limited to making real external resources testable:
+- seed a real test database with test data the assigned boundary genuinely reads
+- create temp files or directories the assigned boundary genuinely uses
+- set explicit, test-safe env vars the assigned boundary genuinely requires
+- stand up local disposable services the assigned boundary genuinely depends on
+
+The rule is simple: prepare real inputs and real resources outside the boundary; do not interfere inside the boundary.
 
 ## Resource Policy
 
@@ -173,7 +224,7 @@ Rules:
 - never use production, staging, or ambiguous shared developer data
 - never run destructive cleanup against an unclear target
 - do not silently fall back from `TEST_DATABASE_URL` to `DATABASE_URL` unless you verified it is disposable and local
-- if DB safety or isolation is unclear, mark the boundary `blocked`
+- if DB safety or isolation is unclear, mark the assigned boundary `blocked`
 
 When using a real test DB:
 - create only test data
@@ -213,7 +264,7 @@ Preferred order:
 Rules:
 - keep the rest of your internal call chain real
 - do not mock deeper inside your own business logic
-- if only live production credentials exist, mark the boundary `blocked` unless the user explicitly approves a safe path
+- if only live production credentials exist, mark the assigned boundary `blocked` unless the user explicitly approves a safe path
 - never spend money, send real user data, or create externally visible side effects just to get coverage
 
 ### Long-Running Processes
@@ -225,14 +276,14 @@ Rules:
 - use timeouts and readiness checks
 - prefer ephemeral ports and temp directories
 - do not leave orphaned processes behind
-- if startup requires manual login, interactive auth, or persistent operator intervention, mark the boundary `blocked`
+- if startup requires manual login, interactive auth, or persistent operator intervention, mark the assigned boundary `blocked`
 
 ### Non-Idempotent Operations
 
 Allowed:
 - disposable local DB writes
 - temp directory writes
-- sandbox/test-account operations designed for repeated execution
+- sandbox or test-account operations designed for repeated execution
 - operations with deterministic cleanup or rollback
 
 Blocked by default:
@@ -242,19 +293,19 @@ Blocked by default:
 - operations that cannot be repeated safely
 - operations whose effects cannot be observed and cleaned up by the test
 
-If the real behavior cannot be isolated to a disposable environment, mark the boundary `blocked`.
+If the real behavior cannot be isolated to a disposable environment, mark the assigned boundary `blocked`.
 
 ## Blockers
 
-Blue team should solve setup problems itself when the resource is local and safe:
+You should solve setup problems yourself when the resource is local, safe, and rule-compliant:
 - start local DBs or services
 - run migrations
-- seed test data
+- seed real test data
 - create temp dirs
 - set obvious test-safe env defaults
 - install dev dependencies needed for the test
 
-Blue team must ask the user when it needs:
+You must ask the user when you need:
 - missing credentials, secrets, or API keys
 - access to an external account or provider
 - confirmation that a DB or external account is test-safe
@@ -264,19 +315,19 @@ Blue team must ask the user when it needs:
 When blocked, say so directly:
 
 ```text
-BLOCKED: <entity-id>
+BLOCKED: <boundary-id>
 NEED: <resource or decision>
-WHY: <why the boundary cannot be tested safely as-is>
+WHY: <why the assigned boundary cannot be tested safely as-is>
 ACTION: <specific thing the user can provide or approve>
 ```
 
-Do not continue with placeholders, guessed values, or silently downgraded coverage.
+Do not continue with placeholders, guessed values, downgraded coverage, or rule-breaking substitutes.
 
 ## Writing The Test
 
 For each behavioral contract:
-1. Arrange: wire deps and seed state
-2. Act: make one boundary call
+1. Arrange: wire real deps and seed real external state
+2. Act: make one assigned-boundary call
 3. Assert: verify a specific output, error, or side effect
 
 Coverage order:
@@ -286,12 +337,14 @@ Coverage order:
 
 Bias toward failure modes when risk is high.
 
-After asserting the boundary return value, inspect `tree` for `injected=true` nodes and verify the resulting side effects against the real resource.
+After asserting the boundary result, inspect `tree` for `injected=true` nodes and verify the resulting side effects against the real resource.
 
 Recurse only when all are true:
 - the node is `injected=true`
 - the node is itself a boundary
 - that node has its own side-effecting subtree
+
+Supplemental smaller tests are allowed only when they reinforce the assigned boundary's contract or isolate a bug discovered while testing it. They do not replace the assigned-boundary test and they do not relax any rules in this document.
 
 ## Assertion Standard
 
@@ -305,11 +358,11 @@ Required:
 - assert side effects by reading the real resource
 
 Forbidden:
-- existence-only assertions like `toBeDefined()` or `toBeTruthy()` as the main check
+- existence-only assertions such as `toBeDefined()` or `toBeTruthy()` as the main check
 - `expect(fn).not.toThrow()` as the only assertion
 - conditional assertions that can silently skip
 - `describe.skip` or similar infra gating for missing resources
-- identity/reference assertions tied to storage details
+- identity or reference assertions tied to storage details
 - exact key-count or shape trivia
 - snapshots as the primary contract
 - comments that justify expectations with `current implementation` or similar language
@@ -328,13 +381,16 @@ Prefer schema-per-file when practical.
 ## Final Check
 
 Before you stop, ask:
+- did I test the exact assigned boundary?
+- did I keep the real internal call chain intact?
+- did I interfere inside the boundary in any way?
 - what minimal wrong-value mutation would survive?
 - what missing side effect would survive?
-- did I stop at a helper while a ready boundary remained?
 - does the test specify behavior, or only today’s implementation?
 
 In your handoff, include a boundary ledger:
-- ready boundaries tested
+- assigned boundary tested
+- supplemental smaller tests, if any
 - ready boundaries deferred
 - blocked boundaries
-- reason for each defer/block
+- reason for each defer or block

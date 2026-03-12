@@ -14,6 +14,7 @@ function jsonResponse(status: number, payload: unknown): Response {
 describe('metarepo cli primitive flow', () => {
   const originalFetch = globalThis.fetch
   const originalConsoleLog = console.log
+  const originalConsoleError = console.error
   const originalStatePath = process.env.METAREPO_CLIENT_STATE_PATH
   const originalBaseUrl = process.env.METAREPO_BASE_URL
   let tempRoot = ''
@@ -23,11 +24,13 @@ describe('metarepo cli primitive flow', () => {
     process.env.METAREPO_CLIENT_STATE_PATH = path.join(tempRoot, 'client.json')
     process.env.METAREPO_BASE_URL = 'http://127.0.0.1:8080'
     console.log = vi.fn()
+    console.error = vi.fn()
   })
 
   afterEach(async () => {
     globalThis.fetch = originalFetch
     console.log = originalConsoleLog
+    console.error = originalConsoleError
     process.env.METAREPO_CLIENT_STATE_PATH = originalStatePath
     process.env.METAREPO_BASE_URL = originalBaseUrl
     if (tempRoot) {
@@ -172,14 +175,11 @@ describe('metarepo cli primitive flow', () => {
                 readiness: 'ready',
                 hasTests: false,
                 testFileCount: 0,
-                depCount: 2,
-                envVarCount: 1,
-                injectedNodeCount: 2,
-                callTreeNodeCount: 7,
-                recent: true,
-                recentPaths: ['src/orders/process.ts'],
-                defenseValueScore: 164,
-                reasons: ['ready', 'recent-change:src/orders/process.ts'],
+                blastRadiusCount: 15,
+                defended: false,
+                approvedSurvivals: 0,
+                defenseValueScore: 400,
+                reasons: ['blast-radius=15', 'fan-in=3'],
               },
             },
           },
@@ -224,14 +224,11 @@ describe('metarepo cli primitive flow', () => {
               readiness: 'ready',
               hasTests: false,
               testFileCount: 0,
-              depCount: 2,
-              envVarCount: 1,
-              injectedNodeCount: 2,
-              callTreeNodeCount: 7,
-              recent: true,
-              recentPaths: ['src/orders/process.ts'],
-              defenseValueScore: 164,
-              reasons: ['ready', 'recent-change:src/orders/process.ts'],
+              blastRadiusCount: 15,
+              defended: false,
+              approvedSurvivals: 0,
+              defenseValueScore: 400,
+              reasons: ['blast-radius=15', 'fan-in=3'],
             },
             testFiles: body.handoff.testFiles,
             changedFiles: body.handoff.testFiles,
@@ -275,14 +272,11 @@ describe('metarepo cli primitive flow', () => {
               readiness: 'ready',
               hasTests: false,
               testFileCount: 0,
-              depCount: 2,
-              envVarCount: 1,
-              injectedNodeCount: 2,
-              callTreeNodeCount: 7,
-              recent: true,
-              recentPaths: ['src/orders/process.ts'],
-              defenseValueScore: 164,
-              reasons: ['ready', 'recent-change:src/orders/process.ts'],
+              blastRadiusCount: 15,
+              defended: false,
+              approvedSurvivals: 0,
+              defenseValueScore: 400,
+              reasons: ['blast-radius=15', 'fan-in=3'],
             },
             testFiles: ['tests/behavioral/orders/process.behavior.test.ts'],
             changedFiles: ['tests/behavioral/orders/process.behavior.test.ts'],
@@ -420,6 +414,194 @@ describe('metarepo cli primitive flow', () => {
     } finally {
       process.chdir(previousCwd)
     }
+  })
+
+  it('starts red mutate asynchronously and reports run progress before printing the final result', async () => {
+    const repoRoot = path.join(tempRoot, 'repo-red')
+    await mkdir(repoRoot, { recursive: true })
+    await writeFile(path.join(tempRoot, 'client.json'), JSON.stringify({
+      version: 1,
+      repo: { rootPath: repoRoot, name: 'repo-red' },
+    }), 'utf-8')
+    await writeFile(path.join(tempRoot, 'mutation.json'), JSON.stringify({
+      family: 'missing_action',
+      targetFile: 'src/orders/process.ts',
+      targetSymbol: 'function:src/orders/process.ts:processOrder',
+      whyThisBoundary: 'attack the export',
+      patch: [{ op: 'replace', file: 'src/orders/process.ts', find: 'a', replace: 'b' }],
+      testTarget: { command: ['bun', 'test', 'tests/behavioral/orders/process.behavior.test.ts'] },
+      predictedOutcome: 'survived',
+      survivalRationale: 'tests are shallow',
+    }), 'utf-8')
+
+    let runPollCount = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/healthz')) {
+        return jsonResponse(200, { ok: true, service: 'metarepo' })
+      }
+      if (url.endsWith('/repos') && init?.method === 'POST') {
+        return jsonResponse(201, {
+          id: 'repo-1',
+          name: 'repo-red',
+          sourceKind: 'local',
+          rootPath: repoRoot,
+          cloneUrl: null,
+          defaultBranch: null,
+          authRef: null,
+          registryPath: null,
+          defaultEnvProfileId: null,
+          createdAt: '2026-03-11T00:00:00.000Z',
+          updatedAt: '2026-03-11T00:00:00.000Z',
+        })
+      }
+      if (url.endsWith('/rpc/red.mutate.start') && init?.method === 'POST') {
+        return jsonResponse(200, {
+          run: {
+            id: 'run-red-1',
+            repoId: 'repo-1',
+            workflow: 'red.mutate',
+            status: 'pending',
+            sourceFingerprint: {
+              repoId: 'repo-1',
+              sourceKind: 'local',
+              rootPath: repoRoot,
+              dirty: true,
+              createdAt: '2026-03-11T00:00:00.000Z',
+            },
+            requestedBy: 'metarepo-cli:red.mutate',
+            errorMessage: null,
+            graphDatabaseName: null,
+            tempRootPath: null,
+            createdAt: '2026-03-11T00:00:00.000Z',
+            startedAt: null,
+            finishedAt: null,
+            updatedAt: '2026-03-11T00:00:00.000Z',
+          },
+        })
+      }
+      if (url.endsWith('/runs/run-red-1') && init?.method !== 'POST') {
+        runPollCount += 1
+        return jsonResponse(200, {
+          id: 'run-red-1',
+          repoId: 'repo-1',
+          workflow: 'red.mutate',
+          status: runPollCount >= 2 ? 'succeeded' : 'running',
+          sourceFingerprint: {
+            repoId: 'repo-1',
+            sourceKind: 'local',
+            rootPath: repoRoot,
+            dirty: true,
+            createdAt: '2026-03-11T00:00:00.000Z',
+          },
+          requestedBy: 'metarepo-cli:red.mutate',
+          errorMessage: null,
+          graphDatabaseName: null,
+          tempRootPath: '/tmp/metarepo-run',
+          createdAt: '2026-03-11T00:00:00.000Z',
+          startedAt: '2026-03-11T00:00:01.000Z',
+          finishedAt: runPollCount >= 2 ? '2026-03-11T00:00:05.000Z' : null,
+          updatedAt: '2026-03-11T00:00:05.000Z',
+        })
+      }
+      if (url.endsWith('/runs/run-red-1/events') && init?.method !== 'POST') {
+        return jsonResponse(200, [
+          {
+            id: 'event-1',
+            repoId: 'repo-1',
+            runId: 'run-red-1',
+            eventType: 'mutation.workspace.prepared',
+            payload: { sourceRoot: repoRoot },
+            createdAt: '2026-03-11T00:00:01.000Z',
+          },
+          {
+            id: 'event-2',
+            repoId: 'repo-1',
+            runId: 'run-red-1',
+            eventType: 'mutation.baseline.started',
+            payload: { command: ['bun', 'test'] },
+            createdAt: '2026-03-11T00:00:02.000Z',
+          },
+          {
+            id: 'event-3',
+            repoId: 'repo-1',
+            runId: 'run-red-1',
+            eventType: 'mutation.result',
+            payload: { status: 'survived' },
+            createdAt: '2026-03-11T00:00:04.000Z',
+          },
+        ])
+      }
+      if (url.endsWith('/runs/run-red-1/artifacts') && init?.method !== 'POST') {
+        return jsonResponse(200, [
+          {
+            id: 'artifact-proposal',
+            repoId: 'repo-1',
+            runId: 'run-red-1',
+            kind: 'mutation_proposal',
+            title: 'proposal',
+            payload: {},
+            sourceFingerprint: {
+              repoId: 'repo-1',
+              sourceKind: 'local',
+              rootPath: repoRoot,
+              dirty: true,
+              createdAt: '2026-03-11T00:00:00.000Z',
+            },
+            createdAt: '2026-03-11T00:00:03.000Z',
+          },
+          {
+            id: 'artifact-result',
+            repoId: 'repo-1',
+            runId: 'run-red-1',
+            kind: 'mutation_result',
+            title: 'result',
+            payload: {
+              id: 'artifact-proposal',
+              status: 'survived',
+              realMutation: true,
+              preservesIntendedBehavior: null,
+              patchApplied: true,
+              workspacePath: '/tmp/metarepo-run',
+              testTarget: { command: ['bun', 'test', 'tests/behavioral/orders/process.behavior.test.ts'] },
+              testsRun: ['bun test tests/behavioral/orders/process.behavior.test.ts'],
+              summary: 'Mutation survived the named test target',
+              reason: 'The named test target still passed after applying the mutation.',
+            },
+            sourceFingerprint: {
+              repoId: 'repo-1',
+              sourceKind: 'local',
+              rootPath: repoRoot,
+              dirty: true,
+              createdAt: '2026-03-11T00:00:00.000Z',
+            },
+            createdAt: '2026-03-11T00:00:04.000Z',
+          },
+        ])
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const previousCwd = process.cwd()
+    process.chdir(repoRoot)
+    try {
+      await runCli(['red', 'mutate', '--file', path.join(tempRoot, 'mutation.json')])
+    } finally {
+      process.chdir(previousCwd)
+    }
+
+    expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/rpc/red.mutate.start'))).toBe(true)
+    expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/runs/run-red-1/events'))).toBe(true)
+    expect(console.error).toHaveBeenCalledWith('[metarepo] started red mutate run run-red-1')
+    expect(console.error).toHaveBeenCalledWith('[metarepo] mutation workspace prepared')
+    expect(console.error).toHaveBeenCalledWith('[metarepo] mutation result: survived')
+    const output = JSON.parse(String((console.log as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] ?? '{}')) as {
+      run: { id: string; status: string }
+      result: { status: string }
+    }
+    expect(output.run.id).toBe('run-red-1')
+    expect(output.result.status).toBe('survived')
   })
 
   it('prints the red mutation schema without requiring a server', async () => {
