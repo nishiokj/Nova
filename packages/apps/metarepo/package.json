@@ -1,11 +1,12 @@
 {
-  "name": "pr-review-service",
+  "name": "metarepo",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
     "start": "bun run src/index.ts",
+    "cli": "bun run src/cli.ts",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "build": "tsc"

@@ -135,6 +135,7 @@ export interface ModelSelection {
   model: string;
   contextWindow: number;
   reasoning?: string;
+  apiKey?: string;
 }
 
 /**

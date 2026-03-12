@@ -33,6 +33,22 @@ interface PersistedModelSelection {
   reasoning?: string;
 }
 
+function toPublicModelSelection(
+  selection: ModelSelection | PersistedModelSelection | null | undefined
+): PersistedModelSelection | null {
+  const contextWindow = Math.trunc(selection?.contextWindow ?? NaN);
+  if (!selection?.provider || !selection.model || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return null;
+  }
+
+  return {
+    provider: selection.provider,
+    model: selection.model,
+    contextWindow,
+    ...(selection.reasoning ? { reasoning: selection.reasoning } : {}),
+  };
+}
+
 export interface RpcConnectionState {
   sessionKey: string | null;
   lastSessionKey: string | null;
@@ -1016,7 +1032,15 @@ export class RpcMethodHandlers {
       ? this.getNormalizedSelection(sessionKey, 'standard')
       : null;
 
-    const requestedSelection = reasoning ? { provider, model, reasoning } : { provider, model };
+    const apiKey = typeof data?.api_key === 'string' && data.api_key.trim().length > 0
+      ? data.api_key.trim()
+      : undefined;
+    const requestedSelection = {
+      provider,
+      model,
+      ...(reasoning ? { reasoning } : {}),
+      ...(apiKey ? { apiKey } : {}),
+    };
     this.harness.setSessionSelectedModel?.(sessionKey, agentType, requestedSelection);
     const selectedModel = this.getNormalizedSelection(sessionKey, agentType);
     if (!selectedModel) {
@@ -1051,7 +1075,7 @@ export class RpcMethodHandlers {
       });
 
     // Emit provider_key_required event if missing, but keep selection persisted
-    const hasKey = this.harness.hasApiKey(provider);
+    const hasKey = this.harness.hasApiKey(provider, apiKey);
     if (!hasKey) {
       this.sendEvent(connectionId, {
         type: 'provider_key_required',
@@ -1097,7 +1121,10 @@ export class RpcMethodHandlers {
       const allSelections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map<string, ModelSelection>();
       const selectionsObject: Record<string, { provider?: string; model?: string; reasoning?: string; contextWindow?: number }> = {};
       for (const [type, selection] of allSelections) {
-        selectionsObject[type] = selection;
+        const publicSelection = toPublicModelSelection(selection);
+        if (publicSelection) {
+          selectionsObject[type] = publicSelection;
+        }
       }
 
       return {
@@ -1400,7 +1427,10 @@ export class RpcMethodHandlers {
     const selections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map<string, ModelSelection>();
     const selectionsObject: Record<string, { provider: string; model: string; reasoning?: string; contextWindow: number }> = {};
     for (const [agentType, selection] of selections) {
-      selectionsObject[agentType] = selection;
+      const publicSelection = toPublicModelSelection(selection);
+      if (publicSelection) {
+        selectionsObject[agentType] = publicSelection;
+      }
     }
     return {
       success: true,
@@ -1423,7 +1453,15 @@ export class RpcMethodHandlers {
     if (!provider || !model) {
       return { success: false, error: 'Provider and model are required' };
     }
-    const requestedSelection = reasoning ? { provider, model, reasoning } : { provider, model };
+    const apiKey = typeof data?.api_key === 'string' && data.api_key.trim().length > 0
+      ? data.api_key.trim()
+      : undefined;
+    const requestedSelection = {
+      provider,
+      model,
+      ...(reasoning ? { reasoning } : {}),
+      ...(apiKey ? { apiKey } : {}),
+    };
     this.harness.setSessionSelectedModel?.(sessionKey, agentType, requestedSelection);
     const selectedModel = this.getNormalizedSelection(sessionKey, agentType);
     if (!selectedModel) {
@@ -1507,7 +1545,7 @@ export class RpcMethodHandlers {
       if (!activeSelection?.model || !activeSelection.provider) {
         return sendFailure('No model selected. Use /models to choose one before starting an async session.');
       }
-      if (!this.harness.hasApiKey(activeSelection.provider)) {
+      if (!this.harness.hasApiKey(activeSelection.provider, activeSelection.apiKey)) {
         this.sendEvent(connectionId, {
           type: 'provider_key_required',
           data: {

@@ -2,9 +2,9 @@
 name: test-referee
 description: >
   Mutation referee for the blue-team/red-team test workflow. Reads persisted
-  mutation proposals, validates that they are real behavioral mutations, runs
+  metarepo mutation proposal artifacts, validates that they are executable, runs
   them in an isolated temp workspace against the named test target, and writes
-  a machine-readable verdict. Invoke with /test-referee <proposal-id|proposal-path>.
+  a machine-readable verdict. Invoke with /test-referee <proposal-artifact-id>.
 user-invocable: true
 ---
 
@@ -27,37 +27,28 @@ If the proposal is weak, reject it cleanly. Do not "help" the red team by repair
 Use one of these:
 
 ```text
-/test-referee <proposal-id>
-/test-referee <proposal-path>
+/test-referee <proposal-artifact-id>
 ```
 
 Resolution rules:
-- If given `<proposal-id>`, read `.tmp/test-red-team/proposals/<proposal-id>/proposal.json`
-- If given `<proposal-path>`, read that exact file
-
-Write the verdict next to the proposal:
-- `.tmp/test-red-team/proposals/<proposal-id>/validation.json`
-
-Use temp workspaces under:
-- `.tmp/test-referee/workspaces/<proposal-id>/`
+- Fetch the proposal from `GET /artifacts/<proposal-artifact-id>` on `metarepo`
+- Run `POST /rpc/referee.run` with that artifact id
+- Read the returned `referee_result` artifact from the response
 
 Never mutate the live repo in place.
 
 ## Required Input
 
-`proposal.json` must exist and must be machine-readable JSON.
-
 Required fields:
-- `id`
-- `target_file`
-- `target_symbol`
+- `targetFile`
+- `targetSymbol`
 - `family`
-- `why_this_boundary`
-- `minimal_patch`
-- `test_target`
-- `predicted_outcome`
-- `survival_rationale`
-- `validator_notes`
+- `whyThisBoundary`
+- `patch`
+- `testTarget`
+- `predictedOutcome`
+- `survivalRationale`
+- `validatorNotes`
 
 If required fields are missing, reject the proposal as `invalid`.
 
@@ -93,13 +84,13 @@ Reject as `invalid` when any of these are true:
 
 ### 1. Read the Proposal
 
-Load `proposal.json`.
+Load the proposal artifact payload from `metarepo`.
 Extract:
-- identity: `id`
-- target: `target_file`, `target_symbol`
+- identity: artifact id
+- target: `targetFile`, `targetSymbol`
 - claimed mutation family
-- exact `minimal_patch`
-- exact `test_target`
+- exact `patch`
+- exact `testTarget`
 - claimed expected result
 
 If any of that is unclear, reject. Do not fill gaps with your own invention.
@@ -117,15 +108,12 @@ If you cannot answer those concretely from the code, reject the proposal as `inv
 
 ### 3. Create the Temp Workspace
 
-Use an isolated temp workspace rooted at:
-- `.tmp/test-referee/workspaces/<proposal-id>/`
-
 Preferred strategy:
 1. Create a temp git worktree at HEAD if that is clean and available.
 2. Otherwise create a temp copy of the repo subtree needed for evaluation.
 
 The temp workspace must be disposable.
-Do not write proposal verdicts into the temp workspace; write them next to the proposal.
+Do not write proposal verdicts into the temp workspace; persist them through `metarepo`.
 
 ### 4. Apply Exactly One Mutation
 
@@ -165,21 +153,21 @@ Definitions:
 
 ## Output Contract
 
-Write `.tmp/test-red-team/proposals/<proposal-id>/validation.json`
+Persist a `referee_result` artifact through `metarepo`.
 
 Required JSON shape:
 
 ```json
 {
   "id": "string",
-  "proposal_path": "string",
+  "id": "proposal artifact id",
   "status": "survived | killed | invalid",
   "real_mutation": true,
-  "preserves_intended_behavior": false,
+  "preserves_intended_behavior": null,
   "patch_applied": true,
   "workspace_path": "string",
-  "test_target": "string",
-  "tests_run": ["string"],
+  "test_target": { "command": ["bun", "test", "tests/foo.test.ts"] },
+  "tests_run": ["bun test tests/foo.test.ts"],
   "summary": "string",
   "reason": "string"
 }
@@ -221,4 +209,4 @@ Your job is to separate real escaped behavior changes from garbage submissions.
 ## Final Rule
 
 Never leave the proposal without a verdict file.
-If evaluation fails, write `validation.json` with `status: "invalid"` and the precise reason.
+If evaluation fails, persist a `referee_result` artifact with `status: "invalid"` and the precise reason.

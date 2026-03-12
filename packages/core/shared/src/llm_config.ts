@@ -18,6 +18,7 @@ export interface ModelSelectionInput {
   model: string;
   reasoning?: string;
   contextWindow: number;
+  apiKey?: string;
 }
 
 /**
@@ -58,6 +59,7 @@ export function buildLLMRequestConfig(
     contextWindow,
     temperature: llmParams.temperature,
     displayProvider: modelSelection.provider,
+    ...(modelSelection.apiKey ? { apiKey: modelSelection.apiKey } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(modelSelection.reasoning
       ? { reasoning: { effort: modelSelection.reasoning as 'low' | 'medium' | 'high' } }

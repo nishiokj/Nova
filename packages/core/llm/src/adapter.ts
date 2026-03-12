@@ -142,6 +142,20 @@ class LLMRouterAdapter implements LLMAdapter {
 
       // Special handling for Codex OAuth tokens
       if (provider === 'codex') {
+        const explicitApiKey = llm.apiKey?.trim();
+        if (explicitApiKey) {
+          return {
+            provider: 'codex',
+            displayProvider: 'codex',
+            model: llm.model,
+            apiKey: explicitApiKey,
+            baseUrl: getProviderBaseUrl('codex') ?? 'https://api.openai.com',
+            maxTokens: llm.maxTokens,
+            temperature: llm.temperature,
+            reasoning: llm.reasoning,
+          };
+        }
+
         const tokenManager = getCodexTokenManager();
         yield* Effect.tryPromise({
           try: () => tokenManager.initialize(),
@@ -157,11 +171,6 @@ class LLMRouterAdapter implements LLMAdapter {
           ));
         }
         const accountId = tokenManager.getAccountId();
-        if (!accountId) {
-          return yield* Effect.fail(new Error(
-            'Codex account ID not found. Please re-authenticate with /providers codex login'
-          ));
-        }
         return {
           provider: 'codex',
           displayProvider: 'codex',
@@ -171,7 +180,7 @@ class LLMRouterAdapter implements LLMAdapter {
           maxTokens: llm.maxTokens,
           temperature: llm.temperature,
           reasoning: llm.reasoning,
-          chatgptAccountId: accountId,
+          ...(accountId ? { chatgptAccountId: accountId } : {}),
         };
       }
 

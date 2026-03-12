@@ -1,11 +1,11 @@
-name: PR Review Service Deploy
+name: Metarepo Deploy
 
 on:
   pull_request:
     branches: [main]
     paths:
-      - ".github/workflows/pr-review-service-deploy.yml"
-      - "packages/apps/pr-review-service/**"
+      - ".github/workflows/metarepo-deploy.yml"
+      - "packages/apps/metarepo/**"
       - "packages/plugins/entity-graph/**"
       - "scripts/pr-review-ci.ts"
       - "package.json"
@@ -15,8 +15,8 @@ on:
   push:
     branches: [main]
     paths:
-      - ".github/workflows/pr-review-service-deploy.yml"
-      - "packages/apps/pr-review-service/**"
+      - ".github/workflows/metarepo-deploy.yml"
+      - "packages/apps/metarepo/**"
       - "packages/plugins/entity-graph/**"
       - "scripts/pr-review-ci.ts"
       - "package.json"
@@ -35,13 +35,32 @@ permissions:
   packages: write
 
 concurrency:
-  group: pr-review-service-deploy-${{ github.ref }}
+  group: metarepo-deploy-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   verify:
-    name: Verify PR Review Service
+    name: Verify Metarepo
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+      METAREPO_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+      METAREPO_WORKDIR: /tmp/metarepo
+      METAREPO_SECRET_MASTER_KEY: ci-test-master-key
     steps:
       - uses: actions/checkout@v4
 
@@ -53,13 +72,16 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Typecheck service
-        run: bun run --cwd packages/apps/pr-review-service lint
+        run: bun run --cwd packages/apps/metarepo lint
 
       - name: Build service
-        run: bun run --cwd packages/apps/pr-review-service build
+        run: bun run --cwd packages/apps/metarepo build
 
-      - name: Run PR review CI unit tests
-        run: bun run test -- tests/scripts/pr-review-ci.test.ts
+      - name: Run metarepo unit tests
+        run: bun run test -- tests/metarepo/metarepo-routes.test.ts tests/metarepo/metarepo-cli.test.ts tests/scripts/pr-review-ci.test.ts
+
+      - name: Run metarepo behavioral test
+        run: bun run test -- tests/behavioral/metarepo/metarepo.behavior.test.ts
 
   image:
     name: Build and Publish Image
@@ -74,7 +96,7 @@ jobs:
         run: |
           owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           repo="$(echo "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')"
-          echo "name=ghcr.io/${owner}/${repo}-pr-review-service" >> "$GITHUB_OUTPUT"
+          echo "name=ghcr.io/${owner}/${repo}-metarepo" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -101,7 +123,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: packages/apps/pr-review-service/Dockerfile
+          file: packages/apps/metarepo/Dockerfile
           push: ${{ github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.publish) }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

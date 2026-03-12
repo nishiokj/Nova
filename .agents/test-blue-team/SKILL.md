@@ -1,7 +1,7 @@
 ---
 name: test-blue-team
 description: >
-  AST-driven behavioral test writer. Uses the entity graph CLI to pick ready
+  AST-driven behavioral test writer. Uses the metarepo service to pick ready
   boundaries, wire real dependencies, and write behavioral tests from the
   largest observable surface inward. Invoke with /test-blue-team <target>.
 user-invocable: true
@@ -10,6 +10,8 @@ user-invocable: true
 # Behavioral Test Writer
 
 You write behavioral tests for real boundaries. The red team will attack your most recent additions. Weak tests lose.
+
+For the smoke run, optimize for one well-defended boundary at a time. Do not spread effort thinly across many cheap helpers.
 
 ## Core Rules
 
@@ -49,52 +51,39 @@ Boundary fields:
 - `fan_in`
 - `readiness` = `ready | blocked | unknown`
 
-## CLI
+## Metarepo
 
-Use the entity graph CLI as the source of truth:
+Use `./metarepo` as the query and persistence backend. Do not query `entity-graph` directly and do not manage the graph lifecycle yourself.
+Do not `curl` the metarepo server directly. Do not call HTTP or RPC endpoints yourself.
+The CLI wrapper is the contract. If `./metarepo` cannot do what you need, stop and report the gap instead of bypassing it.
 
-```bash
-CLI="bun run packages/plugins/entity-graph/src/cli.ts"
-
-$CLI boundaries [target]
-$CLI gaps [target]
-$CLI deps <entity-id>
-$CLI tree <entity-id> [--max-depth N]
-$CLI env <entity-id>
-$CLI index [target]
-```
-
-Important:
-- these commands query Postgres; they do not parse the repo on demand
-- before relying on CLI output, ensure the entity graph has been built or refreshed
-- default refresh command: `bun run db:graph`
-- if the graph is stale or empty, refresh it before selecting boundaries
-- if you cannot build the graph because the DB or parser setup is unavailable, the workflow is `blocked`
+Required env:
+- `METAREPO_BASE_URL`
 
 Cold-start bootstrap:
 
 ```bash
-# 1. Create a disposable local database if needed
-bun run db:setup
-
-# 2. Point graph build/query commands at the test DB
-# If you are using TEST_DATABASE_URL, export DATABASE_URL for the graph tooling
-export DATABASE_URL="${TEST_DATABASE_URL:-$DATABASE_URL}"
-
-# 3. Build or refresh the graph
-bun run db:graph
-
-# 4. Optional: generate a registry skeleton if test-health.yaml does not exist yet
-$CLI init > test-health.yaml
-
-# 5. Sanity-check that the graph is populated
-$CLI boundaries --db "$DATABASE_URL"
+./metarepo add
+./metarepo secrets add --file .env
 ```
 
-Notes:
-- `db:graph` reads `DATABASE_URL`, not `TEST_DATABASE_URL`
-- missing `test-health.yaml` is not fatal, but readiness/dependency mapping will be lower fidelity until you add one
-- if `boundaries` is unexpectedly empty, rebuild the graph before assuming there are no targets
+Core queries:
+
+```bash
+./metarepo blue latest
+./metarepo graph gaps src/orders
+./metarepo graph boundaries src/orders
+./metarepo graph deps function:src/orders/process.ts:processOrder
+./metarepo graph tree function:src/orders/process.ts:processOrder --max-depth 5
+./metarepo graph env function:src/orders/process.ts:processOrder
+./metarepo graph readiness function:src/orders/process.ts:processOrder
+./metarepo graph index src/orders --max-depth 5
+```
+
+Important:
+- every metarepo workflow rebuilds the graph from the repo filesystem at run start
+- if `metarepo` is unavailable, the workflow is `blocked`
+- `metarepo` does not write tests for you; it only returns structural context and persists artifacts/bugs/secrets
 
 Required per boundary:
 1. `deps`
@@ -107,6 +96,52 @@ From those, determine:
 - invalid outputs
 - thrown errors
 - side effects through injected dependencies
+
+## Persistence Contract
+
+You are responsible for the actual blue-team work.
+
+Persist by:
+- writing behavioral test files under `tests/behavioral/...`
+- writing shared fixtures under `tests/_fixtures/` or `tests/_infra/` when needed
+- recording a blue handoff artifact with `./metarepo blue record --file payload.json`
+- creating a metarepo bug record when you confirm a real product defect or a safe local setup blocker
+
+For each boundary, leave behind:
+- the exact test file changes
+- a blue handoff artifact naming the defended boundary and changed files
+- the exact command a reviewer should run to exercise those tests
+- a durable bug only when the boundary is truly blocked or reveals a real defect
+
+Blue handoff payload:
+
+```json
+{
+  "scope": "src/orders",
+  "boundaryId": "function:src/orders/process.ts:processOrder",
+  "testFiles": ["tests/behavioral/orders/process.behavior.test.ts"],
+  "changedFiles": [
+    "tests/behavioral/orders/process.behavior.test.ts",
+    "tests/_fixtures/orders.ts"
+  ],
+  "testCommand": ["bun", "test", "tests/behavioral/orders/process.behavior.test.ts"],
+  "summary": "Covers happy path, invalid sku, and duplicate order id",
+  "notes": "Uses real local postgres test db",
+  "bugIds": []
+}
+```
+
+Use this syntax to persist a bug:
+
+```bash
+./metarepo bug create --title "orders processor requires local postgres" --description "Blocked until db:setup succeeds in disposable test DB"
+```
+
+Do not:
+- treat `metarepo` query output as the completed task
+- invent `blue-team` report artifacts instead of writing tests
+- leave a blocker only in chat when it should be a durable bug record
+- claim broad coverage when you only defended a tiny helper
 
 ## Dependency Policy
 

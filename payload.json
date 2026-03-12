@@ -1,0 +1,23 @@
+{
+  "proposal": {
+    "title": "Remove preference merge in setTheme — clobber existing prefs",
+    "family": "missing_action",
+    "targetFile": "packages/apps/tui/theme.ts",
+    "targetSymbol": "function:packages/apps/tui/theme.ts:setTheme",
+    "whyThisBoundary": "setTheme is the only mutating boundary. It persists by merging with existing preferences via loadPreferences spread. Tests only verify the theme field is written, never checking that other preference keys survive.",
+    "patch": [
+      {
+        "op": "replace",
+        "file": "packages/apps/tui/theme.ts",
+        "find": "savePreferences({ ...loadPreferences(), theme: name });",
+        "replace": "savePreferences({ theme: name });",
+        "expectedMatches": 1
+      }
+    ],
+    "testTarget": {
+      "command": ["npx", "vitest", "run", "tests/behavioral/tui/theme.behavior.test.ts"]
+    },
+    "predictedOutcome": "survived",
+    "survivalRationale": "The test helper readPersistedTheme() only reads the theme field from preferences.json. No test writes additional preference keys before calling setTheme, so the merge-vs-clobber distinction is invisible. The persistence tests at lines 208-221 only assert the theme field value."
+  }
+}
