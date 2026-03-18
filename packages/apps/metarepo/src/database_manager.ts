@@ -142,7 +142,9 @@ export class DatabaseManager {
 
   async initialize(): Promise<void> {
     if (!this.initPromise) {
-      this.initPromise = this.appSql.unsafe(APP_SCHEMA_DDL).then(() => undefined)
+      this.initPromise = this.appSql.unsafe(APP_SCHEMA_DDL)
+        .then(() => this.appSql.unsafe(ENTITY_GRAPH_SCHEMA_DDL))
+        .then(() => undefined)
     }
     await this.initPromise
   }

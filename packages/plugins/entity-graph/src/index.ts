@@ -43,6 +43,8 @@ import { createEntityGraphHooks } from './hooks.js'
 import { TestHealthModule } from './test-health.js'
 import type { BoundaryInfo, ReadinessVerdict, GapReport } from './test-health.js'
 import type { BoundaryCandidate, BoundaryDossier, SkepticConfig } from './skeptic/types.js'
+import { ContractModule } from './contracts/module.js'
+import type { Contract, ContractStatus, ContractSummary } from './contracts/types.js'
 
 export class EntityGraph {
   private sql: Sql
@@ -50,6 +52,7 @@ export class EntityGraph {
   private hooks: EntityGraphHooks | null = null
   private scanPromise: Promise<{ files: number; entities: number; edges: number; durationMs: number } | null> | null = null
   private _testHealth: TestHealthModule | null = null
+  private _contracts: ContractModule | null = null
 
   constructor(sql: Sql, config: EntityGraphConfig) {
     this.sql = sql
@@ -64,6 +67,16 @@ export class EntityGraph {
       this._testHealth = new TestHealthModule(this.sql, this.config.sourceRoot)
     }
     return this._testHealth
+  }
+
+  /**
+   * Get the ContractModule instance (lazy-created).
+   */
+  get contracts(): ContractModule {
+    if (!this._contracts) {
+      this._contracts = new ContractModule(this.sql, this.config.sourceRoot)
+    }
+    return this._contracts
   }
 
   /**
@@ -211,6 +224,24 @@ export class EntityGraph {
     return this.testHealth.skepticDossier(boundaryId, opts)
   }
 
+  // --- Contract Delegation ---
+
+  async contractsForEntity(entityId: string): Promise<Contract[]> {
+    return this.contracts.forEntity(entityId)
+  }
+
+  async contractsForFile(filepath: string): Promise<Contract[]> {
+    return this.contracts.forFile(filepath)
+  }
+
+  async contractsByStatus(status: ContractStatus): Promise<Contract[]> {
+    return this.contracts.byStatus(status)
+  }
+
+  async contractSummary(): Promise<ContractSummary> {
+    return this.contracts.summary()
+  }
+
   /**
    * Run the full PR review pipeline from a unified diff string.
    */
@@ -264,6 +295,7 @@ export { parseFile, persistParseResult, buildFullGraph, deleteFileContribution }
 export {
   entitiesInFile,
   entityById,
+  entitiesByNamePattern,
   importersOfFile,
   callersOf,
   usersOf,
@@ -322,3 +354,53 @@ export type {
 export { selectBoundaryCandidates, hydrateBoundaryCandidate } from './skeptic/selection.js'
 export { buildBoundaryDossier } from './skeptic/boundary_dossier.js'
 export type { BoundaryCandidate, BoundaryDossier, SkepticConfig } from './skeptic/types.js'
+
+// --- Contracts ---
+export { ContractModule, parseDomainYaml, serializeDomainYaml } from './contracts/module.js'
+export type {
+  Contract,
+  ContractType,
+  ContractSource,
+  ContractStatus,
+  ContractEntityLink,
+  ContractEntityRole,
+  ContractDependency,
+  ContractDependencyRelationship,
+  ContractSummary,
+  DomainModel,
+  DomainEntity,
+} from './contracts/types.js'
+export {
+  contractById,
+  contractsForEntity,
+  contractsForFile,
+  contractsByStatus,
+  contractsByType,
+  contractSummary,
+  contractsWithEntityDetails,
+  upsertContract,
+  updateContractStatus,
+  updateContractCompilation,
+  deleteContract,
+  entityLinksForContract,
+  contractDependencies,
+} from './contracts/queries.js'
+export type { ContractWithEntities } from './contracts/queries.js'
+export { computeDirtyContracts, markDirtyContracts } from './contracts/staleness.js'
+export { recordVerdicts } from './contracts/compilation.js'
+export type { VerdictInput } from './contracts/compilation.js'
+export { verifyContracts } from './contracts/verify.js'
+export type { TestRunner, VerifyResult } from './contracts/verify.js'
+export {
+  createViolation,
+  resolveViolations,
+  openViolations,
+  violationsForContract,
+} from './contracts/queries.js'
+export type { ContractViolation } from './contracts/queries.js'
+export {
+  buildDomainModel,
+  seedContractsFromDomain,
+  INTERVIEW_QUESTIONS,
+} from './contracts/interview.js'
+export type { InterviewResponses, InterviewQuestion } from './contracts/interview.js'

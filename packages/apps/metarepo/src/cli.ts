@@ -7,6 +7,10 @@ import path from 'node:path'
 import { parseArgs } from 'node:util'
 import {
   blueAssign,
+  contractBatchCreate,
+  contractCompile,
+  contractInterview,
+  contractUpdateTestPaths,
   createBlueHandoff,
   createBug,
   createEnvProfile,
@@ -219,6 +223,11 @@ function printUsage(): void {
     '  metarepo graph index [filepath] [--max-depth 5]',
     '  metarepo test recent-paths [selector]',
     '  metarepo test smells [selector]',
+    '  metarepo contract compile [--contract-ids id1,id2]',
+    '  metarepo contract interview --file responses.json',
+    '  metarepo contract create --file contracts.json',
+    '  metarepo contract update-test-paths --file updates.json',
+    '  metarepo contract check',
     '  metarepo red schema',
     '  metarepo red targets [selector] [--max-depth 5]',
     '  metarepo red dossier <boundary-id> [--max-depth 5]',
@@ -639,6 +648,79 @@ async function commandTest(subcommand: string | undefined, args: string[]): Prom
   }
 }
 
+async function commandContract(subcommand: string | undefined, args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      'base-url': { type: 'string' },
+      file: { type: 'string' },
+    },
+  })
+
+  const { baseUrl, repo } = await resolveCurrentRepo(values['base-url'])
+
+  switch (subcommand) {
+    case 'compile':
+      printJson(await contractCompile(baseUrl, {
+        repoId: repo.id,
+        contractIds: positionals.length > 0 ? positionals : undefined,
+        requestedBy: 'metarepo-cli:contract.compile',
+      }))
+      return
+    case 'interview': {
+      if (!values.file) throw new Error('contract interview requires --file responses.json')
+      const raw = await readFile(path.resolve(values.file), 'utf-8')
+      const responses = JSON.parse(raw) as {
+        systemDescription: string
+        entities: string
+        criticalPath: string
+        hardRules: string
+        painPoints: string
+      }
+      printJson(await contractInterview(baseUrl, {
+        repoId: repo.id,
+        responses,
+        requestedBy: 'metarepo-cli:contract.interview',
+      }))
+      return
+    }
+    case 'create': {
+      if (!values.file) throw new Error('contract create requires --file contracts.json')
+      const raw = await readFile(path.resolve(values.file), 'utf-8')
+      const contracts = JSON.parse(raw) as Array<{
+        statement: string
+        type: string
+        source: string
+        confidence: number
+        entityIds?: string[]
+      }>
+      printJson(await contractBatchCreate(baseUrl, {
+        repoId: repo.id,
+        contracts,
+        requestedBy: 'metarepo-cli:contract.create',
+      }))
+      return
+    }
+    case 'update-test-paths': {
+      if (!values.file) throw new Error('contract update-test-paths requires --file updates.json')
+      const raw = await readFile(path.resolve(values.file), 'utf-8')
+      const updates = JSON.parse(raw) as Array<{
+        contractId: string
+        testFilePath: string
+      }>
+      printJson(await contractUpdateTestPaths(baseUrl, {
+        repoId: repo.id,
+        updates,
+        requestedBy: 'metarepo-cli:contract.update-test-paths',
+      }))
+      return
+    }
+    default:
+      throw new Error(`Unknown metarepo contract command: ${subcommand ?? '(missing)'}`)
+  }
+}
+
 async function commandRed(subcommand: string | undefined, args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
@@ -817,6 +899,10 @@ export async function runCli(argv: string[]): Promise<void> {
   }
   if (command === 'test') {
     await commandTest(subcommand, rest)
+    return
+  }
+  if (command === 'contract') {
+    await commandContract(subcommand, rest)
     return
   }
   if (command === 'red') {

@@ -75,6 +75,27 @@ export async function entityById(sql: Sql, id: string): Promise<Entity | null> {
 }
 
 /**
+ * Search entities by name pattern (case-insensitive ILIKE).
+ * Excludes file entities. Exact matches sort first.
+ */
+export async function entitiesByNamePattern(
+  sql: Sql,
+  pattern: string,
+  limit: number = 50,
+): Promise<Entity[]> {
+  const rows = await sql<EntityRow[]>`
+    SELECT * FROM entity_graph.entities
+    WHERE name ILIKE ${'%' + pattern + '%'}
+      AND kind != 'file'
+    ORDER BY
+      CASE WHEN name ILIKE ${pattern} THEN 0 ELSE 1 END,
+      exported DESC, filepath ASC, start_line ASC NULLS LAST
+    LIMIT ${limit}
+  `
+  return rows.map(rowToEntity)
+}
+
+/**
  * Find all entities that import from a given file.
  * Returns the entities (typically file entities) that have import edges
  * pointing to entities within the target file.

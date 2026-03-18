@@ -1,0 +1,25 @@
+version: 1
+system: "Full-stack agentic application with plugins and multiple clients (including TUI). Layered architecture: Harness (application/session layer) → Orchestrator (context/lifecycle/hooks/parallelization) → Agent (LLM loop with tools, context window, output schemas)."
+entities:
+  - name: Harness
+    description: ""
+  - name: Orchestrator
+    description: ""
+  - name: Agent
+    description: ""
+  - name: Plugin
+    description: ""
+  - name: ContextWindow
+    description: ""
+critical_path: "Startup → Config load → Client request → Session/ContextWindow (create or resume) → Harness → Orchestrator → Agent loop (LLM turn cycle until fulfillment) → Return. Event bus emits throughout."
+hard_rules:
+  - "Client disconnect must close connection and transition session out of active state — no orphaned active sessions"
+  - "All states in the agent loop, orchestrator loop, and hook system must be explicitly handled — no unhandled state transitions or silent fallthrough"
+  - "Tool call integrity — agent-requested tool calls must match what actually executes"
+  - "Sessions must be rehydratable from persisted state"
+pain_points:
+  - "State handling drift — prompts, output schemas, hooks/events, and state handling fall out of sync"
+  - "Config source sprawl — turn limits, agent types scattered across config files, env vars, and hardcoded values"
+  - "Session lifecycle bugs — improper cleanup, orphaned state"
+  - "Output schema violations — agents not conforming to declared output schemas"
+  - "Context window token mismatch — local token estimates diverge from actual API max context limits"

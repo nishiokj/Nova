@@ -185,4 +185,68 @@ CREATE TABLE IF NOT EXISTS entity_graph.test_case_seam_overrides (
   line          INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_eg_test_case_seams_case ON entity_graph.test_case_seam_overrides(test_case_id);
+
+-- Contract verification layer
+CREATE TABLE IF NOT EXISTS entity_graph.contracts (
+  id          TEXT PRIMARY KEY,
+  statement   TEXT NOT NULL,
+  type        TEXT NOT NULL,
+  source      TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'insufficient',
+  confidence  REAL NOT NULL DEFAULT 0.5,
+  domain_id   TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eg_contracts_status ON entity_graph.contracts(status);
+CREATE INDEX IF NOT EXISTS idx_eg_contracts_type   ON entity_graph.contracts(type);
+CREATE INDEX IF NOT EXISTS idx_eg_contracts_source ON entity_graph.contracts(source);
+
+CREATE TABLE IF NOT EXISTS entity_graph.contract_entity_links (
+  contract_id TEXT NOT NULL,
+  entity_id   TEXT NOT NULL,
+  role        TEXT NOT NULL DEFAULT 'subject',
+  PRIMARY KEY (contract_id, entity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_eg_cel_contract ON entity_graph.contract_entity_links(contract_id);
+CREATE INDEX IF NOT EXISTS idx_eg_cel_entity   ON entity_graph.contract_entity_links(entity_id);
+
+CREATE TABLE IF NOT EXISTS entity_graph.contract_dependencies (
+  contract_id             TEXT NOT NULL,
+  depends_on_contract_id  TEXT NOT NULL,
+  relationship            TEXT NOT NULL,
+  PRIMARY KEY (contract_id, depends_on_contract_id)
+);
+CREATE INDEX IF NOT EXISTS idx_eg_cdep_contract  ON entity_graph.contract_dependencies(contract_id);
+CREATE INDEX IF NOT EXISTS idx_eg_cdep_depends   ON entity_graph.contract_dependencies(depends_on_contract_id);
+
+-- Compilation fields for semantic compiler integration
+ALTER TABLE entity_graph.contracts ADD COLUMN IF NOT EXISTS verification_plan_json TEXT;
+ALTER TABLE entity_graph.contracts ADD COLUMN IF NOT EXISTS verdict_rule TEXT;
+ALTER TABLE entity_graph.contracts ADD COLUMN IF NOT EXISTS refined_intent TEXT;
+ALTER TABLE entity_graph.contracts ADD COLUMN IF NOT EXISTS compile_status TEXT;
+ALTER TABLE entity_graph.contracts ADD COLUMN IF NOT EXISTS last_verdict TEXT;
+ALTER TABLE entity_graph.contracts ADD COLUMN IF NOT EXISTS last_verdict_at TEXT;
+
+-- Test file path for contract-linked test generation
+ALTER TABLE entity_graph.contracts ADD COLUMN IF NOT EXISTS test_file_path TEXT;
+
+-- Contract violations (durable records decoupled from rectification)
+CREATE TABLE IF NOT EXISTS entity_graph.contract_violations (
+  id            TEXT PRIMARY KEY,
+  contract_id   TEXT NOT NULL,
+  test_file_path TEXT NOT NULL,
+  test_output   TEXT,
+  detected_at   TEXT NOT NULL,
+  resolved_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_eg_cv_contract ON entity_graph.contract_violations(contract_id);
+CREATE INDEX IF NOT EXISTS idx_eg_cv_open ON entity_graph.contract_violations(resolved_at) WHERE resolved_at IS NULL;
+
+-- Migrate old status values to new state machine (idempotent)
+UPDATE entity_graph.contracts SET status = 'insufficient' WHERE status = 'unverified' AND test_file_path IS NULL;
+UPDATE entity_graph.contracts SET status = 'dirty' WHERE status = 'unverified' AND test_file_path IS NOT NULL;
+UPDATE entity_graph.contracts SET status = 'passing' WHERE status = 'verified';
+UPDATE entity_graph.contracts SET status = 'failing' WHERE status = 'violated';
+UPDATE entity_graph.contracts SET status = 'dirty' WHERE status = 'stale';
 `
