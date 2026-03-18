@@ -1,0 +1,25 @@
+(version 1)
+(deny default)
+
+;; System libs + runtime
+(allow file-read* (subpath "/usr"))
+(allow file-read* (subpath "/System"))
+(allow file-read* (subpath "/Library"))
+(allow file-read* (subpath "/opt/homebrew"))
+(allow file-read* (subpath "/private/tmp"))
+(allow file-read* (subpath "/private/var"))
+(allow file-read* (literal "/dev/null"))
+(allow file-read* (literal "/dev/urandom"))
+(allow file-read* (literal "/dev/random"))
+
+;; Contracts dir (read-write) — substituted at runtime
+(allow file-read* file-write* (subpath "__CONTRACTS_DIR__"))
+
+;; Filetree (read-only) — substituted at runtime
+(allow file-read* (literal "__FILETREE_PATH__"))
+
+;; Process + network
+(allow process-exec* process-fork sysctl-read)
+(allow network*)
+(allow mach-lookup)
+(allow ipc-posix-shm-read-data ipc-posix-shm-write-data)

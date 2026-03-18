@@ -85,6 +85,32 @@ Assignment fields:
 - `defenseValueScore`
 - `reasons`
 
+## Contract Defense
+
+After receiving your assignment, query contracts linked to the assigned boundary:
+
+```bash
+test-health contracts for <boundaryId> --json
+```
+
+Each contract statement is a testable assertion that your tests must cover. Contracts represent formal behavioral claims — invariants, guarantees, preconditions, postconditions — that were captured from design decisions and requirements.
+
+Rules:
+- It is not enough to either defend the boundary or uphold the contracts — both must be done.
+- Each contract statement must be reflected in at least one test assertion.
+- Include a comment block at the top of the test file listing defended contracts:
+
+```typescript
+/**
+ * Defended contracts:
+ * - <contract-id>: <statement>
+ * - <contract-id>: <statement>
+ */
+```
+
+- If a contract cannot be defended at this boundary (e.g., it belongs to a different scope), note it in the handoff `notes` field explaining why.
+- If no contracts are linked to the boundary, proceed with boundary defense only.
+
 ## Metarepo
 
 Use `./metarepo` as the query and persistence backend. Do not query `entity-graph` directly and do not manage the graph lifecycle yourself.
@@ -126,6 +152,7 @@ Required per assigned boundary:
 3. `tree`
 4. `env`
 5. read the source
+6. `test-health contracts for <boundaryId> --json`
 
 From those, determine:
 - valid outputs
@@ -163,9 +190,12 @@ Blue handoff payload:
   "testCommand": ["bun", "test", "tests/behavioral/orders/process.behavior.test.ts"],
   "summary": "Covers happy path, invalid sku, and duplicate order id",
   "notes": "Uses real local postgres test db",
-  "bugIds": []
+  "bugIds": [],
+  "contractIds": ["contract-uuid-1", "contract-uuid-2"]
 }
 ```
+
+Include `contractIds` for all contracts defended by the test file. This updates those contracts' `testFilePath`, marking them as defended in `test-health contracts list`.
 
 Use the `assignmentArtifactId` returned by `./metarepo blue assign`.
 Do not invent, swap, or narrow the boundary in the payload. `./metarepo blue record` must correspond to the assigned boundary.

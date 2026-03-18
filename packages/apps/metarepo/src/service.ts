@@ -12,6 +12,9 @@ import {
   runReview,
 } from '../../../plugins/entity-graph/src/pr-review/service.js'
 import { TestHealthModule } from '../../../plugins/entity-graph/src/test-health.js'
+import { contractSummary, upsertContract } from '../../../plugins/entity-graph/src/contracts/queries.js'
+import { buildDomainModel, seedContractsFromDomain } from '../../../plugins/entity-graph/src/contracts/interview.js'
+import { serializeDomainYaml } from '../../../plugins/entity-graph/src/contracts/module.js'
 import { DatabaseManager } from './database_manager.js'
 import { decryptSecretValue, encryptSecretValue } from './secrets.js'
 import { recentTestPaths, summarizeSmells } from './test_smells.js'
@@ -29,6 +32,10 @@ import type {
   BoundaryInfo,
   BugRecord,
   CallTreeNode,
+  ContractCompileRequest,
+  ContractCompileResult,
+  ContractInterviewRequest,
+  ContractInterviewResult,
   CreateBugInput,
   CreateBlueHandoffRequest,
   CreateEnvProfileInput,
@@ -435,6 +442,7 @@ function buildBlueHandoffPayload(input: BlueHandoffInput, assignment: BlueAssign
     { min: 1 },
   )
   const bugIds = normalizeStringList(input.bugIds ?? [], 'handoff.bugIds')
+  const contractIds = normalizeStringList(input.contractIds ?? [], 'handoff.contractIds')
 
   return {
     selector: assignment.selector,
@@ -447,6 +455,7 @@ function buildBlueHandoffPayload(input: BlueHandoffInput, assignment: BlueAssign
     summary: input.summary?.trim() || undefined,
     notes: input.notes?.trim() || undefined,
     bugIds,
+    contractIds,
   }
 }
 
@@ -463,6 +472,7 @@ function normalizeBlueHandoffPayload(value: unknown): BlueHandoffPayload {
     summary: optionalTrimmedString(payload.summary),
     notes: optionalTrimmedString(payload.notes),
     bugIds: normalizeStringList(payload.bugIds, 'handoff.bugIds'),
+    contractIds: Array.isArray(payload.contractIds) ? (payload.contractIds as string[]) : [],
   }
 }
 
@@ -892,6 +902,14 @@ export class MetarepoService implements MetarepoApi {
         changedFiles: handoff.changedFiles,
         testFiles: handoff.testFiles,
       })
+      if (handoff.contractIds.length > 0) {
+        const { updateContractCompilation, updateContractStatus } = await import('../../../plugins/entity-graph/src/contracts/queries.js')
+        const appSql = this.databaseManager.getAppSql()
+        for (const contractId of handoff.contractIds) {
+          await updateContractCompilation(appSql, contractId, { testFilePath: handoff.testFiles[0] })
+          await updateContractStatus(appSql, contractId, 'dirty')
+        }
+      }
       run = await this.updateRun(run.id, {
         status: 'succeeded',
         finishedAt: new Date(),
@@ -1138,6 +1156,90 @@ export class MetarepoService implements MetarepoApi {
     `
     if (!rows[0]) throw new ArtifactNotFoundError(id)
     return mapArtifact(rows[0])
+  }
+
+  async contractCompile(_input: ContractCompileRequest): Promise<ContractCompileResult> {
+    // Compilation is now handled by skills (/capture, /generate-contract-tests).
+    // The rule-based semantic compiler has been removed.
+    return {
+      compiled: 0,
+      failed: 0,
+      needsUserAnswer: 0,
+      findings: [{ contractId: '', message: 'Contract compilation is now handled by /capture and /generate-contract-tests skills' }],
+    }
+  }
+
+  async contractInterview(input: ContractInterviewRequest): Promise<ContractInterviewResult> {
+    await this.ensureStarted()
+    const repo = await this.requireRepo(input.repoId)
+    const sourceRoot = repo.rootPath
+    if (!sourceRoot) throw new ValidationError('Interview requires a local repo with rootPath')
+
+    // Build domain model from responses
+    const domain = buildDomainModel(input.responses)
+
+    // Write domain.yaml
+    const contractsDir = path.join(sourceRoot, 'contracts')
+    await mkdir(contractsDir, { recursive: true })
+    const domainYamlPath = path.join(contractsDir, 'domain.yaml')
+    await writeFile(domainYamlPath, serializeDomainYaml(domain), 'utf-8')
+
+    // Seed contracts into the app database
+    const sql = this.databaseManager.getAppSql()
+    const seededContracts = seedContractsFromDomain(domain)
+    let count = 0
+    for (const c of seededContracts) {
+      await upsertContract(sql, c, [])
+      count++
+    }
+
+    return {
+      domainYamlPath,
+      contractsSeeded: count,
+    }
+  }
+
+  async contractBatchCreate(input: import('./types.js').ContractBatchCreateRequest): Promise<import('./types.js').ContractBatchCreateResult> {
+    await this.ensureStarted()
+    await this.requireRepo(input.repoId)
+    const sql = this.databaseManager.getAppSql()
+    const contractIds: string[] = []
+
+    for (const c of input.contracts) {
+      const result = await upsertContract(sql, {
+        statement: c.statement,
+        type: c.type as import('../../../plugins/entity-graph/src/contracts/types.js').ContractType,
+        source: (c.source || 'event') as import('../../../plugins/entity-graph/src/contracts/types.js').ContractSource,
+        status: 'insufficient',
+        confidence: c.confidence ?? 0.8,
+        domainId: null,
+        testFilePath: null,
+        verificationPlanJson: null,
+        verdictRule: null,
+        refinedIntent: null,
+        compileStatus: null,
+        lastVerdict: null,
+        lastVerdictAt: null,
+      }, c.entityIds ?? [])
+      contractIds.push(result.id)
+    }
+
+    return { created: contractIds.length, contractIds }
+  }
+
+  async contractUpdateTestPaths(input: import('./types.js').ContractUpdateTestPathRequest): Promise<import('./types.js').ContractUpdateTestPathResult> {
+    await this.ensureStarted()
+    await this.requireRepo(input.repoId)
+    const sql = this.databaseManager.getAppSql()
+    const { updateContractCompilation } = await import('../../../plugins/entity-graph/src/contracts/queries.js')
+
+    let updated = 0
+    for (const u of input.updates) {
+      await updateContractCompilation(sql, u.contractId, { testFilePath: u.testFilePath })
+      updated++
+    }
+
+    return { updated }
   }
 
   async graphBoundaries(input: GraphBoundariesRequest): Promise<WorkflowResponse<BoundaryInfo[]>> {

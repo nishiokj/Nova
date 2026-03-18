@@ -9,6 +9,7 @@ import {
 import type {
   BlueAssignRequest,
   BlueHandoffInput,
+  ContractInterviewRequest,
   CreateBugInput,
   CreateBlueHandoffRequest,
   CreateEnvProfileInput,
@@ -197,6 +198,7 @@ function parseCreateBlueHandoffInput(body: unknown): CreateBlueHandoffRequest {
       summary: optionalString(handoff.summary),
       notes: optionalString(handoff.notes),
       bugIds: optionalStringArray(handoff.bugIds, 'handoff.bugIds'),
+      contractIds: optionalStringArray(handoff.contractIds, 'handoff.contractIds'),
     } satisfies BlueHandoffInput,
   }
 }
@@ -230,6 +232,30 @@ async function dispatchRpc(api: MetarepoApi, method: string, body: unknown): Pro
   const payload = parseRpcRequest(body)
 
   switch (method) {
+    case 'contract.interview':
+      return api.contractInterview({
+        repoId: asString(payload.repoId, 'repoId'),
+        responses: payload.responses as ContractInterviewRequest['responses'],
+        requestedBy: optionalString(payload.requestedBy),
+      })
+    case 'contract.compile':
+      return api.contractCompile({
+        repoId: asString(payload.repoId, 'repoId'),
+        contractIds: Array.isArray(payload.contractIds) ? payload.contractIds as string[] : undefined,
+        requestedBy: optionalString(payload.requestedBy),
+      })
+    case 'contract.batch-create':
+      return api.contractBatchCreate({
+        repoId: asString(payload.repoId, 'repoId'),
+        contracts: payload.contracts as import('./types.js').ContractBatchCreateRequest['contracts'],
+        requestedBy: optionalString(payload.requestedBy),
+      })
+    case 'contract.update-test-paths':
+      return api.contractUpdateTestPaths({
+        repoId: asString(payload.repoId, 'repoId'),
+        updates: payload.updates as import('./types.js').ContractUpdateTestPathRequest['updates'],
+        requestedBy: optionalString(payload.requestedBy),
+      })
     case 'graph.boundaries':
       return api.graphBoundaries({
         repoId: asString(payload.repoId, 'repoId'),

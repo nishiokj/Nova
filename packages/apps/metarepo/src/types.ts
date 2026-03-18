@@ -15,6 +15,7 @@ export type {
   BoundaryDossier,
   BoundaryInfo,
   CallTreeNode,
+  ContractSummary,
   DependencyInfo,
   EnvVarInfo,
   GapReport,
@@ -225,6 +226,7 @@ export interface BlueHandoffInput {
   summary?: string
   notes?: string
   bugIds?: string[]
+  contractIds?: string[]
 }
 
 export interface BlueHandoffPayload {
@@ -238,6 +240,7 @@ export interface BlueHandoffPayload {
   summary?: string
   notes?: string
   bugIds: string[]
+  contractIds: string[]
 }
 
 export interface BlueHandoffRecord {
@@ -313,6 +316,67 @@ export interface GraphIndexRequest {
   maxDepth?: number
   source?: RunSourceRequest
   requestedBy?: string
+}
+
+export interface ContractCompileRequest {
+  repoId: string
+  contractIds?: string[]
+  requestedBy?: string
+}
+
+export interface ContractInterviewRequest {
+  repoId: string
+  responses: {
+    systemDescription: string
+    entities: string
+    criticalPath: string
+    hardRules: string
+    painPoints: string
+  }
+  sandboxed?: boolean
+  requestedBy?: string
+}
+
+export interface ContractInterviewResult {
+  domainYamlPath: string
+  contractsSeeded: number
+}
+
+export interface ContractCompileResult {
+  compiled: number
+  failed: number
+  needsUserAnswer: number
+  findings: Array<{ contractId: string; message: string }>
+}
+
+export interface ContractBatchCreateRequest {
+  repoId: string
+  contracts: Array<{
+    statement: string
+    type: string
+    source: string
+    confidence: number
+    entityIds?: string[]
+  }>
+  requestedBy?: string
+}
+
+export interface ContractBatchCreateResult {
+  created: number
+  contractIds: string[]
+}
+
+export interface ContractUpdateTestPathRequest {
+  repoId: string
+  updates: Array<{
+    contractId: string
+    testFilePath: string
+  }>
+  requestedBy?: string
+}
+
+export interface ContractUpdateTestPathResult {
+  updated: number
 }
 
 export interface ReviewRunRequest {
@@ -649,6 +713,10 @@ export interface MetarepoApi {
   listRunEvents(id: string): Promise<EventLedgerRecord[]>
   listRunArtifacts(id: string): Promise<ArtifactRecord[]>
   getArtifact(id: string): Promise<ArtifactRecord>
+  contractCompile(input: ContractCompileRequest): Promise<ContractCompileResult>
+  contractInterview(input: ContractInterviewRequest): Promise<ContractInterviewResult>
+  contractBatchCreate(input: ContractBatchCreateRequest): Promise<ContractBatchCreateResult>
+  contractUpdateTestPaths(input: ContractUpdateTestPathRequest): Promise<ContractUpdateTestPathResult>
   graphBoundaries(input: GraphBoundariesRequest): Promise<WorkflowResponse<BoundaryInfo[]>>
   graphDeps(input: GraphDepsRequest): Promise<WorkflowResponse<DependencyInfo[]>>
   graphTree(input: GraphTreeRequest): Promise<WorkflowResponse<CallTreeNode[]>>

@@ -11,10 +11,14 @@ import path from 'path'
 import { execSync } from 'child_process'
 import { SCHEMA_DDL } from './schema.js'
 import { TestHealthModule } from './test-health.js'
-import { boundaries, callTreeFrom, depsOf, envVarsInTree } from './queries.js'
+import { boundaries, callTreeFrom, depsOf, envVarsInTree, entitiesByNamePattern } from './queries.js'
 import type { BoundaryInfo, DependencyInfo, EnvVarInfo, GapReport, ReadinessVerdict } from './test-health.js'
 import type { Entity } from './types.js'
+import type { Sql } from 'postgres'
 import type { BoundaryCandidate, BoundaryDossier } from './skeptic/types.js'
+import { ContractModule } from './contracts/module.js'
+import type { ContractSummary, Contract, ContractStatus, ContractType } from './contracts/types.js'
+import { contractsWithEntityDetails } from './contracts/queries.js'
 
 // --- Arg Parsing ---
 
@@ -297,6 +301,141 @@ function formatInit(report: GapReport, deps: Map<string, DependencyInfo[]>, envV
   return lines.join('\n')
 }
 
+// --- Contract Formatting ---
+
+function formatContractsList(contracts: Contract[]): string {
+  if (contracts.length === 0) return 'No contracts found.'
+  const lines: string[] = []
+  const header = `${padRight('TYPE', 14)} ${padRight('SOURCE', 15)} ${padRight('STATUS', 12)} ${padRight('DEFENDED', 9)} ${padRight('CONF', 6)} STATEMENT`
+  lines.push(header)
+  for (const c of contracts) {
+    const defended = c.testFilePath ? 'yes' : 'no'
+    const stmt = c.statement.length > 50 ? c.statement.slice(0, 47) + '...' : c.statement
+    lines.push(
+      `${padRight(c.type, 14)} ${padRight(c.source, 15)} ${padRight(c.status, 12)} ${padRight(defended, 9)} ${padRight(c.confidence.toFixed(2), 6)} ${stmt}`
+    )
+  }
+  return lines.join('\n')
+}
+
+function formatContractSummary(summary: ContractSummary): string {
+  const lines: string[] = []
+  lines.push(`Total contracts: ${summary.total}`)
+  lines.push('')
+  lines.push('By status:')
+  for (const [status, count] of Object.entries(summary.byStatus)) {
+    lines.push(`  ${padRight(status, 14)} ${count}`)
+  }
+  lines.push('')
+  lines.push('By type:')
+  for (const [type, count] of Object.entries(summary.byType)) {
+    if (count > 0) lines.push(`  ${padRight(type, 14)} ${count}`)
+  }
+  lines.push('')
+  lines.push('By source:')
+  for (const [source, count] of Object.entries(summary.bySource)) {
+    lines.push(`  ${padRight(source, 15)} ${count}`)
+  }
+  return lines.join('\n')
+}
+
+// --- Contract Commands ---
+
+async function runContractsList(contracts: ContractModule, filepath?: string, status?: ContractStatus, type?: ContractType, json?: boolean): Promise<void> {
+  let results: Contract[]
+  if (filepath) results = await contracts.forFile(filepath)
+  else if (status) results = await contracts.byStatus(status)
+  else if (type) results = await contracts.byType(type)
+  else results = (await contracts.withEntityDetails()).map(c => c as Contract)
+
+  if (json) {
+    process.stdout.write(JSON.stringify(results, null, 2) + '\n')
+  } else {
+    process.stdout.write(formatContractsList(results) + '\n')
+  }
+}
+
+async function runContractsSummary(contracts: ContractModule, json?: boolean): Promise<void> {
+  const summary = await contracts.summary()
+  if (json) {
+    process.stdout.write(JSON.stringify(summary, null, 2) + '\n')
+  } else {
+    process.stdout.write(formatContractSummary(summary) + '\n')
+  }
+}
+
+async function runContractsForEntity(contracts: ContractModule, entityId: string, json?: boolean): Promise<void> {
+  const results = await contracts.forEntity(entityId)
+  if (json) {
+    process.stdout.write(JSON.stringify(results, null, 2) + '\n')
+  } else {
+    process.stdout.write(formatContractsList(results) + '\n')
+  }
+}
+
+async function runContractsCheck(contracts: ContractModule, sql: Sql, json?: boolean): Promise<void> {
+  const summary = await contracts.summary()
+  const dirty = await contracts.byStatus('dirty')
+  const failing = await contracts.byStatus('failing')
+  const insufficient = await contracts.byStatus('insufficient')
+
+  // Coverage: % of boundaries with at least one contract
+  const allContracts = await contractsWithEntityDetails(sql)
+  const entitiesWithContracts = new Set<string>()
+  for (const c of allContracts) {
+    for (const link of c.entityLinks) {
+      entitiesWithContracts.add(link.entityId)
+    }
+  }
+  const boundaryRows = await boundaries(sql)
+  const boundariesWithContracts = boundaryRows.filter(b => entitiesWithContracts.has(b.entity.id))
+  const coverage = boundaryRows.length > 0
+    ? ((boundariesWithContracts.length / boundaryRows.length) * 100).toFixed(1)
+    : '0.0'
+
+  if (json) {
+    process.stdout.write(JSON.stringify({
+      summary,
+      dirtyCount: dirty.length,
+      failingCount: failing.length,
+      insufficientCount: insufficient.length,
+      coverage: parseFloat(coverage),
+      totalBoundaries: boundaryRows.length,
+      boundariesWithContracts: boundariesWithContracts.length,
+    }, null, 2) + '\n')
+  } else {
+    const lines: string[] = []
+    lines.push(`Contract Check Report`)
+    lines.push(``)
+    lines.push(`Total contracts: ${summary.total}`)
+    lines.push(`  Dirty:        ${dirty.length}`)
+    lines.push(`  Failing:      ${failing.length}`)
+    lines.push(`  Insufficient: ${insufficient.length}`)
+    lines.push(`  Passing:      ${summary.byStatus.passing}`)
+    lines.push(``)
+    lines.push(`Coverage: ${coverage}% of boundaries have contracts (${boundariesWithContracts.length}/${boundaryRows.length})`)
+
+    if (dirty.length > 0) {
+      lines.push(``)
+      lines.push(`Dirty contracts:`)
+      for (const c of dirty.slice(0, 10)) {
+        lines.push(`  - ${c.statement}`)
+      }
+      if (dirty.length > 10) lines.push(`  ... and ${dirty.length - 10} more`)
+    }
+
+    if (failing.length > 0) {
+      lines.push(``)
+      lines.push(`Failing contracts:`)
+      for (const c of failing.slice(0, 10)) {
+        lines.push(`  - ${c.statement}`)
+      }
+    }
+
+    process.stdout.write(lines.join('\n') + '\n')
+  }
+}
+
 // --- Commands ---
 
 async function runBoundaries(module: TestHealthModule, filepath?: string, json?: boolean): Promise<void> {
@@ -432,6 +571,16 @@ function usage(): string {
     '  test-health skeptic-targets [selector]   Rank skeptic boundary candidates',
     '  test-health skeptic-dossier <entity-id>  Build a skeptic dossier for one boundary',
     '',
+    '  test-health entities search <pattern>   Find entities by name pattern',
+    '',
+    '  test-health contracts list [filepath]   List contracts (--status, --type filters)',
+    '  test-health contracts summary           Contract status/type/source breakdown',
+    '  test-health contracts for <entity-id>   Contracts linked to an entity',
+    '  test-health contracts compile [id]       Compile contracts into verification plans',
+    '  test-health contracts check             Report dirty/failing/insufficient + coverage',
+    '  test-health contracts dirty             List dirty contracts (alias: stale)',
+    '  test-health contracts verify            Run tests for dirty/failing contracts',
+    '',
     'Options:',
     '  --json                    Output as JSON',
     '  --db <url>                Postgres connection URL (default: DATABASE_URL env)',
@@ -511,6 +660,98 @@ async function main(): Promise<void> {
         if (!positional[0]) { process.stderr.write('Error: skeptic-dossier requires an entity ID\n'); process.exit(1) }
         await runSkepticDossier(module, positional[0], maxDepth, json)
         break
+      case 'contracts': {
+        const contractModule = new ContractModule(sql, sourceRoot)
+        const subcommand = positional[0]
+        if (!subcommand || subcommand === 'list') {
+          await runContractsList(
+            contractModule,
+            positional[1],
+            flags.status as ContractStatus | undefined,
+            flags.type as ContractType | undefined,
+            json,
+          )
+        } else if (subcommand === 'summary') {
+          await runContractsSummary(contractModule, json)
+        } else if (subcommand === 'for') {
+          if (!positional[1]) { process.stderr.write('Error: contracts for requires an entity ID\n'); process.exit(1) }
+          await runContractsForEntity(contractModule, positional[1], json)
+        } else if (subcommand === 'compile') {
+          process.stdout.write('Contract compilation is now handled by /capture and /test-blue-team skills.\n')
+        } else if (subcommand === 'check') {
+          await runContractsCheck(contractModule, sql, json)
+        } else if (subcommand === 'stale' || subcommand === 'dirty') {
+          const dirty = await contractModule.byStatus('dirty')
+          if (json) {
+            process.stdout.write(JSON.stringify(dirty, null, 2) + '\n')
+          } else {
+            process.stdout.write(formatContractsList(dirty) + '\n')
+          }
+        } else if (subcommand === 'verify') {
+          const { execSync: exec } = await import('child_process')
+          const result = await contractModule.verify(async (testFilePath: string) => {
+            try {
+              const output = exec(`bun test ${testFilePath}`, {
+                encoding: 'utf-8',
+                timeout: 60_000,
+                stdio: ['pipe', 'pipe', 'pipe'],
+              })
+              return { passed: true, output }
+            } catch (err: unknown) {
+              const e = err as { stdout?: string; stderr?: string }
+              return { passed: false, output: (e.stdout ?? '') + (e.stderr ?? '') }
+            }
+          })
+          if (json) {
+            process.stdout.write(JSON.stringify(result, null, 2) + '\n')
+          } else {
+            const lines: string[] = []
+            lines.push(`Verified ${result.total} contract(s): ${result.passed} passed, ${result.failed} failed`)
+            if (result.violations.length > 0) {
+              lines.push('')
+              lines.push('Failures:')
+              for (const v of result.violations) {
+                lines.push(`  - [${v.contractId.slice(0, 8)}] ${v.statement}`)
+                lines.push(`    test: ${v.testFilePath}`)
+                const preview = v.output.split('\n').slice(0, 3).join('\n    ')
+                if (preview) lines.push(`    ${preview}`)
+              }
+            }
+            process.stdout.write(lines.join('\n') + '\n')
+          }
+        } else {
+          process.stderr.write(`Unknown contracts subcommand: ${subcommand}\n`)
+          process.exit(1)
+        }
+        break
+      }
+      case 'entities': {
+        const subcommand = positional[0]
+        if (subcommand === 'search') {
+          if (!positional[1]) { process.stderr.write('Error: entities search requires a pattern\n'); process.exit(1) }
+          const results = await entitiesByNamePattern(sql, positional[1])
+          if (json) {
+            process.stdout.write(JSON.stringify(results, null, 2) + '\n')
+          } else {
+            if (results.length === 0) {
+              process.stdout.write('No entities found.\n')
+            } else {
+              const lines: string[] = []
+              lines.push(`${padRight('KIND', 10)} ${padRight('NAME', 30)} ${padRight('EXPORTED', 9)} ID`)
+              for (const e of results) {
+                lines.push(`${padRight(e.kind, 10)} ${padRight(e.name, 30)} ${padRight(e.exported ? 'yes' : 'no', 9)} ${e.id}`)
+              }
+              lines.push('')
+              lines.push(`${results.length} entities found.`)
+              process.stdout.write(lines.join('\n') + '\n')
+            }
+          }
+        } else {
+          process.stderr.write(`Unknown entities subcommand: ${subcommand}\n`)
+          process.exit(1)
+        }
+        break
+      }
       default:
         process.stderr.write(`Unknown command: ${command}\n`)
         process.stderr.write(usage() + '\n')

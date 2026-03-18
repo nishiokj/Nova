@@ -41,6 +41,10 @@ import type {
   ReadinessVerdict,
   MutationEvaluationResult,
   BugRecord,
+  ContractCompileRequest,
+  ContractCompileResult,
+  ContractInterviewRequest,
+  ContractInterviewResult,
   RefereeRunRequest,
   RunRecord,
   RunStartResponse,
@@ -180,6 +184,38 @@ export async function listRepoArtifacts(baseUrl: string, repoId: string, kind?: 
   const suffix = kind ? `?kind=${encodeURIComponent(kind)}` : ''
   return requestJson<ArtifactRecord[]>(baseUrl, {
     path: `/repos/${encodeURIComponent(repoId)}/artifacts${suffix}`,
+  })
+}
+
+export async function contractInterview(baseUrl: string, input: ContractInterviewRequest): Promise<ContractInterviewResult> {
+  return requestJson<ContractInterviewResult>(baseUrl, {
+    path: '/rpc/contract.interview',
+    method: 'POST',
+    body: input,
+  })
+}
+
+export async function contractCompile(baseUrl: string, input: ContractCompileRequest): Promise<ContractCompileResult> {
+  return requestJson<ContractCompileResult>(baseUrl, {
+    path: '/rpc/contract.compile',
+    method: 'POST',
+    body: input,
+  })
+}
+
+export async function contractBatchCreate(baseUrl: string, input: import('./types.js').ContractBatchCreateRequest): Promise<import('./types.js').ContractBatchCreateResult> {
+  return requestJson<import('./types.js').ContractBatchCreateResult>(baseUrl, {
+    path: '/rpc/contract.batch-create',
+    method: 'POST',
+    body: input,
+  })
+}
+
+export async function contractUpdateTestPaths(baseUrl: string, input: import('./types.js').ContractUpdateTestPathRequest): Promise<import('./types.js').ContractUpdateTestPathResult> {
+  return requestJson<import('./types.js').ContractUpdateTestPathResult>(baseUrl, {
+    path: '/rpc/contract.update-test-paths',
+    method: 'POST',
+    body: input,
   })
 }
 

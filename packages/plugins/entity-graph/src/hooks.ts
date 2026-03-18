@@ -11,7 +11,8 @@ import type { Sql } from 'postgres'
 import type { EntityGraphConfig, EntityGraphHooks, EntityGraphHookResult } from './types.js'
 import { acquireLease, releaseLease } from './leasing.js'
 import { parseFile, persistParseResult } from './pipeline.js'
-import { blastRadius } from './queries.js'
+import { blastRadius, entitiesInFile } from './queries.js'
+import { markDirtyContracts } from './contracts/staleness.js'
 import path from 'path'
 
 /** Tools that modify files and need lease coordination */
@@ -114,17 +115,33 @@ export function createEntityGraphHooks(sql: Sql, config: EntityGraphConfig): Ent
         // Non-fatal — blast radius is advisory
       }
 
+      // Mark linked contracts dirty (fast query, non-fatal)
+      let contractDirtyCount = 0
+      try {
+        const entities = await entitiesInFile(sql, relPath)
+        const entityIds = entities.map(e => e.id)
+        if (entityIds.length > 0) {
+          contractDirtyCount = await markDirtyContracts(sql, entityIds)
+        }
+      } catch {
+        // Non-fatal
+      }
+
       // Fire-and-forget reparse — don't block tool response
       void reparse(sql, relPath, config)
 
+      const parts: string[] = []
       if (affected.length > 0) {
-        return {
-          action: 'allow',
-          context: `[entity-graph] ${affected.length} file(s) depend on "${relPath}": ${affected.join(', ')}`,
-        }
+        parts.push(`[entity-graph] ${affected.length} file(s) depend on "${relPath}": ${affected.join(', ')}`)
+      }
+      if (contractDirtyCount > 0) {
+        parts.push(`[contracts] ${contractDirtyCount} contract(s) marked dirty`)
       }
 
-      return { action: 'allow' }
+      return {
+        action: 'allow',
+        context: parts.length > 0 ? parts.join('\n') : undefined,
+      }
     },
 
     /**
@@ -132,11 +149,18 @@ export function createEntityGraphHooks(sql: Sql, config: EntityGraphConfig): Ent
      * Re-parses modified files in parallel.
      */
     async onFilesModified(paths: string[]): Promise<void> {
+      // Collect entity IDs from all modified files for dirty check
+      const allEntityIds: string[] = []
+
       await Promise.all(paths.map(async (filepath) => {
         const relPath = path.isAbsolute(filepath)
           ? path.relative(config.sourceRoot, filepath)
           : filepath
         try {
+          // Collect entities before reparse (edges still intact)
+          const entities = await entitiesInFile(sql, relPath)
+          allEntityIds.push(...entities.map(e => e.id))
+
           const result = await parseFile(relPath, config.sourceRoot)
           if (result) {
             await persistParseResult(sql, result)
@@ -145,6 +169,15 @@ export function createEntityGraphHooks(sql: Sql, config: EntityGraphConfig): Ent
           // Non-fatal — continue with remaining files
         }
       }))
+
+      // Mark linked contracts dirty (non-fatal)
+      if (allEntityIds.length > 0) {
+        try {
+          await markDirtyContracts(sql, allEntityIds)
+        } catch {
+          // Non-fatal
+        }
+      }
     },
   }
 }
