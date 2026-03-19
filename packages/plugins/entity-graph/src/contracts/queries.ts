@@ -8,6 +8,7 @@
 import { randomUUID } from 'crypto'
 import type { Sql } from 'postgres'
 import type {
+  ConditionEvidence,
   Contract,
   ContractDependency,
   ContractDependencyRelationship,
@@ -309,6 +310,9 @@ export async function contractSummary(sql: Sql): Promise<ContractSummary> {
     failing: string
     dirty: string
     insufficient: string
+    compiled_status: string
+    proven: string
+    challenged: string
     guarantee: string
     assumption: string
     invariant: string
@@ -326,6 +330,9 @@ export async function contractSummary(sql: Sql): Promise<ContractSummary> {
       (SELECT count(*) FROM entity_graph.contracts WHERE status = 'failing')::text AS failing,
       (SELECT count(*) FROM entity_graph.contracts WHERE status = 'dirty')::text AS dirty,
       (SELECT count(*) FROM entity_graph.contracts WHERE status = 'insufficient')::text AS insufficient,
+      (SELECT count(*) FROM entity_graph.contracts WHERE status = 'compiled')::text AS compiled_status,
+      (SELECT count(*) FROM entity_graph.contracts WHERE status = 'proven')::text AS proven,
+      (SELECT count(*) FROM entity_graph.contracts WHERE status = 'challenged')::text AS challenged,
       (SELECT count(*) FROM entity_graph.contracts WHERE type = 'guarantee')::text AS guarantee,
       (SELECT count(*) FROM entity_graph.contracts WHERE type = 'assumption')::text AS assumption,
       (SELECT count(*) FROM entity_graph.contracts WHERE type = 'invariant')::text AS invariant,
@@ -345,6 +352,9 @@ export async function contractSummary(sql: Sql): Promise<ContractSummary> {
       failing: parseInt(counts.failing, 10),
       dirty: parseInt(counts.dirty, 10),
       insufficient: parseInt(counts.insufficient, 10),
+      compiled: parseInt(counts.compiled_status, 10),
+      proven: parseInt(counts.proven, 10),
+      challenged: parseInt(counts.challenged, 10),
     },
     byType: {
       guarantee: parseInt(counts.guarantee, 10),
@@ -467,4 +477,52 @@ export async function contractDependencies(
     dependsOnContractId: r.depends_on_contract_id,
     relationship: r.relationship as ContractDependencyRelationship,
   }))
+}
+
+// --- Condition Evidence CRUD ---
+
+export async function submitConditionEvidence(
+  sql: Sql,
+  contractId: string,
+  evidence: ConditionEvidence[],
+): Promise<number> {
+  const now = new Date().toISOString()
+  // Clear existing evidence for this contract — proof is re-submitted as a whole
+  await sql`DELETE FROM entity_graph.contract_condition_evidence WHERE contract_id = ${contractId}`
+  for (const e of evidence) {
+    const id = randomUUID()
+    await sql`
+      INSERT INTO entity_graph.contract_condition_evidence
+        (id, contract_id, condition_id, test_file, test_name, explanation, submitted_at)
+      VALUES (${id}, ${contractId}, ${e.conditionId}, ${e.testFile}, ${e.testName}, ${e.explanation}, ${now})
+    `
+  }
+  return evidence.length
+}
+
+export async function evidenceForContract(
+  sql: Sql,
+  contractId: string,
+): Promise<ConditionEvidence[]> {
+  const rows = await sql<Array<{
+    condition_id: string; test_file: string; test_name: string; explanation: string
+  }>>`
+    SELECT condition_id, test_file, test_name, explanation
+    FROM entity_graph.contract_condition_evidence
+    WHERE contract_id = ${contractId}
+    ORDER BY condition_id ASC
+  `
+  return rows.map(r => ({
+    conditionId: r.condition_id,
+    testFile: r.test_file,
+    testName: r.test_name,
+    explanation: r.explanation,
+  }))
+}
+
+export async function deleteEvidenceForContract(
+  sql: Sql,
+  contractId: string,
+): Promise<void> {
+  await sql`DELETE FROM entity_graph.contract_condition_evidence WHERE contract_id = ${contractId}`
 }

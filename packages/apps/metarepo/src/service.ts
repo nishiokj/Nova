@@ -12,9 +12,12 @@ import {
   runReview,
 } from '../../../plugins/entity-graph/src/pr-review/service.js'
 import { TestHealthModule } from '../../../plugins/entity-graph/src/test-health.js'
-import { contractSummary, upsertContract } from '../../../plugins/entity-graph/src/contracts/queries.js'
+import { contractSummary, contractById, upsertContract, updateContractStatus, updateContractCompilation, submitConditionEvidence, evidenceForContract } from '../../../plugins/entity-graph/src/contracts/queries.js'
 import { buildDomainModel, seedContractsFromDomain } from '../../../plugins/entity-graph/src/contracts/interview.js'
 import { serializeDomainYaml } from '../../../plugins/entity-graph/src/contracts/module.js'
+import { parseValidationSpec, serializeValidationSpec, buildValidationSpec, makeConditionId } from '../../../plugins/entity-graph/src/contracts/validation-spec.js'
+import { createChallenge, createAcknowledgement, activeAcknowledgement, openChallengesForContract } from '../../../plugins/entity-graph/src/contracts/challenge.js'
+import { verifyContracts } from '../../../plugins/entity-graph/src/contracts/verify.js'
 import { DatabaseManager } from './database_manager.js'
 import { decryptSecretValue, encryptSecretValue } from './secrets.js'
 import { recentTestPaths, summarizeSmells } from './test_smells.js'
@@ -1158,15 +1161,50 @@ export class MetarepoService implements MetarepoApi {
     return mapArtifact(rows[0])
   }
 
-  async contractCompile(_input: ContractCompileRequest): Promise<ContractCompileResult> {
-    // Compilation is now handled by skills (/capture, /generate-contract-tests).
-    // The rule-based semantic compiler has been removed.
-    return {
-      compiled: 0,
-      failed: 0,
-      needsUserAnswer: 0,
-      findings: [{ contractId: '', message: 'Contract compilation is now handled by /capture and /generate-contract-tests skills' }],
+  async contractCompile(input: ContractCompileRequest): Promise<ContractCompileResult> {
+    await this.ensureStarted()
+    await this.requireRepo(input.repoId)
+    const sql = this.databaseManager.getAppSql()
+
+    // Fetch contracts to compile
+    const targetContracts = input.contractIds
+      ? await Promise.all(input.contractIds.map(id => contractById(sql, id)))
+      : (await sql<Array<{ id: string; statement: string; status: string; verification_plan_json: string | null }>>`
+          SELECT id, statement, status, verification_plan_json FROM entity_graph.contracts
+          WHERE status IN ('insufficient', 'dirty') OR verification_plan_json IS NULL
+          ORDER BY updated_at ASC
+        `).map(r => ({ id: r.id, statement: r.statement, status: r.status, verificationPlanJson: r.verification_plan_json }))
+
+    let compiled = 0
+    let failed = 0
+    let needsUserAnswer = 0
+    const findings: Array<{ contractId: string; message: string }> = []
+
+    for (const contract of targetContracts) {
+      if (!contract) continue
+
+      const existing = parseValidationSpec(contract.verificationPlanJson ?? null)
+      if (existing?.compileStatus === 'compiled') {
+        findings.push({ contractId: contract.id, message: 'Already compiled — skipping' })
+        continue
+      }
+
+      // Rule-based baseline: create a single condition from the contract statement.
+      // Agent-driven compilation should be invoked via skills for richer decomposition.
+      const conditions = [
+        { id: makeConditionId(0), statement: contract.statement, rationale: 'Direct contract statement' },
+      ]
+      const spec = buildValidationSpec(conditions, 'compiled')
+
+      await updateContractCompilation(sql, contract.id, {
+        verificationPlanJson: serializeValidationSpec(spec),
+        compileStatus: 'compiled',
+      })
+      await updateContractStatus(sql, contract.id, 'compiled')
+      compiled++
     }
+
+    return { compiled, failed, needsUserAnswer, findings }
   }
 
   async contractInterview(input: ContractInterviewRequest): Promise<ContractInterviewResult> {
@@ -1240,6 +1278,159 @@ export class MetarepoService implements MetarepoApi {
     }
 
     return { updated }
+  }
+
+  async contractCheck(input: import('./types.js').ContractCheckRequest): Promise<import('./types.js').ContractCheckResult> {
+    await this.ensureStarted()
+    await this.requireRepo(input.repoId)
+    const sql = this.databaseManager.getAppSql()
+    const { contractsByStatus, contractsWithEntityDetails } = await import('../../../plugins/entity-graph/src/contracts/queries.js')
+
+    const summary = await contractSummary(sql)
+    const all = await contractsWithEntityDetails(sql)
+    const dirty = await contractsByStatus(sql, 'dirty')
+    const failing = await contractsByStatus(sql, 'failing')
+    const insufficient = await contractsByStatus(sql, 'insufficient')
+
+    const undefended = all
+      .filter(c => !c.testFilePath)
+      .map(c => ({
+        id: c.id,
+        statement: c.statement,
+        type: c.type,
+        source: c.source,
+        status: c.status,
+        confidence: c.confidence,
+      }))
+
+    return {
+      summary,
+      undefended,
+      dirtyCount: dirty.length,
+      failingCount: failing.length,
+      insufficientCount: insufficient.length,
+    }
+  }
+
+  async contractSubmitProof(input: import('./types.js').ContractSubmitProofRequest): Promise<import('./types.js').ContractSubmitProofResult> {
+    await this.ensureStarted()
+    await this.requireRepo(input.repoId)
+    const sql = this.databaseManager.getAppSql()
+
+    const contract = await contractById(sql, input.contractId)
+    if (!contract) throw new Error(`Contract not found: ${input.contractId}`)
+
+    const spec = parseValidationSpec(contract.verificationPlanJson)
+    if (!spec || spec.compileStatus !== 'compiled') {
+      throw new Error(`Contract ${input.contractId} has no compiled validation spec`)
+    }
+
+    // Validate all condition IDs reference real conditions
+    const conditionIdSet = new Set(spec.conditions.map(c => c.id))
+    for (const e of input.conditionEvidence) {
+      if (!conditionIdSet.has(e.conditionId)) {
+        throw new Error(`Condition ${e.conditionId} not found in validation spec for contract ${input.contractId}`)
+      }
+    }
+
+    const evidenceCount = await submitConditionEvidence(sql, input.contractId, input.conditionEvidence)
+
+    // If all conditions are now evidenced, transition to 'proven'
+    const evidence = await evidenceForContract(sql, input.contractId)
+    const allEvidenced = spec.conditions.every(c => evidence.some(e => e.conditionId === c.id))
+    let newStatus = contract.status
+    if (allEvidenced) {
+      newStatus = 'proven'
+      await updateContractStatus(sql, input.contractId, 'proven')
+    }
+
+    return { evidenceCount, newStatus }
+  }
+
+  async contractChallenge(input: import('./types.js').ContractChallengeRequest): Promise<import('./types.js').ContractChallengeResult> {
+    await this.ensureStarted()
+    await this.requireRepo(input.repoId)
+    const sql = this.databaseManager.getAppSql()
+
+    const contract = await contractById(sql, input.contractId)
+    if (!contract) throw new Error(`Contract not found: ${input.contractId}`)
+
+    const challenge = await createChallenge(sql, input.contractId, input.conditionId ?? null, input.argument, input.evidence)
+    await updateContractStatus(sql, input.contractId, 'challenged')
+
+    return { challengeId: challenge.id, newStatus: 'challenged' }
+  }
+
+  async contractAcknowledge(input: import('./types.js').ContractAcknowledgeRequest): Promise<import('./types.js').ContractAcknowledgeResult> {
+    await this.ensureStarted()
+    await this.requireRepo(input.repoId)
+    const sql = this.databaseManager.getAppSql()
+
+    const contract = await contractById(sql, input.contractId)
+    if (!contract) throw new Error(`Contract not found: ${input.contractId}`)
+
+    // Verify preconditions: spec compiled, all conditions evidenced, no open challenges
+    const spec = parseValidationSpec(contract.verificationPlanJson)
+    if (!spec || spec.compileStatus !== 'compiled') {
+      throw new Error(`Contract ${input.contractId} has no compiled validation spec`)
+    }
+
+    const evidence = await evidenceForContract(sql, input.contractId)
+    const allEvidenced = spec.conditions.every(c => evidence.some(e => e.conditionId === c.id))
+    if (!allEvidenced) {
+      throw new Error(`Contract ${input.contractId} has unevidenced conditions — cannot acknowledge`)
+    }
+
+    const openChallenges = await openChallengesForContract(sql, input.contractId)
+    if (openChallenges.length > 0) {
+      throw new Error(`Contract ${input.contractId} has ${openChallenges.length} open challenges — cannot acknowledge`)
+    }
+
+    const ack = await createAcknowledgement(sql, input.contractId)
+    await updateContractStatus(sql, input.contractId, 'passing')
+
+    return { acknowledgementId: ack.id, newStatus: 'passing' }
+  }
+
+  async contractVerify(input: import('./types.js').ContractVerifyRequest): Promise<import('./types.js').ContractVerifyResult> {
+    await this.ensureStarted()
+    const repo = await this.requireRepo(input.repoId)
+    const sql = this.databaseManager.getAppSql()
+    const sourceRoot = repo.rootPath
+    if (!sourceRoot) throw new Error('Verify requires a local repo with rootPath')
+
+    const result = await verifyContracts(sql, async (testFilePath: string) => {
+      const fullPath = path.isAbsolute(testFilePath) ? testFilePath : path.join(sourceRoot, testFilePath)
+      try {
+        const proc = spawn('bun', ['test', fullPath], {
+          cwd: sourceRoot,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        let stdout = ''
+        let stderr = ''
+        proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString() })
+        proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString() })
+        const code = await new Promise<number>(resolve => proc.on('close', resolve))
+        return { passed: code === 0, output: stdout + stderr }
+      } catch (err) {
+        return { passed: false, output: String(err) }
+      }
+    })
+
+    return {
+      total: result.total,
+      passed: result.passed,
+      failed: result.failed,
+      results: result.results.map(r => ({
+        contractId: r.contractId,
+        statement: r.statement,
+        previousStatus: r.previousStatus,
+        newStatus: r.newStatus,
+        hasAcknowledgement: r.hasAcknowledgement,
+        acknowledgementInvalidated: r.acknowledgementInvalidated,
+        openChallenges: r.openChallenges,
+      })),
+    }
   }
 
   async graphBoundaries(input: GraphBoundariesRequest): Promise<WorkflowResponse<BoundaryInfo[]>> {

@@ -379,6 +379,89 @@ export interface ContractUpdateTestPathResult {
   updated: number
 }
 
+export interface ContractCheckRequest {
+  repoId: string
+  requestedBy?: string
+}
+
+export interface ContractCheckResult {
+  summary: import('../../../plugins/entity-graph/src/contracts/types.js').ContractSummary
+  undefended: Array<{
+    id: string
+    statement: string
+    type: string
+    source: string
+    status: string
+    confidence: number
+  }>
+  dirtyCount: number
+  failingCount: number
+  insufficientCount: number
+}
+
+export interface ContractSubmitProofRequest {
+  repoId: string
+  contractId: string
+  testFiles: string[]
+  conditionEvidence: Array<{
+    conditionId: string
+    testFile: string
+    testName: string
+    explanation: string
+  }>
+  requestedBy?: string
+}
+
+export interface ContractSubmitProofResult {
+  evidenceCount: number
+  newStatus: string
+}
+
+export interface ContractChallengeRequest {
+  repoId: string
+  contractId: string
+  conditionId?: string
+  argument: string
+  evidence?: string
+  requestedBy?: string
+}
+
+export interface ContractChallengeResult {
+  challengeId: string
+  newStatus: string
+}
+
+export interface ContractAcknowledgeRequest {
+  repoId: string
+  contractId: string
+  requestedBy?: string
+}
+
+export interface ContractAcknowledgeResult {
+  acknowledgementId: string
+  newStatus: string
+}
+
+export interface ContractVerifyRequest {
+  repoId: string
+  requestedBy?: string
+}
+
+export interface ContractVerifyResult {
+  total: number
+  passed: number
+  failed: number
+  results: Array<{
+    contractId: string
+    statement: string
+    previousStatus: string
+    newStatus: string
+    hasAcknowledgement: boolean
+    acknowledgementInvalidated: boolean
+    openChallenges: number
+  }>
+}
+
 export interface ReviewRunRequest {
   repoId: string
   baseSha: string
@@ -717,6 +800,11 @@ export interface MetarepoApi {
   contractInterview(input: ContractInterviewRequest): Promise<ContractInterviewResult>
   contractBatchCreate(input: ContractBatchCreateRequest): Promise<ContractBatchCreateResult>
   contractUpdateTestPaths(input: ContractUpdateTestPathRequest): Promise<ContractUpdateTestPathResult>
+  contractCheck(input: ContractCheckRequest): Promise<ContractCheckResult>
+  contractSubmitProof(input: ContractSubmitProofRequest): Promise<ContractSubmitProofResult>
+  contractChallenge(input: ContractChallengeRequest): Promise<ContractChallengeResult>
+  contractAcknowledge(input: ContractAcknowledgeRequest): Promise<ContractAcknowledgeResult>
+  contractVerify(input: ContractVerifyRequest): Promise<ContractVerifyResult>
   graphBoundaries(input: GraphBoundariesRequest): Promise<WorkflowResponse<BoundaryInfo[]>>
   graphDeps(input: GraphDepsRequest): Promise<WorkflowResponse<DependencyInfo[]>>
   graphTree(input: GraphTreeRequest): Promise<WorkflowResponse<CallTreeNode[]>>

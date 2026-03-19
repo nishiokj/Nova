@@ -1,0 +1,12 @@
+{
+  "assignmentArtifactId": "5b840afe-835c-4dd0-bbd9-c6032665ef44",
+  "testFiles": ["tests/behavioral/entity-graph/contracts-with-entity-details.behavior.test.ts"],
+  "changedFiles": [
+    "tests/behavioral/entity-graph/contracts-with-entity-details.behavior.test.ts"
+  ],
+  "testCommand": ["bunx", "vitest", "run", "tests/behavioral/entity-graph/contracts-with-entity-details.behavior.test.ts"],
+  "summary": "Covers no-filter, status/type/source filters, combined filters, empty result, entity link enrichment, field mapping, ordering, four-status-value invariant, and authoritative-table contract",
+  "notes": "Uses real local postgres test DB (unique per file, dropped on teardown). Defends contracts aedf09c3 and 1707f919 at this query boundary.",
+  "bugIds": [],
+  "contractIds": ["aedf09c3-2a8e-4ad5-b2a8-e6d0a52aea33", "1707f919-b033-4cba-9db2-b5b54734741f"]
+}

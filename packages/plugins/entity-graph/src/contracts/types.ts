@@ -15,7 +15,7 @@ export type ContractType =
 
 export type ContractSource = 'interview' | 'compiled' | 'incident' | 'event'
 
-export type ContractStatus = 'passing' | 'failing' | 'dirty' | 'insufficient'
+export type ContractStatus = 'passing' | 'failing' | 'dirty' | 'insufficient' | 'compiled' | 'proven' | 'challenged'
 
 export type ContractEntityRole = 'subject' | 'dependency' | 'context'
 
@@ -76,3 +76,57 @@ export interface ContractSummary {
 
 export type ContractCompileStatus = 'compiled' | 'needs_user_answer' | 'failed'
 export type ContractVerdictValue = 'pass' | 'fail' | 'error' | 'skipped'
+
+// --- Deterministic Contract Verification ---
+
+export interface ValidationCondition {
+  id: string                    // e.g. "cond-001"
+  statement: string             // precise, testable behavioral claim
+  rationale: string             // why this condition is necessary for the contract
+}
+
+export interface ValidationSpec {
+  version: 2
+  compiledAt: string
+  compileStatus: 'compiled' | 'needs_user_answer' | 'failed'
+  conditions: ValidationCondition[]
+  questions?: Array<{
+    question_id: string
+    invariant_id: string
+    question: string
+    rationale: string
+    options?: string[]
+  }>
+}
+
+export interface ConditionEvidence {
+  conditionId: string           // references ValidationCondition.id
+  testFile: string
+  testName: string              // describe/it path
+  explanation: string           // 1-2 sentences: how this test proves the condition
+}
+
+export interface ContractProof {
+  contractId: string
+  testFiles: string[]
+  conditionEvidence: ConditionEvidence[]
+}
+
+export interface ContractChallenge {
+  id: string
+  contractId: string
+  conditionId: string | null
+  argument: string              // why the proof is insufficient
+  evidence: string | null       // optional counterexample or demonstration
+  status: 'open' | 'addressed' | 'dismissed'
+  submittedAt: string
+  resolvedAt: string | null
+}
+
+export interface ContractAcknowledgement {
+  id: string
+  contractId: string
+  submittedAt: string
+  invalidatedAt: string | null
+  invalidatedReason: string | null
+}

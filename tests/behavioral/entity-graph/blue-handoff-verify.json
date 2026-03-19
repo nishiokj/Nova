@@ -1,0 +1,18 @@
+{
+  "assignmentArtifactId": "9285cf34-23f1-4735-b1c1-7bfc4efd8a78",
+  "testFiles": ["tests/behavioral/entity-graph/verify-contracts.behavior.test.ts"],
+  "changedFiles": [
+    "tests/behavioral/entity-graph/verify-contracts.behavior.test.ts"
+  ],
+  "testCommand": ["bunx", "vitest", "run", "tests/behavioral/entity-graph/verify-contracts.behavior.test.ts"],
+  "summary": "Covers status filtering (dirty/failing only), testFilePath exclusion, grouping by file, pass→passing+resolve violations, fail→failing+create violation (skip if open exists), violation durability (resolved not deleted), summary counts, empty result",
+  "notes": "TestRunner is the system boundary — stubbed at the injection point. All internal call chain (recordVerdicts, createViolation, resolveViolations) runs real.",
+  "bugIds": [],
+  "contractIds": [
+    "ace8be41-3ce0-4dba-af7b-e07f9653792d",
+    "18a25b17-466f-4c72-884b-9e922141d50c",
+    "7a05b02d-ad35-44d7-a258-bcbcaa74a1ed",
+    "6115fb49-f994-4ffa-a1eb-d9e64fc31d63",
+    "e5391d07-88b3-4d68-a71a-17c6d067dfea"
+  ]
+}

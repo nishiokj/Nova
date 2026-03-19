@@ -1,0 +1,16 @@
+{
+  "assignmentArtifactId": "71d69f04-6ff0-4439-9137-de1b9c914d13",
+  "testFiles": ["tests/behavioral/entity-graph/mark-dirty-contracts.behavior.test.ts"],
+  "changedFiles": [
+    "tests/behavioral/entity-graph/mark-dirty-contracts.behavior.test.ts"
+  ],
+  "testCommand": ["bunx", "vitest", "run", "tests/behavioral/entity-graph/mark-dirty-contracts.behavior.test.ts"],
+  "summary": "Covers passing→dirty, failing→dirty, dirty stays dirty, insufficient stays insufficient, unrelated entities unaffected, count accuracy, empty input, multiple entities",
+  "notes": "Uses real postgres with seeded entities + contracts. entityBlastRadius runs real (not mocked).",
+  "bugIds": [],
+  "contractIds": [
+    "8df2b58b-9eac-4398-8c46-6f03e20bd9d1",
+    "64fc6083-376b-4771-a039-55401dc35f68",
+    "4071c65f-156a-497d-ae41-7d83ac73bcab"
+  ]
+}

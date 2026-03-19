@@ -1,0 +1,12 @@
+{
+  "assignmentArtifactId": "fefd2a77-71fd-44c0-8de6-89aa79b39ffa",
+  "testFiles": ["tests/behavioral/entity-graph/update-contract-status.behavior.test.ts"],
+  "changedFiles": [
+    "tests/behavioral/entity-graph/update-contract-status.behavior.test.ts"
+  ],
+  "testCommand": ["bunx", "vitest", "run", "tests/behavioral/entity-graph/update-contract-status.behavior.test.ts"],
+  "summary": "Covers all four status transitions, timestamp updates, isolation between contracts, idempotency, and non-status field preservation",
+  "notes": "Uses real local postgres test DB. Defends contracts aedf09c3 (four-value status invariant) and ac789c96 (insufficient default).",
+  "bugIds": [],
+  "contractIds": ["aedf09c3-2a8e-4ad5-b2a8-e6d0a52aea33", "ac789c96-5b1f-4531-94c1-c147ac231913"]
+}

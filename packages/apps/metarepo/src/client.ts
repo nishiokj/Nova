@@ -219,6 +219,46 @@ export async function contractUpdateTestPaths(baseUrl: string, input: import('./
   })
 }
 
+export async function contractCheck(baseUrl: string, input: import('./types.js').ContractCheckRequest): Promise<import('./types.js').ContractCheckResult> {
+  return requestJson<import('./types.js').ContractCheckResult>(baseUrl, {
+    path: '/rpc/contract.check',
+    method: 'POST',
+    body: input,
+  })
+}
+
+export async function contractSubmitProof(baseUrl: string, input: import('./types.js').ContractSubmitProofRequest): Promise<import('./types.js').ContractSubmitProofResult> {
+  return requestJson<import('./types.js').ContractSubmitProofResult>(baseUrl, {
+    path: '/rpc/contract.submit-proof',
+    method: 'POST',
+    body: input,
+  })
+}
+
+export async function contractChallenge(baseUrl: string, input: import('./types.js').ContractChallengeRequest): Promise<import('./types.js').ContractChallengeResult> {
+  return requestJson<import('./types.js').ContractChallengeResult>(baseUrl, {
+    path: '/rpc/contract.challenge',
+    method: 'POST',
+    body: input,
+  })
+}
+
+export async function contractAcknowledge(baseUrl: string, input: import('./types.js').ContractAcknowledgeRequest): Promise<import('./types.js').ContractAcknowledgeResult> {
+  return requestJson<import('./types.js').ContractAcknowledgeResult>(baseUrl, {
+    path: '/rpc/contract.acknowledge',
+    method: 'POST',
+    body: input,
+  })
+}
+
+export async function contractVerify(baseUrl: string, input: import('./types.js').ContractVerifyRequest): Promise<import('./types.js').ContractVerifyResult> {
+  return requestJson<import('./types.js').ContractVerifyResult>(baseUrl, {
+    path: '/rpc/contract.verify',
+    method: 'POST',
+    body: input,
+  })
+}
+
 export async function graphBoundaries(baseUrl: string, input: GraphBoundariesRequest): Promise<WorkflowResponse<BoundaryInfo[]>> {
   return requestJson<WorkflowResponse<BoundaryInfo[]>>(baseUrl, {
     path: '/rpc/graph.boundaries',

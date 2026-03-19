@@ -12,77 +12,19 @@ export type {
   CompileFinding,
   CompileRequest,
   VerificationProgram,
-  SemanticCompilerStage,
-  StageStatus,
-  StageSnapshot,
-  SemanticCompilerState,
   InvariantVerdict,
   VerdictReport,
+  ValidationCondition,
+  ValidationSpec,
 } from './types.js';
-
-export type {
-  StrategySelectionInput,
-  StrategySupport,
-  StrategyCompileInput,
-  StrategyCompileOutput,
-  VerificationStrategyPlugin,
-} from './plugins.js';
-
-export {
-  DEFAULT_STRATEGY_PLUGINS,
-  selectBestStrategy,
-} from './plugins.js';
 
 export {
   compileVerificationProgram,
+  compileVerificationProgramWithAgent,
   type CompileOptions,
+  type CompileMode,
+  type CompileWithAgentOptions,
+  type SemanticCompilerAgent,
+  type SemanticCompilerAgentInput,
+  type SemanticCompilerAgentOutput,
 } from './compiler.js';
-
-export {
-  STAGE_ORDER,
-  createInitialState,
-  markStageRunning,
-  markStageCompleted,
-  markStageWaitingUser,
-  markStageFailed,
-  saveState,
-  loadState,
-} from './stages.js';
-
-export type {
-  HarnessArtifact,
-  HarnessGenerationOptions,
-  HarnessGenerationResult,
-} from './harness.js';
-
-export {
-  generateHarnessArtifacts,
-} from './harness.js';
-
-export type {
-  EvidenceRunOptions,
-  EvidenceLayoutResult,
-} from './evidence.js';
-
-export {
-  prepareEvidenceLayout,
-} from './evidence.js';
-
-export type {
-  EmitVerdictOptions,
-  EmitVerdictResult,
-} from './report.js';
-
-export {
-  emitVerdictArtifacts,
-} from './report.js';
-
-export type {
-  WorkItemSpec,
-  UserReviewPrompt,
-} from './adapters.js';
-
-export {
-  vpToWorkItemSpecs,
-  buildUserReviewPrompts,
-} from './adapters.js';

@@ -4,13 +4,9 @@ import type {
   CompileStatus,
   CompilerQuestion,
   CompiledInvariant,
+  ValidationCondition,
   VerificationProgram,
 } from './types.js';
-import {
-  DEFAULT_STRATEGY_PLUGINS,
-  selectBestStrategy,
-  type VerificationStrategyPlugin,
-} from './plugins.js';
 
 const UNVERIFIABLE_TERMS = ['fast', 'seamless', 'robust', 'intuitive', 'easy'];
 
@@ -156,7 +152,6 @@ function targetedQuestions(invId: string, text: string): CompilerQuestion[] {
 }
 
 export interface CompileOptions {
-  plugins?: VerificationStrategyPlugin[];
   now?: Date;
 }
 
@@ -175,8 +170,7 @@ export interface SemanticCompilerAgentInput {
 export interface SemanticCompilerAgentOutput {
   refined: CompiledInvariant['refined'];
   assumptions: string[];
-  verification_plan: CompiledInvariant['verification_plan'];
-  verdict_rule: string;
+  conditions: ValidationCondition[];
   questions?: CompilerQuestion[];
 }
 
@@ -190,11 +184,16 @@ export interface CompileWithAgentOptions extends CompileOptions {
   agent?: SemanticCompilerAgent;
 }
 
+/**
+ * Baseline rule-based compilation. Detects findings and generates targeted
+ * questions but does NOT produce conditions — that requires the agent.
+ * Produces a skeleton CompiledInvariant with empty plan/verdict_rule
+ * (retained for backward compat with VerificationProgram shape).
+ */
 export function compileVerificationProgram(
   request: CompileRequest,
   options: CompileOptions = {}
 ): VerificationProgram {
-  const plugins = options.plugins ?? DEFAULT_STRATEGY_PLUGINS;
   const now = options.now ?? new Date();
 
   const compileFindings: CompileFinding[] = [
@@ -210,53 +209,7 @@ export function compileVerificationProgram(
     const invariantFindings = detectInvariantFindings(invId, invariantInput.text);
     compileFindings.push(...invariantFindings);
 
-    const selection = selectBestStrategy(
-      {
-        invariant: invariantInput,
-        system_surface: request.system_surface,
-        repo_metadata: request.repo_metadata,
-      },
-      plugins
-    );
-
-    if (!selection.plugin || selection.support.score <= 0) {
-      pushFinding(compileFindings, {
-        severity: 'error',
-        code: 'strategy_unavailable',
-        invariant_id: invId,
-        message: `No verification strategy could compile invariant ${invId}.`,
-      });
-
-      return {
-        inv_id: invId,
-        original_text: invariantInput.text,
-        refined: {
-          intent: 'Unresolved invariant',
-          scope: [],
-          operational_definition: [],
-        },
-        assumptions: [],
-        verification_plan: {
-          strategy_id: 'none',
-          steps: [],
-          evidence: [],
-        },
-        verdict_rule: 'unavailable',
-        compile_status: 'failed' as const,
-      };
-    }
-
-    const compiled = selection.plugin.compile({
-      inv_id: invId,
-      original_text: invariantInput.text,
-      system_surface: request.system_surface,
-      repo_metadata: request.repo_metadata,
-    });
-
-    const questions = dedupeQuestions([
-      ...(compiled.questions ?? []),
-      ...targetedQuestions(invId, invariantInput.text),
-    ]);
+    const questions = dedupeQuestions(targetedQuestions(invId, invariantInput.text));
 
     const hasErrorFinding = compileFindings.some(
       (finding) => finding.invariant_id === invId && finding.severity === 'error'
@@ -269,16 +222,18 @@ export function compileVerificationProgram(
     return {
       inv_id: invId,
       original_text: invariantInput.text,
-      refined: compiled.refined,
-      assumptions: compiled.assumptions,
-      verification_plan: compiled.verification_plan,
-      verdict_rule: compiled.verdict_rule,
+      refined: {
+        intent: invariantInput.text,
+        scope: [],
+        operational_definition: [],
+      },
+      assumptions: [],
+      verification_plan: { strategy_id: 'none', steps: [], evidence: [] },
+      verdict_rule: 'all conditions evidenced + acknowledged',
       compile_status: status,
       ...(questions.length > 0 ? { questions } : {}),
     };
   });
-
-  const normalizedFindings = reindexFindings(compileFindings);
 
   return {
     vp_version: '0.1',
@@ -286,10 +241,16 @@ export function compileVerificationProgram(
     generated_at: now.toISOString(),
     system_surface: request.system_surface,
     invariants,
-    compile_findings: normalizedFindings,
+    compile_findings: reindexFindings(compileFindings),
   };
 }
 
+/**
+ * Agent-driven compilation. The agent decomposes each invariant into
+ * behavioral conditions (ValidationCondition[]). The conditions are stored
+ * on the CompiledInvariant's verification_plan field as a serialized
+ * ValidationSpec for downstream persistence.
+ */
 export async function compileVerificationProgramWithAgent(
   request: CompileRequest,
   options: CompileWithAgentOptions = {}
@@ -356,12 +317,29 @@ export async function compileVerificationProgramWithAgent(
       if (hasGlobalError) status = 'failed';
       else if (questions.length > 0) status = 'needs_user_answer';
 
+      // Store conditions as a ValidationSpec in the verification_plan field
+      const validationSpec: import('./types.js').ValidationSpec = {
+        version: 2,
+        compiledAt: baseVp.generated_at,
+        compileStatus: status,
+        conditions: agentCompiled.conditions,
+        ...(questions.length > 0 ? { questions } : {}),
+      };
+
       invariants.push({
         ...invariant,
         refined: agentCompiled.refined,
         assumptions: agentCompiled.assumptions,
-        verification_plan: agentCompiled.verification_plan,
-        verdict_rule: agentCompiled.verdict_rule,
+        // Encode the ValidationSpec into the verification_plan structure
+        verification_plan: {
+          strategy_id: 'agent-conditions',
+          steps: agentCompiled.conditions.map(c => ({
+            kind: 'assert' as const,
+            spec: c.statement,
+          })),
+          evidence: [],
+        },
+        verdict_rule: JSON.stringify(validationSpec),
         compile_status: status,
         ...(questions.length > 0 ? { questions } : {}),
       });
