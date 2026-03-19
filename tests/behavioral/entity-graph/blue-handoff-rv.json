@@ -1,0 +1,12 @@
+{
+  "assignmentArtifactId": "48da3b79-986e-4f97-8a84-7bd2c73e3187",
+  "testFiles": ["tests/behavioral/entity-graph/record-verdicts.behavior.test.ts"],
+  "changedFiles": [
+    "tests/behavioral/entity-graph/record-verdicts.behavior.test.ts"
+  ],
+  "testCommand": ["bunx", "vitest", "run", "tests/behavioral/entity-graph/record-verdicts.behavior.test.ts"],
+  "summary": "Covers pass→passing, fail→failing, error/skipped no-change, lastVerdict/lastVerdictAt recording, batch processing, non-existent IDs skip, timestamp consistency",
+  "notes": "Uses real local postgres test DB. Violation creation/resolution is NOT in this boundary (it's in verifyContracts) — noted in defended contracts comment.",
+  "bugIds": [],
+  "contractIds": ["1fd0d598-b783-48d0-b912-bd65cc49e289", "7a05b02d-ad35-44d7-a258-bcbcaa74a1ed", "6115fb49-f994-4ffa-a1eb-d9e64fc31d63"]
+}

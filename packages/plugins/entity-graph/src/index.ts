@@ -369,6 +369,12 @@ export type {
   ContractSummary,
   DomainModel,
   DomainEntity,
+  ValidationCondition,
+  ValidationSpec,
+  ConditionEvidence,
+  ContractProof,
+  ContractChallenge,
+  ContractAcknowledgement,
 } from './contracts/types.js'
 export {
   contractById,
@@ -390,7 +396,7 @@ export { computeDirtyContracts, markDirtyContracts } from './contracts/staleness
 export { recordVerdicts } from './contracts/compilation.js'
 export type { VerdictInput } from './contracts/compilation.js'
 export { verifyContracts } from './contracts/verify.js'
-export type { TestRunner, VerifyResult } from './contracts/verify.js'
+export type { TestRunner, VerifyResult, ContractVerifyResult, ConditionVerifyStatus } from './contracts/verify.js'
 export {
   createViolation,
   resolveViolations,
@@ -398,6 +404,28 @@ export {
   violationsForContract,
 } from './contracts/queries.js'
 export type { ContractViolation } from './contracts/queries.js'
+export {
+  submitConditionEvidence,
+  evidenceForContract,
+  deleteEvidenceForContract,
+} from './contracts/queries.js'
+export {
+  parseValidationSpec,
+  serializeValidationSpec,
+  buildValidationSpec,
+  conditionIds,
+  makeConditionId,
+} from './contracts/validation-spec.js'
+export {
+  createChallenge,
+  challengesForContract,
+  openChallengesForContract,
+  resolveChallenge,
+  createAcknowledgement,
+  activeAcknowledgement,
+  invalidateAcknowledgement,
+  acknowledgementHistory,
+} from './contracts/challenge.js'
 export {
   buildDomainModel,
   seedContractsFromDomain,

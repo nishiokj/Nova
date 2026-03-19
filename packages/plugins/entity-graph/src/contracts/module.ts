@@ -16,6 +16,7 @@ import type {
   ContractType,
   DomainModel,
 } from './types.js'
+import type { ConditionEvidence, ContractChallenge, ContractAcknowledgement, ValidationSpec } from './types.js'
 import {
   contractById,
   contractsForEntity,
@@ -26,7 +27,10 @@ import {
   contractsWithEntityDetails,
   upsertContract,
   updateContractStatus,
+  updateContractCompilation,
   deleteContract,
+  submitConditionEvidence,
+  evidenceForContract,
 } from './queries.js'
 import type { ContractWithEntities } from './queries.js'
 import { recordVerdicts } from './compilation.js'
@@ -35,6 +39,17 @@ import { verifyContracts } from './verify.js'
 import type { TestRunner, VerifyResult } from './verify.js'
 import { openViolations as queryOpenViolations } from './queries.js'
 import type { ContractViolation } from './queries.js'
+import { parseValidationSpec, serializeValidationSpec } from './validation-spec.js'
+import {
+  createChallenge,
+  challengesForContract,
+  openChallengesForContract,
+  resolveChallenge,
+  createAcknowledgement,
+  activeAcknowledgement,
+  invalidateAcknowledgement,
+  acknowledgementHistory,
+} from './challenge.js'
 
 export class ContractModule {
   constructor(
@@ -117,6 +132,96 @@ export class ContractModule {
 
   async openViolations(): Promise<ContractViolation[]> {
     return queryOpenViolations(this.sql)
+  }
+
+  // --- Validation Spec ---
+
+  async getValidationSpec(contractId: string): Promise<ValidationSpec | null> {
+    const contract = await contractById(this.sql, contractId)
+    if (!contract) return null
+    return parseValidationSpec(contract.verificationPlanJson)
+  }
+
+  async setValidationSpec(contractId: string, spec: ValidationSpec): Promise<void> {
+    await updateContractCompilation(this.sql, contractId, {
+      verificationPlanJson: serializeValidationSpec(spec),
+      compileStatus: spec.compileStatus,
+    })
+    if (spec.compileStatus === 'compiled') {
+      await updateContractStatus(this.sql, contractId, 'compiled')
+    }
+  }
+
+  // --- Blue Team: Condition Evidence ---
+
+  async submitProof(contractId: string, evidence: ConditionEvidence[]): Promise<number> {
+    return submitConditionEvidence(this.sql, contractId, evidence)
+  }
+
+  async getEvidence(contractId: string): Promise<ConditionEvidence[]> {
+    return evidenceForContract(this.sql, contractId)
+  }
+
+  // --- Red Team: Challenges ---
+
+  async challenge(
+    contractId: string,
+    conditionId: string | null,
+    argument: string,
+    evidence?: string,
+  ): Promise<ContractChallenge> {
+    const challenge = await createChallenge(this.sql, contractId, conditionId, argument, evidence)
+    await updateContractStatus(this.sql, contractId, 'challenged')
+    return challenge
+  }
+
+  async getChallenges(contractId: string): Promise<ContractChallenge[]> {
+    return challengesForContract(this.sql, contractId)
+  }
+
+  async getOpenChallenges(contractId: string): Promise<ContractChallenge[]> {
+    return openChallengesForContract(this.sql, contractId)
+  }
+
+  async resolveChallenge(challengeId: string, resolution: 'addressed' | 'dismissed'): Promise<void> {
+    return resolveChallenge(this.sql, challengeId, resolution)
+  }
+
+  // --- Red Team: Acknowledgement ---
+
+  async acknowledge(contractId: string): Promise<ContractAcknowledgement> {
+    const ack = await createAcknowledgement(this.sql, contractId)
+    // Check if all conditions are evidenced before setting to passing
+    const contract = await contractById(this.sql, contractId)
+    if (contract) {
+      const spec = parseValidationSpec(contract.verificationPlanJson)
+      const evidence = await evidenceForContract(this.sql, contractId)
+      const openChallenges = await openChallengesForContract(this.sql, contractId)
+      if (
+        spec?.compileStatus === 'compiled' &&
+        spec.conditions.every(c => evidence.some(e => e.conditionId === c.id)) &&
+        openChallenges.length === 0
+      ) {
+        await updateContractStatus(this.sql, contractId, 'passing')
+      }
+    }
+    return ack
+  }
+
+  async getActiveAcknowledgement(contractId: string): Promise<ContractAcknowledgement | null> {
+    return activeAcknowledgement(this.sql, contractId)
+  }
+
+  async invalidateAcknowledgement(contractId: string, reason: string): Promise<boolean> {
+    const invalidated = await invalidateAcknowledgement(this.sql, contractId, reason)
+    if (invalidated) {
+      await updateContractStatus(this.sql, contractId, 'proven')
+    }
+    return invalidated
+  }
+
+  async getAcknowledgementHistory(contractId: string): Promise<ContractAcknowledgement[]> {
+    return acknowledgementHistory(this.sql, contractId)
   }
 }
 

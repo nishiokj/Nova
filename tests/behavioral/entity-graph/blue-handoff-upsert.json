@@ -1,0 +1,12 @@
+{
+  "assignmentArtifactId": "18dd322e-4e18-4000-ab47-da01c9983ed9",
+  "testFiles": ["tests/behavioral/entity-graph/upsert-contract.behavior.test.ts"],
+  "changedFiles": [
+    "tests/behavioral/entity-graph/upsert-contract.behavior.test.ts"
+  ],
+  "testCommand": ["bunx", "vitest", "run", "tests/behavioral/entity-graph/upsert-contract.behavior.test.ts"],
+  "summary": "Covers insert, dedup by (source,type,statement), update-on-upsert, entity link creation/rebuild, dependency links, compilation fields, and insufficient-without-testFilePath",
+  "notes": "Uses real local postgres test DB.",
+  "bugIds": [],
+  "contractIds": ["ac789c96-5b1f-4531-94c1-c147ac231913", "aff7c01d-5620-4ea4-994e-19243377973a"]
+}

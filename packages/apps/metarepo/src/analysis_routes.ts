@@ -256,6 +256,39 @@ async function dispatchRpc(api: MetarepoApi, method: string, body: unknown): Pro
         updates: payload.updates as import('./types.js').ContractUpdateTestPathRequest['updates'],
         requestedBy: optionalString(payload.requestedBy),
       })
+    case 'contract.check':
+      return api.contractCheck({
+        repoId: asString(payload.repoId, 'repoId'),
+        requestedBy: optionalString(payload.requestedBy),
+      })
+    case 'contract.submit-proof':
+      return api.contractSubmitProof({
+        repoId: asString(payload.repoId, 'repoId'),
+        contractId: asString(payload.contractId, 'contractId'),
+        testFiles: Array.isArray(payload.testFiles) ? payload.testFiles as string[] : [],
+        conditionEvidence: payload.conditionEvidence as import('./types.js').ContractSubmitProofRequest['conditionEvidence'],
+        requestedBy: optionalString(payload.requestedBy),
+      })
+    case 'contract.challenge':
+      return api.contractChallenge({
+        repoId: asString(payload.repoId, 'repoId'),
+        contractId: asString(payload.contractId, 'contractId'),
+        conditionId: optionalString(payload.conditionId),
+        argument: asString(payload.argument, 'argument'),
+        evidence: optionalString(payload.evidence),
+        requestedBy: optionalString(payload.requestedBy),
+      })
+    case 'contract.acknowledge':
+      return api.contractAcknowledge({
+        repoId: asString(payload.repoId, 'repoId'),
+        contractId: asString(payload.contractId, 'contractId'),
+        requestedBy: optionalString(payload.requestedBy),
+      })
+    case 'contract.verify':
+      return api.contractVerify({
+        repoId: asString(payload.repoId, 'repoId'),
+        requestedBy: optionalString(payload.requestedBy),
+      })
     case 'graph.boundaries':
       return api.graphBoundaries({
         repoId: asString(payload.repoId, 'repoId'),

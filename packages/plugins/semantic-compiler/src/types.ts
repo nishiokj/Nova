@@ -133,3 +133,19 @@ export interface VerdictReport {
   generated_at: string;
   invariant_results: InvariantVerdict[];
 }
+
+// --- Deterministic Verification (v2) ---
+
+export interface ValidationCondition {
+  id: string;
+  statement: string;
+  rationale: string;
+}
+
+export interface ValidationSpec {
+  version: 2;
+  compiledAt: string;
+  compileStatus: CompileStatus;
+  conditions: ValidationCondition[];
+  questions?: CompilerQuestion[];
+}

@@ -707,14 +707,15 @@ async function main(): Promise<void> {
           } else {
             const lines: string[] = []
             lines.push(`Verified ${result.total} contract(s): ${result.passed} passed, ${result.failed} failed`)
-            if (result.violations.length > 0) {
+            const failures = result.results.filter(r => r.newStatus !== 'passing')
+            if (failures.length > 0) {
               lines.push('')
               lines.push('Failures:')
-              for (const v of result.violations) {
-                lines.push(`  - [${v.contractId.slice(0, 8)}] ${v.statement}`)
-                lines.push(`    test: ${v.testFilePath}`)
-                const preview = v.output.split('\n').slice(0, 3).join('\n    ')
-                if (preview) lines.push(`    ${preview}`)
+              for (const r of failures) {
+                lines.push(`  - [${r.contractId.slice(0, 8)}] ${r.statement}`)
+                lines.push(`    status: ${r.previousStatus} → ${r.newStatus}`)
+                if (r.acknowledgementInvalidated) lines.push(`    ack invalidated`)
+                if (r.openChallenges > 0) lines.push(`    open challenges: ${r.openChallenges}`)
               }
             }
             process.stdout.write(lines.join('\n') + '\n')

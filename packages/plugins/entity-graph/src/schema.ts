@@ -243,6 +243,44 @@ CREATE TABLE IF NOT EXISTS entity_graph.contract_violations (
 CREATE INDEX IF NOT EXISTS idx_eg_cv_contract ON entity_graph.contract_violations(contract_id);
 CREATE INDEX IF NOT EXISTS idx_eg_cv_open ON entity_graph.contract_violations(resolved_at) WHERE resolved_at IS NULL;
 
+-- Per-condition evidence (blue team proof)
+CREATE TABLE IF NOT EXISTS entity_graph.contract_condition_evidence (
+  id              TEXT PRIMARY KEY,
+  contract_id     TEXT NOT NULL,
+  condition_id    TEXT NOT NULL,
+  test_file       TEXT NOT NULL,
+  test_name       TEXT NOT NULL,
+  explanation     TEXT NOT NULL,
+  submitted_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eg_cce_contract
+  ON entity_graph.contract_condition_evidence(contract_id);
+
+-- Red team challenges
+CREATE TABLE IF NOT EXISTS entity_graph.contract_challenges (
+  id              TEXT PRIMARY KEY,
+  contract_id     TEXT NOT NULL,
+  condition_id    TEXT,
+  argument        TEXT NOT NULL,
+  evidence        TEXT,
+  status          TEXT NOT NULL DEFAULT 'open',
+  submitted_at    TEXT NOT NULL,
+  resolved_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_eg_cc_contract
+  ON entity_graph.contract_challenges(contract_id);
+
+-- Red team acknowledgements
+CREATE TABLE IF NOT EXISTS entity_graph.contract_acknowledgements (
+  id              TEXT PRIMARY KEY,
+  contract_id     TEXT NOT NULL,
+  submitted_at    TEXT NOT NULL,
+  invalidated_at  TEXT,
+  invalidated_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_eg_ca_contract
+  ON entity_graph.contract_acknowledgements(contract_id);
+
 -- Migrate old status values to new state machine (idempotent)
 UPDATE entity_graph.contracts SET status = 'insufficient' WHERE status = 'unverified' AND test_file_path IS NULL;
 UPDATE entity_graph.contracts SET status = 'dirty' WHERE status = 'unverified' AND test_file_path IS NOT NULL;

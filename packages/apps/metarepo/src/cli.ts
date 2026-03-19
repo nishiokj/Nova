@@ -7,10 +7,15 @@ import path from 'node:path'
 import { parseArgs } from 'node:util'
 import {
   blueAssign,
+  contractAcknowledge,
   contractBatchCreate,
+  contractChallenge,
+  contractCheck,
   contractCompile,
   contractInterview,
+  contractSubmitProof,
   contractUpdateTestPaths,
+  contractVerify,
   createBlueHandoff,
   createBug,
   createEnvProfile,
@@ -713,6 +718,61 @@ async function commandContract(subcommand: string | undefined, args: string[]): 
         repoId: repo.id,
         updates,
         requestedBy: 'metarepo-cli:contract.update-test-paths',
+      }))
+      return
+    }
+    case 'check': {
+      const result = await contractCheck(baseUrl, {
+        repoId: repo.id,
+        requestedBy: 'metarepo-cli:contract.check',
+      })
+      printJson(result)
+      return
+    }
+    case 'submit-proof': {
+      if (!values.file) throw new Error('contract submit-proof requires --file proof.json')
+      const raw = await readFile(path.resolve(values.file), 'utf-8')
+      const proof = JSON.parse(raw) as {
+        contractId: string
+        testFiles: string[]
+        conditionEvidence: Array<{
+          conditionId: string; testFile: string; testName: string; explanation: string
+        }>
+      }
+      printJson(await contractSubmitProof(baseUrl, {
+        repoId: repo.id,
+        ...proof,
+        requestedBy: 'metarepo-cli:contract.submit-proof',
+      }))
+      return
+    }
+    case 'challenge': {
+      if (!values.file) throw new Error('contract challenge requires --file challenge.json')
+      const raw = await readFile(path.resolve(values.file), 'utf-8')
+      const challenge = JSON.parse(raw) as {
+        contractId: string; conditionId?: string; argument: string; evidence?: string
+      }
+      printJson(await contractChallenge(baseUrl, {
+        repoId: repo.id,
+        ...challenge,
+        requestedBy: 'metarepo-cli:contract.challenge',
+      }))
+      return
+    }
+    case 'acknowledge': {
+      const contractId = positionals[0]
+      if (!contractId) throw new Error('contract acknowledge requires a contract ID')
+      printJson(await contractAcknowledge(baseUrl, {
+        repoId: repo.id,
+        contractId,
+        requestedBy: 'metarepo-cli:contract.acknowledge',
+      }))
+      return
+    }
+    case 'verify': {
+      printJson(await contractVerify(baseUrl, {
+        repoId: repo.id,
+        requestedBy: 'metarepo-cli:contract.verify',
       }))
       return
     }
