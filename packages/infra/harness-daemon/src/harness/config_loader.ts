@@ -50,19 +50,56 @@ const BEHAVIORAL_RULES_PATH = 'config/behavioral_rules.md';
 /** Module-level logger, overridden when callers pass a logger */
 let _log: HarnessLogger = stderrLogger;
 
+function walkUpForRelativePath(startDir: string, relativePath: string): string | null {
+  let currentDir = resolve(startDir);
+
+  while (true) {
+    const candidate = resolve(currentDir, relativePath);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+
+    const parentDir = dirname(currentDir);
+    if (parentDir === currentDir) {
+      return null;
+    }
+    currentDir = parentDir;
+  }
+}
+
+function getBundledAssetSearchDirs(): string[] {
+  const searchDirs = new Set<string>();
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+
+  searchDirs.add(moduleDir);
+
+  if (process.argv[1]) {
+    searchDirs.add(dirname(resolve(process.argv[1])));
+  }
+
+  if (process.execPath) {
+    searchDirs.add(dirname(process.execPath));
+  }
+
+  return [...searchDirs];
+}
 
 /**
- * Get the package root directory from this module's location.
- * Works regardless of where the process is started from.
+ * Resolve a bundled asset that ships with the installation.
  *
- * In dev:  apps/harness-daemon/src/harness/config_loader.ts -> ../../../../
- * In dist: apps/harness-daemon/dist/harness/config_loader.js -> ../../../../
+ * This intentionally searches upward from the installed module/executable
+ * location instead of assuming a fixed repo depth. That keeps dev, npm, and
+ * packaged layouts working without hardcoded ".." counts.
  */
-function getPackageRoot(): string {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = dirname(__filename);
-  // Always 4 levels up: harness/ -> (src|dist)/ -> harness-daemon/ -> apps/ -> root
-  return resolve(__dirname, '..', '..', '..', '..');
+export function resolveBundledAssetPath(relativePath: string, startDirs = getBundledAssetSearchDirs()): string | null {
+  for (const startDir of startDirs) {
+    const assetPath = walkUpForRelativePath(startDir, relativePath);
+    if (assetPath) {
+      return assetPath;
+    }
+  }
+
+  return null;
 }
 
 // ============================================
@@ -96,15 +133,15 @@ export function loadBehavioralRules(logger: HarnessLogger = stderrLogger): strin
     }
   }
 
-  // Check package location (fallback for global installs)
-  const packagePath = resolve(getPackageRoot(), BEHAVIORAL_RULES_PATH);
-  if (existsSync(packagePath)) {
+  // Check bundled install location
+  const bundledPath = resolveBundledAssetPath(BEHAVIORAL_RULES_PATH);
+  if (bundledPath && existsSync(bundledPath)) {
     try {
-      const content = readFileSync(packagePath, 'utf-8');
-      logger.info(`[config] Loaded behavioral rules from package: ${packagePath}`);
+      const content = readFileSync(bundledPath, 'utf-8');
+      logger.info(`[config] Loaded behavioral rules from bundle: ${bundledPath}`);
       return content;
     } catch (e) {
-      logger.warning(`[config] Failed to read behavioral rules from package ${packagePath}: ${String(e)}`);
+      logger.warning(`[config] Failed to read behavioral rules from bundle ${bundledPath}: ${String(e)}`);
     }
   }
 
@@ -195,15 +232,18 @@ export function loadConfigFile(configPath?: string, logger: HarnessLogger = stde
     }
   }
 
-  // 4. Check package location (fallback for globally installed packages)
-  const packageRoot = getPackageRoot();
-  const packageConfigPath = resolve(packageRoot, DEFAULT_CONFIG_PATH);
-  if (existsSync(packageConfigPath)) {
-    const content = readFileSync(packageConfigPath, 'utf-8');
-    const parsed = validateConfig(content, packageConfigPath);
+  // 4. Check bundled install location
+  const bundledConfigPath = resolveBundledAssetPath(DEFAULT_CONFIG_PATH);
+  if (bundledConfigPath && existsSync(bundledConfigPath)) {
+    const content = readFileSync(bundledConfigPath, 'utf-8');
+    const parsed = validateConfig(content, bundledConfigPath);
     if (parsed) {
-      logger.info(`[config] Loaded from package: ${packageConfigPath}`);
-      return { config: parsed, configDir: packageRoot, configPath: packageConfigPath };
+      logger.info(`[config] Loaded from bundle: ${bundledConfigPath}`);
+      return {
+        config: parsed,
+        configDir: dirname(dirname(bundledConfigPath)),
+        configPath: bundledConfigPath,
+      };
     }
   }
 
@@ -333,15 +373,19 @@ function resolveModelForRole(
   role: ModelRole,
   providerHint?: string
 ): { provider: string; model: string } | null {
-  // Default provider priority order for role-based resolution
+  // Default provider priority order for role-based resolution.
+  // Prefer providers that match our headless/runtime flows before falling back
+  // to Anthropic, and make sure codex is actually considered.
   const DEFAULT_PROVIDER_PRIORITY: string[] = [
-    'anthropic',
+    'codex',
     'openai',
+    'z.ai-coder',
+    'anthropic',
     'groq',
     'cerebras',
     'gemini',
-    'z.ai-coder',
     'openai-compat',
+    'vercel-gateway',
   ];
 
   const providerOrder = providerHint ? [providerHint] : DEFAULT_PROVIDER_PRIORITY;
@@ -367,6 +411,11 @@ function resolveAgentConfig(
   entry: AgentConfigEntry,
   defaultModelId?: string
 ): ResolvedAgentConfig {
+  const normalizeConfigValue = (value: string | undefined): string | undefined => {
+    const trimmed = value?.trim();
+    return trimmed ? trimmed.toLowerCase() : undefined;
+  };
+
   let resolvedProvider = entry.llm.provider;
   let resolvedModel = entry.llm.model;
 
@@ -396,7 +445,12 @@ function resolveAgentConfig(
     }
   }
 
-  const modelDefinition = getModelDefinition(resolvedModel);
+  const normalizedResolvedModel = normalizeConfigValue(resolvedModel);
+  const normalizedResolvedProvider = normalizeConfigValue(resolvedProvider);
+  const modelDefinition = getAllModels().find((entry) =>
+    normalizeConfigValue(entry.id) === normalizedResolvedModel
+    && (!normalizedResolvedProvider || normalizeConfigValue(entry.provider) === normalizedResolvedProvider)
+  ) ?? getModelDefinition(resolvedModel);
   if (!modelDefinition) {
     throw new Error(`Model '${resolvedModel}' is not registered`);
   }
@@ -670,7 +724,7 @@ export function createConfigFromFile(
  * 1. Explicit configPath (if provided)
  * 2. cwd/config/defaults.json (project config)
  * 3. ~/.nova/config.json (user fallback)
- * 4. Package bundled config
+ * 4. Bundled install config
  *
  * Each config must be complete and valid. No partial configs or merging.
  * User preferences (model selection, etc.) are handled at runtime via SessionStore/GraphD.
