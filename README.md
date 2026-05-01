@@ -1,6 +1,6 @@
 # nova
 
-Config-driven multi-agent runtime with a terminal UI, daemon, and headless execution path.
+Multi-agent runtime with a terminal UI, background daemon, and headless execution mode.
 
 ## Quickstart
 
@@ -105,7 +105,7 @@ bun run packages/apps/launcher/index.ts run \
 - `docs`: architecture, specs, runbooks, setup notes
 - `tests`: integration and unit tests
 
-## Sharp Edges
+## Notes
 
 - `bun run start:tui` expects the daemon to already be running.
 - Provider keys are managed via `/providers` in the TUI or `--provider-env` for headless runs.
