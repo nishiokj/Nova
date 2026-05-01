@@ -1,12 +1,7 @@
 /**
  * GraphD data structures.
  *
- * Ported from: src/harness/graphd/types.py
  */
-
-// ============================================
-// SYMBOL DEFINITION
-// ============================================
 
 /**
  * Symbol definition extracted from source code.
@@ -57,10 +52,6 @@ export function dictToSymbolDef(d: Record<string, unknown>): SymbolDef {
   };
 }
 
-// ============================================
-// MODULE EDGE
-// ============================================
-
 /**
  * Edge representing module imports/dependencies.
  */
@@ -104,10 +95,6 @@ export function dictToModuleEdge(row: Record<string, unknown>): ModuleEdge {
   };
 }
 
-// ============================================
-// EXPORT DEFINITION
-// ============================================
-
 /**
  * Export definition for module exports.
  */
@@ -141,10 +128,6 @@ export function exportDefToDict(e: ExportDef): Record<string, unknown> {
     confidence: e.confidence,
   };
 }
-
-// ============================================
-// DERIVED EDGE
-// ============================================
 
 /**
  * Derived edge (cached inference result).
@@ -201,10 +184,6 @@ export function dictToDerivedEdge(row: Record<string, unknown>): DerivedEdge {
   };
 }
 
-// ============================================
-// IMPACT ITEM
-// ============================================
-
 /**
  * Impact analysis result item.
  */
@@ -231,10 +210,6 @@ export function impactItemToDict(i: ImpactItem): Record<string, unknown> {
   };
 }
 
-// ============================================
-// FILE RECORD
-// ============================================
-
 /**
  * File record in the graph database.
  */
@@ -245,10 +220,6 @@ export interface FileRecord {
   mtime: number;
 }
 
-// ============================================
-// RUN ARTIFACT
-// ============================================
-
 /**
  * Run artifact (test results, build outputs, etc.).
  */
@@ -258,10 +229,6 @@ export interface RunArtifact {
   details: Record<string, unknown>;
   updatedAt: number;
 }
-
-// ============================================
-// SESSION TYPES (for GraphD session management)
-// ============================================
 
 /**
  * Session lifecycle status.
@@ -359,10 +326,6 @@ export interface GraphDEvent {
   data?: Record<string, unknown>;
 }
 
-// ============================================
-// FILE TRACE (v7)
-// ============================================
-
 /**
  * File trace as stored in database.
  * Records each Write/Edit tool call for attribution.
@@ -397,10 +360,6 @@ export interface FileTraceInput {
   contentHash: string;
   createdAt?: number;
 }
-
-// ============================================
-// AUTH TYPES (v5)
-// ============================================
 
 /**
  * User record from Google OAuth.
@@ -453,10 +412,6 @@ export type ProviderType =
   | 'groq'
   | 'fireworks';
 
-// ============================================
-// STATS
-// ============================================
-
 /**
  * Database statistics.
  */
@@ -466,10 +421,6 @@ export interface GraphDStats {
   moduleEdges: number;
   exports: number;
 }
-
-// ============================================
-// HEALTH CHECK
-// ============================================
 
 /**
  * Health check response.

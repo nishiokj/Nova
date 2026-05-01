@@ -1,126 +1,95 @@
 # nova
 
-Config-driven multi-agent runtime with a terminal UI, daemon, and headless execution path.
+Config-driven multi-agent runtime. Runs AI agents against real tools (bash, file system, web search) with a terminal UI, a background daemon, and a code graph server. Built on Bun.
+
+## What it is
+
+- **Agent runtime** — orchestrates LLM calls + tool use (bash, read/write/edit files, grep, web search, skills)
+- **Terminal UI** — interactive chat interface built with Ink; real-time streaming, themes, session history
+- **Daemon** — background process managing sessions, the event bus, and agent lifecycle
+- **GraphD** — code-graph server tracking symbol definitions, module dependencies, and file traces
+- **Plugins** — optional memory + entity graph (requires external Postgres); semantic compiler workflows
 
 ## Quickstart
 
-### Prerequisites
-
-- Bun installed
-- At least one LLM provider key
-
-### 1) Install
+**Requirements:** [Bun](https://bun.sh) + at least one LLM provider API key.
 
 ```bash
+git clone <repo>
+cd nova
 bun install
-```
-
-For local monorepo development, this installs all workspace dependencies.
-
-### 2) Start the app
-
-```bash
 bun run start
 ```
 
-This starts the daemon (if needed) and opens the TUI.
+`bun run start` launches the daemon and opens the TUI. Inside the TUI:
 
-### 3) Configure provider keys
+1. Run `/providers` — add your API key (Anthropic, OpenAI, Gemini, etc.)
+2. Run `/models` — pick a model
+3. Type a prompt and press Enter
 
-Inside the TUI:
+That's it.
 
-- Run `/providers` to add API keys.
-- Run `/models` to confirm model selection.
-
-### 4) First prompt
-
-Type your goal in the TUI and press Enter.
-
-## Common Workflows
+## Commands
 
 ```bash
-bun run start                  # daemon + TUI
-bun run start:split            # daemon only (foreground)
-bun run start:tui              # TUI only (attach to running daemon)
-bun run start:graphd           # GraphD only
+bun run start              # daemon + TUI (normal use)
+bun run start:split        # daemon only (foreground)
+bun run start:tui          # TUI only (attach to running daemon)
+bun run start:graphd       # GraphD only
 
-bun run build                  # build packages + apps
-bun run build:plugins          # build optional plugin packages
-bun run lint                   # workspace type/lint checks
-bun test                       # test suite (vitest)
-bun run smoke:interprocess     # basic interprocess smoke test
+bun run build              # build all packages
+bun run build:plugins      # build optional plugins
+bun run lint               # type + lint checks
+bun test                   # run tests (vitest)
 ```
 
-## Installation Boundary (Core vs Plugins)
+## Headless / CI
 
-The distributed `nova` package is core-only by default.
-
-- Included: `packages/core/*`, `packages/infra/*`, `packages/apps/launcher`, `packages/apps/tui`
-- Excluded: `packages/plugins/*` and plugin-specific transitive dependencies
-
-Plugin-backed capabilities are opt-in and should be installed only when needed.
-
-- Memory + entity graph integration: requires `memory` when `memory.enabled` and/or `entity_graph.enabled` are enabled.
-- Semantic compiler workflows: require `semantic-compiler` when those workflows are enabled.
-- The `memory` plugin bundles and wires `agent-memory`, `memory-injector`, `entity-graph`, and `postgres`.
-
-Plugin install examples:
+Run a single task without the TUI:
 
 ```bash
-bun add memory
+export ANTHROPIC_API_KEY=your-key
+
+bun run packages/apps/launcher/index.ts run \
+  --input "Summarize this repo in 5 bullets" \
+  --provider anthropic \
+  --model claude-sonnet-4-5 \
+  --provider-env anthropic=ANTHROPIC_API_KEY
+```
+
+## Plugins (optional)
+
+The distributed `nova` package ships core only. Plugins are opt-in:
+
+```bash
+bun add memory           # memory + entity graph (requires Postgres)
 bun add semantic-compiler
 ```
 
-For this monorepo, plugin artifacts are built explicitly:
+Enable in `config/defaults.json`:
 
-```bash
-bun run build:plugins
+```json
+{ "memory": { "enabled": true }, "entity_graph": { "enabled": true } }
 ```
 
-When optional modules are missing, the daemon logs a clear install hint and continues without that feature.
+## Repo layout
 
-## Headless / CI Usage
-
-Run a single task without the interactive TUI:
-
-```bash
-export OPENAI_API_KEY=your-key
-
-bun run packages/apps/launcher/index.ts run \
-  --input "Summarize this repository's architecture in 5 bullets" \
-  --provider openai \
-  --model <model-id> \
-  --provider-env openai=OPENAI_API_KEY
+```
+packages/core/      — runtime primitives, orchestrator, tools, agent core
+packages/infra/     — daemon, GraphD, event bus, harness client
+packages/apps/      — launcher (headless), TUI, dashboard
+packages/plugins/   — optional: memory bundle, semantic compiler
+config/             — default runtime/app config
+docs/               — architecture, specs, runbooks
+tests/              — integration and unit tests
 ```
 
-`--provider-env` reads a key from an environment variable and registers it before execution.
+## Gotchas
 
-## Repo Map
-
-- `packages/core`: runtime primitives, orchestrator, tools, agent core
-- `packages/infra`: daemon, GraphD, event bus, harness client
-- `packages/apps`: launcher, TUI, dashboard apps
-- `packages/plugins`: optional subsystems (`memory` bundle, semantic compiler, and internal plugin modules)
-- `config`: default runtime/app config
-- `docs`: architecture, specs, runbooks, setup notes
-- `tests`: integration and unit tests
-
-## Sharp Edges
-
-- `bun run start:tui` expects the daemon to already be running.
-- Provider keys are managed via `/providers` in the TUI or `--provider-env` for headless runs.
-- `memory.enabled` is `false` by default in `config/defaults.json`; enabling it without the `memory` plugin only disables memory features (non-fatal).
-- Entity graph requires `entity_graph.database_url` (or `ENTITY_GRAPH_DATABASE_URL` / `DATABASE_URL`) when `entity_graph.enabled` is true.
-- Memory retrieval and trace persistence require the memory daemon URL (`memory.base_url` / `MEMORY_DAEMON_URL`) and its backing database/service.
-- Ports default to `127.0.0.1:9555` for the daemon event bus; override via `EVENT_BUS_HOST`/`EVENT_BUS_PORT`.
-
-## Deep Dives
-
-- Architecture diagram: `docs/architecture/ARCHITECTURE_DIAGRAM.md`
-- Control plane design: `docs/architecture/CONTROL_PLANE_DESIGN.md`
-- System architecture spec: `docs/specs/SYSTEM_ARCHITECTURE.md`
-- Deployable runbooks: `docs/runbooks/README.md`
-- Setup/auth references: `docs/setup/`
+- `bun run start:tui` requires the daemon to already be running — use `bun run start` instead.
+- `memory.enabled` and `entity_graph.enabled` are `false` by default. Enabling them without the `memory` plugin is a no-op (non-fatal).
+- Entity graph requires `entity_graph.database_url` (or `ENTITY_GRAPH_DATABASE_URL`) when enabled.
+- Daemon event bus binds to `127.0.0.1:9555` by default; override with `EVENT_BUS_HOST` / `EVENT_BUS_PORT`.
 
 ## License
 

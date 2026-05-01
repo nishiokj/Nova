@@ -1,15 +1,10 @@
 /**
  * GraphD utility functions.
  *
- * Ported from: src/harness/graphd/utils.py
  */
 
 import { createHash } from 'crypto';
 import { posix as path } from 'path';
-
-// ============================================
-// PATH UTILITIES
-// ============================================
 
 /**
  * Normalize paths to repo-relative, forward-slash format.
@@ -38,10 +33,6 @@ export function denormalizePath(filePath: string, root: string): string {
   if (path.isAbsolute(filePath)) return filePath;
   return path.resolve(root, filePath);
 }
-
-// ============================================
-// HASHING UTILITIES
-// ============================================
 
 /**
  * SHA1 hash of text content.
@@ -73,10 +64,6 @@ export function makeSymbolId(
   const base = `${filePath}:${kind}:${name}:${spanStart}:${spanEnd}`;
   return sha1Text(base).slice(0, 16);
 }
-
-// ============================================
-// LANGUAGE DETECTION
-// ============================================
 
 /**
  * Map of file extensions to language names.
@@ -122,10 +109,6 @@ export function guessLanguage(filePath: string): string {
   return EXTENSION_TO_LANG[ext] ?? 'unknown';
 }
 
-// ============================================
-// TEST PATH DETECTION
-// ============================================
-
 /**
  * Check if a path is a test file.
  */
@@ -151,10 +134,6 @@ export function isTestPath(filePath: string): boolean {
     /\.(?:test|spec)\.(?:[jt]sx?|[mc][jt]s)$/.test(base)
   );
 }
-
-// ============================================
-// SAFE PARSING UTILITIES
-// ============================================
 
 /**
  * Safely parse an integer from a string value.
@@ -186,10 +165,6 @@ export function safeJsonParse<T>(json: string | null | undefined, defaultValue: 
   }
 }
 
-// ============================================
-// SESSION KEY GENERATION
-// ============================================
-
 /**
  * Generate a unique session key.
  * Format: {client_type}_{timestamp}_{uuid8}
@@ -213,10 +188,6 @@ export function parseClientType(sessionKey: string): string {
   // Last two segments are timestamp and uuid8
   return parts.slice(0, -2).join('_');
 }
-
-// ============================================
-// TIME UTILITIES
-// ============================================
 
 /**
  * Get current Unix timestamp in seconds (matches Python time.time()).

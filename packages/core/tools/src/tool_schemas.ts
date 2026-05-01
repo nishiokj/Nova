@@ -7,26 +7,12 @@
 
 import { z } from 'zod';
 
-// ============================================
-// BASH TOOL
-// ============================================
-
-/**
- * Arguments for bash tool execution.
- */
 export const BashArgsSchema = z.object({
   command: z.string().min(1, 'Command cannot be empty'),
   timeout: z.number().min(1, 'timeout must be at least 1 second').optional(),
   env: z.record(z.string(), z.string()).optional(),
 });
 
-// ============================================
-// READ TOOL
-// ============================================
-
-/**
- * Arguments for read tool execution.
- */
 export const ReadArgsSchema = z.object({
   path: z.string().min(1, 'Path cannot be empty'),
   encoding: z.string().optional(),
@@ -35,13 +21,6 @@ export const ReadArgsSchema = z.object({
   limit: z.number().positive().int().optional(),
 });
 
-// ============================================
-// WRITE TOOL
-// ============================================
-
-/**
- * Arguments for write tool execution.
- */
 export const WriteArgsSchema = z.object({
   path: z.string().min(1, 'Path cannot be empty'),
   content: z.string(),
@@ -49,11 +28,6 @@ export const WriteArgsSchema = z.object({
   mode: z.number().int().optional(),
 });
 
-// ============================================
-// EDIT TOOL
-// ============================================
-
-/** Arguments for edit tool execution. */
 export const EditArgsSchema = z.object({
   path: z.string().min(1, 'Path cannot be empty'),
   oldString: z.string().min(1, 'oldString cannot be empty'),
@@ -61,30 +35,16 @@ export const EditArgsSchema = z.object({
   replaceAll: z.boolean().optional(),
 });
 
-// ============================================
-// GLOB TOOL
-// ============================================
-
-/**
- * Arguments for glob tool execution.
- */
 export const GlobArgsSchema = z.object({
   pattern: z.string().min(1, 'Pattern cannot be empty'),
-  path: z.string().optional(), // Subdirectory to search within
+  path: z.string().optional(),
   ignore: z.array(z.string()).optional(),
   maxResults: z.number().positive().int().optional(),
 });
 
-// ============================================
-// GREP TOOL
-// ============================================
-
-/**
- * Arguments for grep tool execution.
- */
 export const GrepArgsSchema = z.object({
   pattern: z.string().min(1, 'Pattern cannot be empty'),
-  path: z.string().optional(), // Subdirectory to search within
+  path: z.string().optional(),
   glob: z.string().optional(),
   type: z.string().optional(),
   output_mode: z.enum(['content', 'files_with_matches', 'count']).optional(),
@@ -100,25 +60,11 @@ export const GrepArgsSchema = z.object({
   caseInsensitive: z.boolean().optional(),
 });
 
-// ============================================
-// SKILL TOOL
-// ============================================
-
-/**
- * Arguments for skill tool execution.
- */
 export const SkillArgsSchema = z.object({
   skill: z.string().min(1, 'Skill name cannot be empty'),
   args: z.string().optional(),
 });
 
-// ============================================
-// PROMPT USER TOOL
-// ============================================
-
-/**
- * Option schema for user prompts.
- */
 const PromptUserOptionSchema = z.union([
   z.string(),
   z.object({
@@ -127,9 +73,6 @@ const PromptUserOptionSchema = z.union([
   }),
 ]);
 
-/**
- * Question schema for sequential prompts.
- */
 const PromptUserQuestionSchema = z.object({
   question: z.string().min(1, 'Question cannot be empty'),
   options: z.array(PromptUserOptionSchema).optional(),
@@ -138,20 +81,10 @@ const PromptUserQuestionSchema = z.object({
   questionType: z.enum(['multiple_choice', 'multi_select', 'fill_in_blank', 'yes_no', 'free_text']).optional(),
 });
 
-/**
- * Arguments for PromptUser tool execution.
- */
 export const PromptUserArgsSchema = z.object({
   questions: z.array(PromptUserQuestionSchema).min(1, 'At least one question is required'),
 });
 
-// ============================================
-// EXPAND CONVERSATION TOOL
-// ============================================
-
-/**
- * Arguments for ExpandConversation tool execution.
- */
 export const ExpandConversationArgsSchema = z.object({
   conversation_id: z.string().min(1, 'conversation_id cannot be empty'),
   limit: z.number().positive().int().max(200).optional(),
@@ -161,13 +94,6 @@ export const ExpandConversationArgsSchema = z.object({
   base_url: z.string().optional(),
 });
 
-// ============================================
-// WEB SEARCH TOOL
-// ============================================
-
-/**
- * Arguments for WebSearch tool execution.
- */
 export const WebSearchArgsSchema = z.object({
   query: z.string().min(1, 'query cannot be empty'),
   allowed_domains: z.array(z.string()).optional(),
@@ -175,13 +101,6 @@ export const WebSearchArgsSchema = z.object({
   count: z.number().positive().int().max(20).optional(),
 });
 
-// ============================================
-// SCHEMA REGISTRY
-// ============================================
-
-/**
- * Registry of tool argument schemas.
- */
 export const TOOL_SCHEMAS: Partial<Record<string, z.ZodType>> = {
   Bash: BashArgsSchema,
   Read: ReadArgsSchema,
@@ -195,10 +114,6 @@ export const TOOL_SCHEMAS: Partial<Record<string, z.ZodType>> = {
   WebSearch: WebSearchArgsSchema,
 };
 
-// ============================================
-// INFERRED TYPES
-// ============================================
-
 export type BashArgs = z.infer<typeof BashArgsSchema>;
 export type ReadArgs = z.infer<typeof ReadArgsSchema>;
 export type WriteArgs = z.infer<typeof WriteArgsSchema>;
@@ -210,10 +125,6 @@ export type PromptUserArgs = z.infer<typeof PromptUserArgsSchema>;
 export type ExpandConversationArgs = z.infer<typeof ExpandConversationArgsSchema>;
 export type WebSearchArgs = z.infer<typeof WebSearchArgsSchema>;
 
-// ============================================
-// VALIDATION FUNCTIONS
-// ============================================
-
 /**
  * Validate tool arguments against a schema.
  * Returns validated args or null on failure.
@@ -224,7 +135,6 @@ export function validateToolArgs(
 ): { success: true; data: Record<string, unknown> } | { success: false; error: string } {
   const schema = TOOL_SCHEMAS[toolName];
   if (!schema) {
-    // No schema defined - pass through
     return { success: true, data: args };
   }
 
@@ -237,9 +147,6 @@ export function validateToolArgs(
   return { success: true, data: result.data as Record<string, unknown> };
 }
 
-/**
- * Get the schema for a tool by name.
- */
 export function getToolSchema(toolName: string): z.ZodType | undefined {
   return TOOL_SCHEMAS[toolName];
 }

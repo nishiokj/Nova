@@ -175,9 +175,6 @@ export interface StoreSnapshot {
 const DEFAULT_MAX_HISTORY = 500;
 
 export class Store {
-  // ═══════════════════════════════════════════════════════════════════════════
-  // STATE - All private fields grouped by domain
-  // ═══════════════════════════════════════════════════════════════════════════
 
   // ─── Core ───
   private state: TUIState = "idle";
@@ -242,7 +239,6 @@ export class Store {
   private usageProviderStats: UsageProviderStats[] = [];
   private usageLoading = false;
 
-
   // ─── Wizard ───
   private wizardType: WizardType | null = null;
   private wizardStepIndex = 0;
@@ -281,17 +277,9 @@ export class Store {
   private lastLlmModel: string | null = null;
   private lastLlmProvider: string | null = null;
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // CONSTRUCTOR
-  // ═══════════════════════════════════════════════════════════════════════════
-
   constructor(maxHistory = DEFAULT_MAX_HISTORY) {
     this.maxHistory = maxHistory;
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // CORE METHODS - subscribe, snapshot, emit, batch
-  // ═══════════════════════════════════════════════════════════════════════════
 
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
@@ -420,18 +408,10 @@ export class Store {
     }
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SESSION METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
   setSessionKey(key: string | null): void {
     this.sessionKey = key;
     this.emit();
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // UI MODE METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
 
   setUIMode(mode: UIMode): void {
     const previousMode = this.uiMode;
@@ -453,10 +433,6 @@ export class Store {
 
     this.emit();
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // WIZARD METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
 
   startWizard(type: WizardType, data: Record<string, unknown>): void {
     this.uiMode = "wizard";
@@ -490,10 +466,6 @@ export class Store {
     this.emit();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SKILLS/HOOKS METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
   setSkillsList(items: Record<string, unknown>[], errors?: string[]): void {
     this.skillsList = [...items];
     this.skillsErrors = errors ? [...errors] : [];
@@ -506,10 +478,6 @@ export class Store {
     this.emit();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // CAPABILITIES METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
   setCapabilities(capabilities: { voiceAvailable?: boolean; streamingSupported?: boolean }): void {
     this.capabilities = {
       voiceAvailable: capabilities.voiceAvailable ?? this.capabilities.voiceAvailable,
@@ -517,10 +485,6 @@ export class Store {
     };
     this.emit();
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // STATUS/STATE METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
 
   setState(state: TUIState, message?: string): void {
     this.state = state;
@@ -596,10 +560,6 @@ export class Store {
     return this.requestCount;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // HISTORY METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
   addMessage(role: Role, text: string, meta?: string, requestId?: string): void {
     const entry: MessageEntry = {
       id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
@@ -661,10 +621,6 @@ export class Store {
     this.emit();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // STREAMING METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
   setStreaming(requestId: string, text: string): void {
     this.streamingRequestId = requestId;
     this.streamingText = text;
@@ -705,10 +661,6 @@ export class Store {
     this.emit();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // REASONING METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
   setReasoning(requestId: string, text: string): void {
     this.reasoningRequestId = requestId;
     this.reasoningText = text;
@@ -742,10 +694,6 @@ export class Store {
     this.emit();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SCROLL METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
   setScrollOffset(offset: number): void {
     this.scrollOffset = Math.max(0, offset);
     if (this.scrollOffset === 0) {
@@ -773,10 +721,6 @@ export class Store {
     this.newMessages = false;
     this.emit();
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // INPUT METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
 
   insertInput(text: string): void {
     this.inputBuffer.insertText(text);
@@ -829,10 +773,6 @@ export class Store {
     this.inputBuffer.deleteWordBack();
     this.emit();
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // AUTOCOMPLETE METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
 
   updateAutocomplete(fileCache: { getFiles: () => string[] }): void {
     const text = this.inputBuffer.getText();
@@ -983,10 +923,6 @@ export class Store {
     return normalizedLines;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // THEME METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
   /**
    * Enters theme selection mode with cursor at current theme.
    */
@@ -1012,10 +948,6 @@ export class Store {
     this.uiMode = "chat";
     this.emit();
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // MODELS METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets model selection for a specific agent type.
@@ -1386,10 +1318,6 @@ export class Store {
     return this.modelsList.filter((m) => m.provider === selection.provider);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SESSIONS METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
   /**
    * Sets the sessions list and enters sessions selection mode.
    */
@@ -1426,10 +1354,6 @@ export class Store {
     this.uiMode = "chat";
     this.emit();
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // USAGE METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Sets usage loading state.
@@ -1499,10 +1423,6 @@ export class Store {
     this.emit();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PERMISSION PROMPT METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
   /**
    * Sets the active permission request and enters permission mode.
    */
@@ -1554,10 +1474,6 @@ export class Store {
     this.emit();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // CONTEXT WINDOW METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
   /**
    * Sets the context window size information.
    * @param inputTokens - Number of input tokens in the current request
@@ -1608,10 +1524,6 @@ export class Store {
     this.emit();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // RESPONSE PANE METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
-
   /**
    * Sets response content and enters response mode.
    */
@@ -1629,10 +1541,6 @@ export class Store {
     this.uiMode = "chat";
     this.emit();
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PASTE METHODS
-  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * Updates paste progress for large paste operations.
@@ -1672,10 +1580,6 @@ export class Store {
     this.emit();
   }
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// HELPER FUNCTIONS
-// ═══════════════════════════════════════════════════════════════════════════════
 
 /**
  * Formats bytes into a human-readable string.

@@ -96,3 +96,8 @@ harness_manifest.json
 
 .config/*
 scripts/*
+
+# Mutation testing artifacts
+mutation-*.json
+payload.json
+trace.md

@@ -1,7 +1,5 @@
 /**
  * Tool Registry - Registry and executor for agent tools.
- *
- * Ported from: src/harness/agent/tool_registry.py
  */
 
 import type {
@@ -30,10 +28,6 @@ import {
   toToolExecutionError,
 } from './types.js';
 import { validateToolArgs, TOOL_SCHEMAS } from './tool_schemas.js';
-
-// ============================================
-// TOOL REGISTRY
-// ============================================
 
 /**
  * Options for tool execution.
@@ -86,17 +80,9 @@ export class ToolRegistry {
     this.dangerousMode = config.dangerousMode ?? false;
   }
 
-  // ============================================
-  // REGISTRATION
-  // ============================================
-
-  /**
-   * Register a tool.
-   */
   register(options: ToolRegistrationOptions): void {
     const tool = createTool(options);
 
-    // Set enabled based on config
     if (this.config.enabledTools.includes(tool.name)) {
       tool.enabled = true;
     } else {
@@ -106,23 +92,14 @@ export class ToolRegistry {
     this.tools.set(tool.name, tool);
   }
 
-  /**
-   * Unregister a tool.
-   */
   unregister(name: string): boolean {
     return this.tools.delete(name);
   }
 
-  /**
-   * Get a tool by name.
-   */
   get(name: string): Tool | undefined {
     return this.tools.get(name);
   }
 
-  /**
-   * List all registered tools.
-   */
   list(enabledOnly = true): Tool[] {
     const tools = Array.from(this.tools.values());
     if (enabledOnly) {
@@ -131,9 +108,6 @@ export class ToolRegistry {
     return tools;
   }
 
-  /**
-   * Get tool definitions for LLM.
-   */
   getDefinitions(enabledOnly = true): ToolDefinition[] {
     return this.list(enabledOnly).map((t) => ({
       name: t.name,
@@ -143,9 +117,6 @@ export class ToolRegistry {
     }));
   }
 
-  /**
-   * Enable a tool.
-   */
   enable(name: string): boolean {
     const tool = this.tools.get(name);
     if (tool) {
@@ -155,9 +126,6 @@ export class ToolRegistry {
     return false;
   }
 
-  /**
-   * Disable a tool.
-   */
   disable(name: string): boolean {
     const tool = this.tools.get(name);
     if (tool) {
@@ -167,35 +135,18 @@ export class ToolRegistry {
     return false;
   }
 
-  /**
-   * Check if a tool is parallel-safe.
-   */
   isParallelSafe(name: string): boolean {
     const tool = this.tools.get(name);
     return !!(tool && tool.enabled && tool.readOnly && tool.parallelizable);
   }
 
-  // ============================================
-  // WORKING DIRECTORY
-  // ============================================
-
-  /**
-   * Get the default working directory.
-   */
   getWorkingDir(): string {
     return this.defaultWorkingDir;
   }
 
-  /**
-   * Set the default working directory.
-   */
   setDefaultWorkingDir(dir: string): void {
     this.defaultWorkingDir = dir;
   }
-
-  // ============================================
-  // EXECUTION
-  // ============================================
 
   /**
    * Execute a tool by name.
@@ -218,7 +169,6 @@ export class ToolRegistry {
       return errorResult(name, `Tool '${name}' is disabled`, 0);
     }
 
-    // Resolve cwd: explicit option > defaultWorkingDir
     const resolvedCwd = options?.cwd ?? this.defaultWorkingDir;
     const argsWithCwd = {
       ...args,
@@ -230,7 +180,6 @@ export class ToolRegistry {
       console.warn(`[ToolRegistry] Suspicious cwd for tool ${name}: "${resolvedCwd}" (defaultWorkingDir: "${this.defaultWorkingDir}")`);
     }
 
-    // Check allowed tools restriction
     if (options?.allowedTools && !options.allowedTools.has(name)) {
       return errorResult(
         name,
@@ -239,7 +188,6 @@ export class ToolRegistry {
       );
     }
 
-    // Validate arguments against schema
     if (TOOL_SCHEMAS[name]) {
       const validation = validateToolArgs(name, argsWithCwd);
       if (!validation.success) {
@@ -247,7 +195,6 @@ export class ToolRegistry {
       }
     }
 
-    // Check cache for read-only tools
     const isCacheable =
       tool.readOnly && this.cacheConfig.cacheableTools.has(name);
     let cacheKey: string | null = null;
@@ -261,7 +208,6 @@ export class ToolRegistry {
       }
     }
 
-    // Build execution context for the tool executor
     const execContext: ToolExecutionContext = {
       execution: options?.execution,
       control: options?.control,
@@ -273,7 +219,6 @@ export class ToolRegistry {
       metadata: { ...(options?.metadata ?? {}), toolName: name },
     };
 
-    // Execute with Effect policies (timeout + cancellation + typed failures)
     const timeout = options?.timeout ?? tool.timeoutMs;
     const startTime = Date.now();
     const asyncId = profiler.asyncBegin(`tool:${name}`, 'tool');
@@ -308,13 +253,11 @@ export class ToolRegistry {
       cacheHit: isCacheable && cacheKey ? !!this.cache.get(cacheKey) : false,
     });
 
-    // Cache successful read-only results
     if (isCacheable && cacheKey && result.isSuccess) {
       this.storeCachedResult(cacheKey, result);
       result.metadata = { ...result.metadata, cached: true };
     }
 
-    // Invalidate caches for write operations
     if (result.isSuccess && (name === 'Write' || name === 'Edit' || name === 'BatchEdit' || name === 'apply_patch')) {
       if (name === 'apply_patch') {
         // apply_patch can touch multiple files — clear all read caches
@@ -414,13 +357,6 @@ export class ToolRegistry {
     return result;
   }
 
-  // ============================================
-  // CACHING
-  // ============================================
-
-  /**
-   * Generate cache key for tool call.
-   */
   private generateCacheKey(
     name: string,
     args: Record<string, unknown>
@@ -432,9 +368,6 @@ export class ToolRegistry {
     return parts.join('|');
   }
 
-  /**
-   * Get cached result if valid.
-   */
   private getCachedResult(key: string): ToolResult | null {
     const cached = this.cache.get(key);
     if (!cached) return null;
@@ -449,9 +382,6 @@ export class ToolRegistry {
     return { ...cached.result };
   }
 
-  /**
-   * Store result in cache.
-   */
   private storeCachedResult(key: string, result: ToolResult): void {
     // Evict oldest if at capacity
     if (this.cache.size >= this.cacheConfig.maxSize) {
@@ -475,9 +405,6 @@ export class ToolRegistry {
     });
   }
 
-  /**
-   * Invalidate cache entries for a path.
-   */
   private invalidateCacheForPath(path: string): void {
     const keysToRemove: string[] = [];
 
@@ -495,16 +422,10 @@ export class ToolRegistry {
     }
   }
 
-  /**
-   * Clear all cached results.
-   */
   clearCache(): void {
     this.cache.clear();
   }
 
-  /**
-   * Get cache statistics.
-   */
   getCacheStats(): {
     size: number;
     maxSize: number;
