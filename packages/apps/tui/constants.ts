@@ -5,10 +5,6 @@
  * Changes here should be minimal and intentional.
  */
 
-// ============================================
-// UI LAYOUT
-// ============================================
-
 /** Maximum number of input lines to display before scrolling */
 export const DEFAULT_MAX_INPUT_LINES = 6;
 
@@ -27,10 +23,6 @@ export const MIN_TERMINAL_WIDTH = 40;
 /** Minimum terminal height (lines) */
 export const MIN_TERMINAL_HEIGHT = 10;
 
-// ============================================
-// PROMPT MODAL SIZING
-// ============================================
-
 /** Minimum width required for PermissionPrompt to render properly */
 export const MIN_PERMISSION_WIDTH = 60;
 
@@ -48,10 +40,6 @@ export const DEFAULT_TERMINAL_HEIGHT = 24;
 
 /** Lines to scroll per mouse wheel tick */
 export const SCROLL_AMOUNT = 3;
-
-// ============================================
-// ANIMATION & TIMING
-// ============================================
 
 /** Frames for streaming cursor animation */
 export const STREAM_CURSOR_FRAMES = ["|", " "] as const;
@@ -89,10 +77,6 @@ export const GRACEFUL_SHUTDOWN_DELAY = 500;
 /** Delay for error exit after cleanup (ms) */
 export const ERROR_EXIT_DELAY = 100;
 
-// ============================================
-// CONTENT LIMITS
-// ============================================
-
 /** Maximum streaming text size - 5MB (from store.ts) */
 export const MAX_STREAMING_BYTES = 5 * 1024 * 1024;
 
@@ -101,10 +85,6 @@ export const MAX_INPUT_LENGTH = 100 * 1024;
 
 /** Default history line limit (from store.ts) */
 export const DEFAULT_MAX_HISTORY = 500;
-
-// ============================================
-// NETWORK DEFAULTS
-// ============================================
 
 /** Default GraphD host */
 export const DEFAULT_GRAPHD_HOST = "127.0.0.1";
@@ -117,10 +97,6 @@ export const DEFAULT_EVENT_BUS_HOST = "127.0.0.1";
 
 /** Default event bus port */
 export const DEFAULT_EVENT_BUS_PORT = 9555;
-
-// ============================================
-// REQUEST ID GENERATION
-// ============================================
 
 /** Hex radix for random number generation */
 export const RANDOM_HEX_RADIX = 16;

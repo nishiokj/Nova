@@ -5,10 +5,6 @@
  * Must match Python version in src/harness/graphd/store.py
  */
 
-// ============================================
-// SCHEMA VERSION
-// ============================================
-
 /**
  * Schema version - bump when adding/modifying tables.
  * v1: Initial schema (files, symbols, module_edges, exports, run_artifacts)
@@ -26,10 +22,6 @@ export const GRAPHD_SCHEMA_VERSION = 'v7';
  * GraphD version string.
  */
 export const GRAPHD_VERSION = '0.1.0';
-
-// ============================================
-// DDL STATEMENTS
-// ============================================
 
 /**
  * DDL for creating all GraphD tables.

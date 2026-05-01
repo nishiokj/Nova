@@ -357,6 +357,11 @@ export interface ContractBatchCreateRequest {
     source: string
     confidence: number
     entityIds?: string[]
+    conditions?: Array<{
+      id: string
+      statement: string
+      rationale: string
+    }>
   }>
   requestedBy?: string
 }

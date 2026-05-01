@@ -564,7 +564,13 @@ export function getProvidersByCanonical(canonical: LLMProvider): ProviderDefinit
 }
 
 function normalizeModelId(modelId: string): string {
-  return modelId.trim().toLowerCase();
+  const normalized = modelId.trim().toLowerCase();
+  switch (normalized) {
+    case 'codex-spark':
+      return 'gpt-5.3-codex-spark';
+    default:
+      return normalized;
+  }
 }
 
 /**

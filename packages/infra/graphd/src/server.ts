@@ -1,7 +1,6 @@
 /**
  * HTTP server for GraphD.
  *
- * Ported from: src/harness/graphd/server.py
  *
  * Uses Node.js built-in http module to minimize dependencies.
  */
@@ -11,10 +10,6 @@ import type { Socket } from 'net';
 import { URL } from 'url';
 import type { GraphDManager } from './manager.js';
 import { safeInt } from './utils.js';
-
-// ============================================
-// REQUEST HANDLER
-// ============================================
 
 /**
  * Handle HTTP requests for GraphD.
@@ -332,10 +327,6 @@ export class GraphDRequestHandler {
   }
 }
 
-// ============================================
-// HTTP SERVER
-// ============================================
-
 /**
  * GraphD HTTP server.
  */
@@ -437,10 +428,6 @@ export class GraphDHTTPServer {
     return this.server?.listening ?? false;
   }
 }
-
-// ============================================
-// HEALTH CHECK UTILITY
-// ============================================
 
 /**
  * Check if GraphD server is responding at the given URL.

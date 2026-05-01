@@ -10,9 +10,6 @@
  * Ported from: src/harness/graphd/
  */
 
-// ============================================
-// TYPES
-// ============================================
 export type {
   SymbolDef,
   ModuleEdge,
@@ -48,9 +45,6 @@ export {
   impactItemToDict,
 } from './types.js';
 
-// ============================================
-// SCHEMA
-// ============================================
 export {
   GRAPHD_SCHEMA_VERSION,
   GRAPHD_VERSION,
@@ -62,9 +56,6 @@ export {
   isExportableTable,
 } from './schema.js';
 
-// ============================================
-// UTILITIES
-// ============================================
 export {
   normalizePath,
   denormalizePath,
@@ -83,22 +74,13 @@ export {
   dateToSeconds,
 } from './utils.js';
 
-// ============================================
-// STORE
-// ============================================
 export { GraphStore, SchemaVersionError } from './store.js';
 
-// ============================================
-// SERVER
-// ============================================
 export {
   GraphDRequestHandler,
   GraphDHTTPServer,
   checkHealthy,
 } from './server.js';
 
-// ============================================
-// MANAGER
-// ============================================
 export type { GraphDConfig, GraphDStartOptions } from './manager.js';
 export { GraphDManager, createGraphDConfig } from './manager.js';

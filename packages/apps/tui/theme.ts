@@ -79,10 +79,6 @@ export interface Theme {
   colors: ThemeColors;
 }
 
-// ============================================
-// PRESET THEMES - Based on popular color schemes
-// ============================================
-
 export const themes: Record<string, Theme> = {
   // Catppuccin Mocha - Most popular pastel dark theme
   // https://github.com/catppuccin/catppuccin
@@ -422,10 +418,6 @@ export const themes: Record<string, Theme> = {
     },
   },
 };
-
-// ============================================
-// THEME STATE
-// ============================================
 
 // Load saved theme or default to mocha (Catppuccin)
 const prefs = loadPreferences();

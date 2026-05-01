@@ -43,10 +43,6 @@ const APPEND_ONLY_METADATA_ARRAY_KEYS = new Set([
   'review_decisions',
 ]);
 
-// ============================================
-// ERRORS
-// ============================================
-
 /**
  * Error thrown when database schema version is incompatible.
  */
@@ -63,10 +59,6 @@ export class SchemaVersionError extends Error {
     this.name = 'SchemaVersionError';
   }
 }
-
-// ============================================
-// GRAPH STORE
-// ============================================
 
 /**
  * Persistent, low-churn store of files, symbols, and module edges.
@@ -191,10 +183,6 @@ export class GraphStore {
       .run('schema_version', GRAPHD_SCHEMA_VERSION);
   }
 
-  // =========================================================================
-  // File Operations
-  // =========================================================================
-
   /**
    * Upsert a file record.
    */
@@ -229,10 +217,6 @@ export class GraphStore {
       .get(path) as FileRecord | undefined;
     return row ?? null;
   }
-
-  // =========================================================================
-  // Symbol Operations
-  // =========================================================================
 
   /**
    * Replace all symbols for a file.
@@ -297,10 +281,6 @@ export class GraphStore {
       .all(path) as Record<string, unknown>[];
   }
 
-  // =========================================================================
-  // Module Edge Operations
-  // =========================================================================
-
   /**
    * Replace all module edges for a source file.
    */
@@ -338,10 +318,6 @@ export class GraphStore {
       .all(path) as Record<string, unknown>[];
   }
 
-  // =========================================================================
-  // Export Operations
-  // =========================================================================
-
   /**
    * Replace all exports for a file.
    */
@@ -360,10 +336,6 @@ export class GraphStore {
     });
     transaction();
   }
-
-  // =========================================================================
-  // Bundle Operations (atomic file + symbols + edges + exports)
-  // =========================================================================
 
   /**
    * Upsert a file with all its symbols, edges, and exports atomically.
@@ -428,10 +400,6 @@ export class GraphStore {
     transaction();
   }
 
-  // =========================================================================
-  // Run Artifact Operations
-  // =========================================================================
-
   /**
    * Record a run artifact (test result, build output, etc.).
    */
@@ -448,10 +416,6 @@ export class GraphStore {
       )
       .run(path, kind, JSON.stringify(details), updatedAt);
   }
-
-  // =========================================================================
-  // Stats & Maintenance
-  // =========================================================================
 
   /**
    * Get database statistics.
@@ -509,10 +473,6 @@ export class GraphStore {
       unknown
     >[];
   }
-
-  // =========================================================================
-  // Session Management Methods (v2)
-  // =========================================================================
 
   /**
    * Create a new session.
@@ -855,10 +815,6 @@ export class GraphStore {
     return result.changes;
   }
 
-  // =========================================================================
-  // Conversation Message Methods
-  // =========================================================================
-
   /**
    * Add a message to a session's conversation history.
    */
@@ -958,10 +914,6 @@ export class GraphStore {
       .run(sessionKey);
     return result.changes;
   }
-
-  // =========================================================================
-  // Context Snapshot Methods
-  // =========================================================================
 
   /**
    * Save a context window snapshot for a session.
@@ -1110,10 +1062,6 @@ export class GraphStore {
     return result.changes;
   }
 
-  // =========================================================================
-  // Session Event Methods
-  // =========================================================================
-
   /**
    * Add an event to a session.
    */
@@ -1225,10 +1173,6 @@ export class GraphStore {
     const result = this.db.query(query).run(...params);
     return result.changes;
   }
-
-  // =========================================================================
-  // File Trace Methods (v7)
-  // =========================================================================
 
   /** Max stored bytes per content field (256 KiB). */
   private static readonly FILE_TRACE_MAX_CONTENT_BYTES = 262144;
@@ -1368,10 +1312,6 @@ export class GraphStore {
     createdAt: row.created_at as number,
   });
 
-  // =========================================================================
-  // User Management Methods (v5)
-  // =========================================================================
-
   /**
    * Create or update a user (from Google OAuth).
    */
@@ -1452,10 +1392,6 @@ export class GraphStore {
     const result = this.db.query('DELETE FROM users WHERE id = ?;').run(id);
     return result.changes > 0;
   }
-
-  // =========================================================================
-  // User Session Methods (v5)
-  // =========================================================================
 
   /**
    * Create a new user session (device login).
@@ -1577,10 +1513,6 @@ export class GraphStore {
     return result.changes;
   }
 
-  // =========================================================================
-  // Provider Credential Methods (v5)
-  // =========================================================================
-
   /**
    * Store an encrypted provider credential.
    */
@@ -1681,10 +1613,6 @@ export class GraphStore {
     return row !== undefined;
   }
 
-  // =========================================================================
-  // Session Fork Methods
-  // =========================================================================
-
   /**
    * Fork a session: atomically copy session, context snapshot, and messages.
    */
@@ -1759,10 +1687,6 @@ export class GraphStore {
       return { success: false, error: message };
     }
   }
-
-  // =========================================================================
-  // User Preferences Methods (Key-Value Storage)
-  // =========================================================================
 
   /**
    * Get a user preference value by key.

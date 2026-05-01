@@ -1,7 +1,6 @@
 /**
  * GraphD Manager: persistence, HTTP API, and session management.
  *
- * Ported from: src/harness/graphd/manager.py
  */
 
 import { existsSync, mkdirSync } from 'fs';
@@ -65,10 +64,6 @@ function killProcessOnPort(port: number): boolean {
     return false;
   }
 }
-
-// ============================================
-// CONFIGURATION
-// ============================================
 
 /**
  * GraphD manager configuration.
@@ -172,10 +167,6 @@ export function createGraphDConfig(
     sessionCleanupIntervalS: opts?.sessionCleanupIntervalS ?? 60, // 1 minute
   };
 }
-
-// ============================================
-// MANAGER
-// ============================================
 
 /**
  * GraphD Manager.
@@ -452,10 +443,6 @@ export class GraphDManager {
     }
   }
 
-  // =========================================================================
-  // HTTP API Handlers
-  // =========================================================================
-
   /**
    * Handle /health endpoint.
    */
@@ -608,10 +595,6 @@ export class GraphDManager {
     this.store.recordRunArtifact(rel, kind, details, nowSeconds());
     return { status: 'recorded' };
   }
-
-  // =========================================================================
-  // Session Management (v2)
-  // =========================================================================
 
   /**
    * Create a new session.
@@ -837,10 +820,6 @@ export class GraphDManager {
     }
   }
 
-  // =========================================================================
-  // Message Management
-  // =========================================================================
-
   /**
    * Add a message to a session.
    */
@@ -905,10 +884,6 @@ export class GraphDManager {
     }
   }
 
-  // =========================================================================
-  // Context Snapshot Management
-  // =========================================================================
-
   /**
    * Save a context snapshot.
    */
@@ -961,10 +936,6 @@ export class GraphDManager {
       return { snapshots: [], error: (err as Error).message };
     }
   }
-
-  // =========================================================================
-  // Event Management
-  // =========================================================================
 
   /**
    * Add an event to a session.
@@ -1054,10 +1025,6 @@ export class GraphDManager {
     }
   }
 
-  // =========================================================================
-  // File Trace Management (v7)
-  // =========================================================================
-
   /**
    * Add a file trace for a Write/Edit tool call.
    */
@@ -1115,10 +1082,6 @@ export class GraphDManager {
     }
   }
 
-  // =========================================================================
-  // Session Fork
-  // =========================================================================
-
   /**
    * Fork a session, duplicating context snapshot and messages.
    */
@@ -1143,10 +1106,6 @@ export class GraphDManager {
       return { success: false, error: (err as Error).message };
     }
   }
-
-  // =========================================================================
-  // User Preferences
-  // =========================================================================
 
   /**
    * Get a user preference value.
@@ -1188,10 +1147,6 @@ export class GraphDManager {
       return false;
     }
   }
-
-  // =========================================================================
-  // Private Helpers
-  // =========================================================================
 
   private resolveDbPath(dbPath: string): string {
     if (isAbsolute(dbPath)) {

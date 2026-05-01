@@ -1244,18 +1244,23 @@ export class MetarepoService implements MetarepoApi {
     const contractIds: string[] = []
 
     for (const c of input.contracts) {
+      const hasConditions = c.conditions && c.conditions.length > 0
+      const spec = hasConditions
+        ? buildValidationSpec(c.conditions!, 'compiled')
+        : null
+
       const result = await upsertContract(sql, {
         statement: c.statement,
         type: c.type as import('../../../plugins/entity-graph/src/contracts/types.js').ContractType,
         source: (c.source || 'event') as import('../../../plugins/entity-graph/src/contracts/types.js').ContractSource,
-        status: 'insufficient',
+        status: hasConditions ? 'compiled' : 'insufficient',
         confidence: c.confidence ?? 0.8,
         domainId: null,
         testFilePath: null,
-        verificationPlanJson: null,
+        verificationPlanJson: spec ? serializeValidationSpec(spec) : null,
         verdictRule: null,
         refinedIntent: null,
-        compileStatus: null,
+        compileStatus: hasConditions ? 'compiled' : null,
         lastVerdict: null,
         lastVerdictAt: null,
       }, c.entityIds ?? [])
