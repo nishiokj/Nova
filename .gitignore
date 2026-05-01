@@ -60,10 +60,21 @@ evals/results/
 temp/
 htmlcovrepo-test/
 
-# Skills (installed per-editor, not shared)
-.agent/skills/**/agent-browser/
-.agent/skills/.*/
-.agent/skills/skills/
+# Dev / internal (not for distribution)
+AGENTS.md
+CLAUDE.md
+.env.metarepo
+.env.metarepo.example
+.agent/
+.agents/
+adapters/
+bench/
+benchmark/
+experiments/
+sandbox/
+lab-cli
+contracts/
+docs/
 
 # Release binaries
 dist/binaries/
