@@ -95,6 +95,37 @@ describe('scripts/pr-review-ci', () => {
     expect(markdown).toContain('Contract impact gaps: 0')
   })
 
+  it('renders the impact graph as pure markdown bullets', () => {
+    const review = makeReview()
+    const markdown = formatReviewMarkdown('abcdef1234', '1234abcd', 2, {
+      ...review,
+      blastRadius: {
+        direct: [
+          {
+            entity: review.risks[0].entity,
+            depth: 1,
+            via: 'calls',
+            seedId: review.changedEntities[0].entity.id,
+          },
+        ],
+        transitive: [],
+        totalFiles: 1,
+        totalEntities: 1,
+      },
+    })
+
+    expect(markdown).toContain('### Impact Graph')
+    expect(markdown).toContain('- `run` in `src/a.ts` - `body_changed`')
+    expect(markdown).toContain('  - depth 1 via `calls`: `dep` in `src/b.ts`')
+    expect(markdown).not.toContain('```mermaid')
+  })
+
+  it('shows changed entities with no graph dependents in markdown', () => {
+    const markdown = formatReviewMarkdown('abcdef1234', '1234abcd', 2, makeReview())
+    expect(markdown).toContain('### Impact Graph')
+    expect(markdown).toContain('  - No dependent entities found.')
+  })
+
   it('renders unresolved contract dependents section when impact gaps exist', () => {
     const markdown = formatReviewMarkdown(
       'abcdef1234',

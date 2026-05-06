@@ -209,6 +209,14 @@ export class Agent {
     }
   }
 
+  private emitAgentDiagnostic(message: string, workItemId?: string): void {
+    this.emit(createEvent('agent_progress', {
+      agentType: this.config.type,
+      category: 'diagnostic',
+      message,
+    }, workItemId, this.requestId, this.sessionKey));
+  }
+
   /**
    * Build internal hook context from current state.
    */
@@ -744,7 +752,7 @@ export class Agent {
           maxRetries: 2, // Retry up to 2 times for transient errors
         },
         onRetry: (attempt, error, delayMs) => {
-          console.error(`[AGENT] Retrying LLM call (attempt ${attempt}): ${error.message}, waiting ${delayMs}ms`);
+          this.emitAgentDiagnostic(`Retrying LLM call (attempt ${attempt}): ${error.message}, waiting ${delayMs}ms`);
         },
       }
     );
@@ -839,7 +847,7 @@ export class Agent {
           result.success = false;
           result.terminationReason = 'no_action';
           result.error = `Response is planning text, not actual work: "${responseStart.slice(0, 100)}..."`;
-          console.error(`[AGENT:${this.config.type}] VALIDATION FAILURE: Response is planning-speak, not actual output`);
+          this.emitAgentDiagnostic('Validation failure: response is planning-speak, not actual output', workItem.workId);
         }
       }
 
@@ -1285,22 +1293,22 @@ export class Agent {
         retryAfterMs: error.info.retryAfterMs,
         message: error.info.message,
       };
-      console.error(`[AGENT] Rate limit hit for ${error.provider}/${error.model}: ${error.info.message}`);
+      this.emitAgentDiagnostic(`Rate limit hit for ${error.provider}/${error.model}: ${error.info.message}`, workItemId);
     } else if (error instanceof CircuitOpenError) {
       result.terminationReason = 'circuit_open';
       result.error = message;
-      console.error(`[AGENT] Circuit breaker open: ${message}`);
+      this.emitAgentDiagnostic(`Circuit breaker open: ${message}`, workItemId);
     } else if (error instanceof TimeoutError) {
       result.terminationReason = 'timeout';
       result.error = `LLM call timed out after ${error.timeoutMs}ms`;
-      console.error(`[AGENT] LLM timeout for ${this.config.type}: ${error.timeoutMs}ms`);
+      this.emitAgentDiagnostic(`LLM timeout for ${this.config.type}: ${error.timeoutMs}ms`, workItemId);
     } else if (error instanceof RetriesExhaustedError) {
       // Check if underlying cause was a timeout
       const cause = error.cause;
       if (cause instanceof TimeoutError) {
         result.terminationReason = 'timeout';
         result.error = `LLM call timed out after ${cause.timeoutMs}ms (retries exhausted)`;
-        console.error(`[AGENT] LLM timeout after ${error.attempts} retries: ${cause.timeoutMs}ms`);
+        this.emitAgentDiagnostic(`LLM timeout after ${error.attempts} retries: ${cause.timeoutMs}ms`, workItemId);
       } else if (cause instanceof RateLimitError) {
         result.terminationReason = 'rate_limit';
         result.error = cause.message;
@@ -1311,19 +1319,18 @@ export class Agent {
           retryAfterMs: cause.info.retryAfterMs,
           message: cause.info.message,
         };
-        console.error(`[AGENT] Rate limit persisted after ${error.attempts} attempts for ${cause.provider}/${cause.model}`);
+        this.emitAgentDiagnostic(`Rate limit persisted after ${error.attempts} attempts for ${cause.provider}/${cause.model}`, workItemId);
       } else {
         result.terminationReason = 'agent_error';
         result.error = `Retries exhausted after ${error.attempts} attempts: ${message}`;
-        console.error(`[AGENT] All retries exhausted after ${error.attempts} attempts: ${message}`);
+        this.emitAgentDiagnostic(`All retries exhausted after ${error.attempts} attempts: ${message}`, workItemId);
       }
     } else {
       result.terminationReason = 'agent_error';
       // Include stack trace in error message for debugging (truncated to first 5 lines)
       const stackPreview = stack?.split('\n').slice(0, 5).join('\n');
       result.error = stackPreview ? `${message}\n\nStack:\n${stackPreview}` : message;
-      // Log full stack to console for detailed debugging
-      console.error(`[AGENT] Exception in ${this.config.type}: ${message}`, stack ?? '');
+      this.emitAgentDiagnostic(`Exception in ${this.config.type}: ${message}`, workItemId);
     }
 
     this.emitLlmError(error instanceof Error ? error : new Error(message), workItemId);
@@ -2248,7 +2255,7 @@ export class Agent {
       const message = mergeError instanceof Error ? mergeError.message : String(mergeError);
       const stack = mergeError instanceof Error ? mergeError.stack : undefined;
       postProcessingError = `Artifact extraction/merging failed: ${message}`;
-      console.error(`[AGENT] Sub-agent post-processing error: ${message}`, stack ?? '');
+      this.emitAgentDiagnostic(`Sub-agent post-processing error: ${message}${stack ? `\n${stack}` : ''}`, subWorkItem.workId);
     }
 
     const filesReadCount = subResult.filesRead.length;
@@ -2667,7 +2674,7 @@ export class Agent {
     if (!validated.success) {
       const lenient = this.parseActionOutputLenient(schemaId, parsed, content);
       if (lenient) {
-        console.warn(`[agent] Leniently parsed ${schemaId} structured output after validation failure.`);
+        this.emitAgentDiagnostic(`Leniently parsed ${schemaId} structured output after validation failure.`);
         return lenient;
       }
 
