@@ -396,7 +396,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   const store = useMemo(() => new Store(), []);
   const [snapshot, setSnapshot] = useState(store.getSnapshot());
   const [statusTick, setStatusTick] = useState(0);
-  const [novaFrame, setDolphinFrame] = useState(0);
   const clientRef = useRef<BridgeClient | null>(null);
   const loggerRef = useRef<UILogger | null>(null);
   const fileCacheRef = useRef<FileCache | null>(null);
@@ -500,13 +499,6 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       clearInterval(interval);
     };
   }, [isBusy, store]);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setDolphinFrame((f) => (f + 1) % NOVA_ANIM_FRAMES.length);
-    }, NOVA_ANIM_INTERVAL);
-    return () => clearInterval(interval);
-  }, []);
 
   useEffect(() => {
     return () => {
@@ -2802,6 +2794,9 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     "⡇⠀⢻ ⢇⣀⡸ ⠀⣿⠀ ⡏⠉⢹",
   ];
 
+  const novaFrame = isBusy
+    ? Math.floor(statusTick / Math.max(1, Math.round(NOVA_ANIM_INTERVAL / STATUS_TICK_INTERVAL))) % NOVA_ANIM_FRAMES.length
+    : 0;
   const novaAnim = NOVA_ANIM_FRAMES[novaFrame];
   const gap = "  ";
   const sourceLines = novaAnim.map((line, i) => `${novaTextLines[i]}${gap}${line}`);

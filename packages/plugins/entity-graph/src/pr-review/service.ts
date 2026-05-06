@@ -117,6 +117,8 @@ export function formatReviewMarkdown(
     }
   }
 
+  appendMarkdownImpactGraph(lines, review)
+
   if (deadCode.length > 0) {
     lines.push('')
     lines.push('### Dead Code Candidates')
@@ -147,6 +149,51 @@ export function formatReviewMarkdown(
   return markdown.length > 60000
     ? `${markdown.slice(0, 60000)}\n\n_Comment truncated due to size._`
     : markdown
+}
+
+function appendMarkdownImpactGraph(lines: string[], review: PRReview): void {
+  if (review.changedEntities.length === 0) return
+
+  const dependentsBySeed = new Map<string, PRReview['blastRadius']['direct']>()
+  for (const entry of [...review.blastRadius.direct, ...review.blastRadius.transitive]) {
+    const entries = dependentsBySeed.get(entry.seedId) ?? []
+    entries.push(entry)
+    dependentsBySeed.set(entry.seedId, entries)
+  }
+
+  lines.push('')
+  lines.push('### Impact Graph')
+
+  for (const change of review.changedEntities.slice(0, 12)) {
+    lines.push(`- ${formatEntityNode(change.entity)} - \`${change.changeKind}\``)
+
+    const dependents = (dependentsBySeed.get(change.entity.id) ?? [])
+      .sort((a, b) => a.depth - b.depth || a.via.localeCompare(b.via) || a.entity.filepath.localeCompare(b.entity.filepath) || a.entity.id.localeCompare(b.entity.id))
+
+    if (dependents.length === 0) {
+      lines.push('  - No dependent entities found.')
+      continue
+    }
+
+    for (const entry of dependents.slice(0, 8)) {
+      lines.push(`  - depth ${entry.depth} via \`${entry.via}\`: ${formatEntityNode(entry.entity)}`)
+    }
+    if (dependents.length > 8) {
+      lines.push(`  - ...and ${dependents.length - 8} more dependents`)
+    }
+  }
+
+  if (review.changedEntities.length > 12) {
+    lines.push(`- ...and ${review.changedEntities.length - 12} more changed entities`)
+  }
+}
+
+function formatEntityNode(entity: PRReview['changedEntities'][number]['entity']): string {
+  return `\`${sanitizeInlineCode(entity.name)}\` in \`${sanitizeInlineCode(entity.filepath)}\``
+}
+
+function sanitizeInlineCode(value: string): string {
+  return value.replace(/`/g, '\\`').replace(/\n/g, ' ').trim()
 }
 
 export function sanitizeCell(value: string): string {

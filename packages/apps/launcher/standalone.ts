@@ -117,10 +117,13 @@ async function main(): Promise<void> {
   } else {
     // Start daemon in-process, then TUI
     const { HarnessDaemon } = await import('../../infra/harness-daemon/src/harness/daemon.js');
+    const { createFileLogger } = await import('../../infra/harness-daemon/src/harness/harness_infra.js');
+    const daemonLogger = createFileLogger('logs');
 
     const daemon = new HarnessDaemon({
       configPath: configPath ?? undefined,
       idleTimeoutMs: 0, // Disable idle timeout in standalone mode
+      statusWriter: (message) => daemonLogger.info(message.trimEnd()),
     });
 
     // Run daemon startup
@@ -142,6 +145,7 @@ async function main(): Promise<void> {
     } finally {
       // Clean shutdown
       await daemon.stop();
+      daemonLogger.close();
     }
 
     process.exit(0);

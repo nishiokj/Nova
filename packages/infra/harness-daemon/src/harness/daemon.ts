@@ -22,6 +22,8 @@ export interface HarnessDaemonOptions {
   idleTimeoutMs?: number;
   /** Dangerous mode - bypasses all permission checks. Use with extreme caution. */
   dangerousMode?: boolean;
+  /** Receives daemon lifecycle/status messages. Defaults to stderr for CLI mode. */
+  statusWriter?: (message: string) => void;
 }
 
 // Default idle timeout: 5 seconds
@@ -49,6 +51,7 @@ export class HarnessDaemon {
   private readonly configPath?: string;
   private readonly idleTimeoutMs: number;
   private readonly dangerousMode: boolean;
+  private readonly statusWriter: (message: string) => void;
   private harness: AgentHarness | null = null;
   private bus: BusServer | null = null;
   private gateway: BridgeGateway | null = null;
@@ -65,6 +68,11 @@ export class HarnessDaemon {
     this.configPath = options.configPath;
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
     this.dangerousMode = options.dangerousMode ?? false;
+    this.statusWriter = options.statusWriter ?? ((message) => process.stderr.write(message));
+  }
+
+  private writeStatus(message: string): void {
+    this.statusWriter(message.endsWith('\n') ? message : `${message}\n`);
   }
 
   private cancelIdleTimer(): void {
@@ -78,11 +86,11 @@ export class HarnessDaemon {
     if (this.idleTimeoutMs <= 0 || this.shutdownRequested) return;
 
     this.cancelIdleTimer();
-    process.stderr.write(`[harness-daemon] No clients connected, will shutdown in ${this.idleTimeoutMs / 1000}s\n`);
+    this.writeStatus(`[harness-daemon] No clients connected, will shutdown in ${this.idleTimeoutMs / 1000}s`);
 
     this.idleTimer = setTimeout(() => {
       if (this.bus?.getConnectionCount() === 0) {
-        process.stderr.write('[harness-daemon] Idle timeout reached, shutting down\n');
+        this.writeStatus('[harness-daemon] Idle timeout reached, shutting down');
         this.shutdownRequested = true;
         void this.stop().then(() => process.exit(0));
       }
@@ -90,7 +98,7 @@ export class HarnessDaemon {
   }
 
   private handleConnect(connectionId: string): void {
-    process.stderr.write(`[harness-daemon] Client connected: ${connectionId}\n`);
+    this.writeStatus(`[harness-daemon] Client connected: ${connectionId}`);
     this.cancelIdleTimer();
   }
 
@@ -98,7 +106,7 @@ export class HarnessDaemon {
     this.gateway?.handleDisconnect(connectionId);
 
     const remaining = this.bus?.getConnectionCount() ?? 0;
-    process.stderr.write(`[harness-daemon] Client disconnected: ${connectionId}, remaining: ${remaining}\n`);
+    this.writeStatus(`[harness-daemon] Client disconnected: ${connectionId}, remaining: ${remaining}`);
 
     if (remaining === 0) {
       this.startIdleTimer();
@@ -120,7 +128,7 @@ export class HarnessDaemon {
     if (!this.authService && this.authConfig) {
       this.authService = createAuthServiceFromConfig(this.authConfig);
       if (this.authService) {
-        process.stderr.write('[harness-daemon] Auth service initialized\n');
+        this.writeStatus('[harness-daemon] Auth service initialized');
       }
     }
 
@@ -174,7 +182,7 @@ export class HarnessDaemon {
    * This method is a no-op and will be removed in a future version.
    */
   setDangerousMode(_enabled: boolean): void {
-    process.stderr.write('[harness-daemon] setDangerousMode() is deprecated - dangerous mode is now per-session. Use set_dangerous_mode command via bridge.\n');
+    this.writeStatus('[harness-daemon] setDangerousMode() is deprecated - dangerous mode is now per-session. Use set_dangerous_mode command via bridge.');
   }
 
   /**
