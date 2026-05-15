@@ -18,7 +18,8 @@ import type {
 import { Effect, Stream } from 'effect';
 import type { ProviderContext, LLMProviderAdapter } from './types.js';
 import { PartialStreamError, toLLMExecutionError } from './types.js';
-import { getProviderResponseFormat } from 'types';
+import { getProviderResponseFormat, getProviderThinkingDialect } from 'types';
+import type { ThinkingDialect } from 'types';
 import {
   createRateLimitError,
 } from '../rate-limits.js';
@@ -226,6 +227,28 @@ function stripToolCallTags(text: string): string {
 
 function buildSchemaInstruction(schema: Record<string, unknown>): string {
   return `Return a single JSON object that matches this schema:\n${JSON.stringify(schema)}`;
+}
+
+/**
+ * Build the provider-specific `thinking` body for openai-compat reasoning toggles.
+ * Both dialects are opt-in: we only emit the field when the caller enables
+ * reasoning. For Kimi K2.6 on DeepInfra, `type:'disabled'` does NOT suppress
+ * reasoning generation (verified empirically — the model emits reasoning_content
+ * either way), so sending a disable would be a no-op. The enabled body
+ * additionally requests history preservation (`keep:'all'`/`clear_thinking:false`).
+ */
+function buildThinkingBody(
+  dialect: ThinkingDialect,
+  enabled: boolean
+): Record<string, unknown> | undefined {
+  if (!enabled) return undefined;
+  return dialect === 'kimi'
+    ? { type: 'enabled', keep: 'all' }
+    : { type: 'enabled', clear_thinking: false };
+}
+
+function reasoningEnabled(effort: string | undefined): boolean {
+  return !!effort && effort !== 'none';
 }
 
 
@@ -509,14 +532,15 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       body.temperature = params.temperature ?? resolved.temperature;
     }
 
-    // z.ai-coder uses GLM's thinking API instead of standard reasoning
-    const isZaiCoder = resolved.displayProvider === 'z.ai-coder';
-
-    if (isZaiCoder && resolved.reasoning?.effort && resolved.reasoning.effort !== 'none') {
-      body.thinking = {
-        type: 'enabled',
-        clear_thinking: false, // Preserve thinking across turns for multi-turn salience
-      };
+    // Providers like z.ai-coder (GLM) and DeepInfra (Kimi) drive reasoning via
+    // a `thinking` body field instead of OpenAI's `reasoning_effort`.
+    const thinkingDialect = getProviderThinkingDialect(resolved.displayProvider);
+    if (thinkingDialect) {
+      const thinkingBody = buildThinkingBody(
+        thinkingDialect,
+        reasoningEnabled(resolved.reasoning?.effort)
+      );
+      if (thinkingBody) body.thinking = thinkingBody;
     }
 
     if (params.tools && params.tools.length > 0 && !useQwenSkin) {
@@ -766,19 +790,22 @@ export class OpenAICompatProvider implements LLMProviderAdapter {
       body.temperature = params.temperature ?? resolved.temperature;
     }
 
-    // z.ai-coder uses GLM's thinking API instead of standard reasoning
-    const isZaiCoder = resolved.displayProvider === 'z.ai-coder';
-
-    if (isZaiCoder && resolved.reasoning?.effort && resolved.reasoning.effort !== 'none') {
-      body.thinking = {
-        type: 'enabled',
-        clear_thinking: false, // Preserve thinking across turns for multi-turn salience
-      };
-      // Enable tool_stream to get reasoning_content with tool calls
-      body.tool_stream = true;
-      logger.debug('z.ai-coder thinking enabled for stream', {
+    const thinkingDialect = getProviderThinkingDialect(resolved.displayProvider);
+    if (thinkingDialect) {
+      const thinkingEnabled = reasoningEnabled(resolved.reasoning?.effort);
+      const thinkingBody = buildThinkingBody(thinkingDialect, thinkingEnabled);
+      if (thinkingBody) body.thinking = thinkingBody;
+      // GLM requires tool_stream=true to interleave reasoning_content with tool call
+      // deltas; Kimi streams reasoning_content unconditionally.
+      if (thinkingEnabled && thinkingDialect === 'glm') {
+        body.tool_stream = true;
+      }
+      logger.debug('thinking dispatch for stream', {
         model: resolved.model,
-        effort: resolved.reasoning.effort,
+        displayProvider: resolved.displayProvider,
+        dialect: thinkingDialect,
+        enabled: thinkingEnabled,
+        effort: resolved.reasoning?.effort,
       });
     }
 

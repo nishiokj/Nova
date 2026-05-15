@@ -802,6 +802,25 @@ describe('OpenAIProvider tool skin integration', () => {
       expect(calls[0].arguments.input).toBe(patchText);
     });
 
+    it('should unwrap apply_patch JSON fallback arguments', () => {
+      const patchText = '*** Begin Patch\n*** Add File: test.ts\n+hello\n*** End Patch';
+      const response = {
+        output: [
+          {
+            type: 'function_call',
+            call_id: 'call_3_json',
+            name: 'apply_patch',
+            arguments: JSON.stringify({ input: patchText }),
+          },
+        ],
+      };
+
+      const calls = (provider as any).parseToolCalls(response);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].name).toBe('apply_patch');
+      expect(calls[0].arguments.input).toBe(patchText);
+    });
+
     it('should pass through unknown tool names', () => {
       const response = {
         output: [

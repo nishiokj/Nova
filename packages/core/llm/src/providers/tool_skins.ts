@@ -154,8 +154,23 @@ export const APPLY_PATCH_DESCRIPTION =
   '```';
 
 export const APPLY_PATCH_JSON_DESCRIPTION =
-  APPLY_PATCH_DESCRIPTION +
-  '\n\nProvide the entire patch as the `input` field value.';
+  'Use the `apply_patch` tool to edit files.\n\n' +
+  'Provide the entire patch as the `input` field value. The `input` string must use this patch format:\n' +
+  '```\n' +
+  '*** Begin Patch\n' +
+  '*** Add File: <path>\n' +
+  '+<line>\n' +
+  '\n' +
+  '*** Delete File: <path>\n' +
+  '\n' +
+  '*** Update File: <path>\n' +
+  '[*** Move to: <new-path>]\n' +
+  '@@ <optional context>\n' +
+  ' <context line>\n' +
+  '-<removed line>\n' +
+  '+<added line>\n' +
+  '*** End Patch\n' +
+  '```';
 
 // ============================================
 // MODEL CAPABILITY

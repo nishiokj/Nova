@@ -9,24 +9,23 @@ import {
 } from 'harness-client';
 import { HarnessDaemon } from '../harness/daemon.js';
 
-interface AgentResultIds {
-  run_id: string;
-  trial_id: string;
-  variant_id: string;
-  task_id: string;
-  repl_idx: number;
-}
-
-interface AgentResult {
-  schema_version: 'agent_result_v1';
-  ids: AgentResultIds;
-  outcome: 'success' | 'failure' | 'missing' | 'error';
-  answer?: string | Record<string, unknown> | unknown[];
-  metrics?: Record<string, string | number | boolean | null>;
+interface RunOutput {
+  request_id: string;
+  response?: string | Record<string, unknown> | unknown[];
+  model?: {
+    provider: string;
+    model: string;
+  };
+  usage?: {
+    latency_ms: number;
+    tokens_in: number;
+    tokens_out: number;
+    model_calls: number;
+    tool_calls: number;
+  };
   error?: {
-    error_type?: string;
-    message?: string;
-    stack?: string;
+    type: string;
+    message: string;
   };
 }
 
@@ -44,7 +43,6 @@ interface ModelSelection {
 }
 
 interface RunInputPayload {
-  ids?: Partial<AgentResultIds>;
   task?: Record<string, unknown>;
   bindings?: Record<string, unknown>;
 }
@@ -74,7 +72,6 @@ interface RunCliOptions {
 }
 
 interface PreparedRunInput {
-  ids?: Partial<AgentResultIds>;
   task: Record<string, unknown>;
   bindings?: Record<string, unknown>;
 }
@@ -126,6 +123,11 @@ function asNonEmptyString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function truncateText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n...[truncated ${value.length - maxChars} chars]`;
 }
 
 function parsePositiveInt(raw: string, flag: string): number {
@@ -384,7 +386,7 @@ function appendJsonl(path: string, value: Record<string, unknown>): void {
   appendFileSync(path, `${JSON.stringify(value)}\n`, 'utf8');
 }
 
-function writeAgentResult(path: string, output: AgentResult): void {
+function writeRunOutput(path: string, output: RunOutput): void {
   const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
   if (parent) mkdirSync(parent, { recursive: true });
   writeFileSync(path, `${JSON.stringify(output, null, 2)}\n`, 'utf8');
@@ -414,7 +416,7 @@ function parseInputFile(path: string): { task: Record<string, unknown>; payload?
     if (!isRecord(parsed)) {
       throw new Error('Input JSON must be an object');
     }
-    if (isRecord(parsed.task) || isRecord(parsed.bindings) || isRecord(parsed.ids)) {
+    if (isRecord(parsed.task) || isRecord(parsed.bindings)) {
       const payload = parsed as RunInputPayload;
       if (!payload.task || !isRecord(payload.task)) {
         throw new Error('Input payload has no task object');
@@ -469,21 +471,8 @@ function prepareRunInput(options: RunCliOptions): PreparedRunInput {
   const payload = parsed.payload;
 
   return {
-    ids: payload?.ids,
     task: parsed.task,
     bindings: bindingsFromFile ?? payload?.bindings,
-  };
-}
-
-function resolveIds(inputIds: Partial<AgentResultIds> | undefined, sessionKey: string): AgentResultIds {
-  const replFromInput = Number(inputIds?.repl_idx);
-
-  return {
-    run_id: inputIds?.run_id ?? 'unknown_run',
-    trial_id: inputIds?.trial_id ?? sessionKey,
-    variant_id: inputIds?.variant_id ?? 'unknown_variant',
-    task_id: inputIds?.task_id ?? 'unknown_task',
-    repl_idx: Number.isFinite(replFromInput) ? replFromInput : 0,
   };
 }
 
@@ -602,13 +591,13 @@ async function maybeSaveProviderKeys(
   }
 }
 
-function printAnswerFromResult(output: AgentResult): void {
-  if (typeof output.answer === 'string') {
-    process.stdout.write(output.answer.endsWith('\n') ? output.answer : `${output.answer}\n`);
+function printResponse(output: RunOutput): void {
+  if (typeof output.response === 'string') {
+    process.stdout.write(output.response.endsWith('\n') ? output.response : `${output.response}\n`);
     return;
   }
-  if (output.answer !== undefined) {
-    process.stdout.write(`${JSON.stringify(output.answer, null, 2)}\n`);
+  if (output.response !== undefined) {
+    process.stdout.write(`${JSON.stringify(output.response, null, 2)}\n`);
     return;
   }
   if (output.error?.message) {
@@ -624,7 +613,6 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
     throw new Error('No prompt found in input task (expected task.input.prompt or task.prompt)');
   }
 
-  const ids = resolveIds(prepared.ids, options.sessionKey);
   const baseModelSelection = options.modelSelection ?? extractModelSelection(prepared.bindings);
   const modelSelection = baseModelSelection
     ? {
@@ -647,6 +635,7 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
     idleTimeoutMs: 0,
   });
 
+  const requestId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = Date.now();
   let streamText = '';
   let tokensIn = 0;
@@ -654,7 +643,8 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
   let modelCallCount = 0;
   let toolCallCount = 0;
   let seq = 0;
-  const stepIndex = 0;
+  let lastProvider: string | undefined;
+  let lastModel: string | undefined;
   let client: HarnessClient | null = null;
 
   const appendHookEvent = (event: Record<string, unknown>) => {
@@ -663,8 +653,7 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
       hooks_schema_version: 'hook_events_v1',
       ts: new Date().toISOString(),
       seq: seq++,
-      ids,
-      step_index: stepIndex,
+      request_id: requestId,
       ...event,
     };
     appendJsonl(options.eventsPath, payload);
@@ -701,6 +690,8 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
         modelCallCount += 1;
         const provider = asNonEmptyString(event.data?.provider) ?? 'unknown';
         const model = asNonEmptyString(event.data?.model) ?? 'unknown';
+        lastProvider = provider;
+        lastModel = model;
         appendHookEvent({
           event_type: 'model_call_end',
           call_id: `model_${modelCallCount}`,
@@ -724,6 +715,11 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
           event_type: 'tool_call_end',
           call_id: `tool_${toolCallCount}`,
           tool: { name: toolName },
+          input: isRecord(data.tool_args) ? { arguments: data.tool_args } : undefined,
+          output:
+            typeof data.tool_result === 'string'
+              ? { text: truncateText(data.tool_result, 8000) }
+              : undefined,
           outcome: { status: data.tool_success ? 'ok' : 'error' },
           timing:
             typeof data.duration_ms === 'number' && Number.isFinite(data.duration_ms)
@@ -791,31 +787,25 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
         },
       });
 
-      const output: AgentResult = {
-        schema_version: 'agent_result_v1',
-        ids,
-        outcome: 'success',
-        metrics: {
-          success: 1,
+      const output: RunOutput = {
+        request_id: requestId,
+        usage: {
           latency_ms: Date.now() - startedAt,
-          total_tokens: tokensIn + tokensOut,
           tokens_in: tokensIn,
           tokens_out: tokensOut,
-          turn_count: modelCallCount,
-          tool_call_count: toolCallCount,
-          preflight_smoke: 1,
+          model_calls: modelCallCount,
+          tool_calls: toolCallCount,
         },
       };
 
       if (options.outputPath) {
-        writeAgentResult(options.outputPath, output);
+        writeRunOutput(options.outputPath, output);
       } else {
-        printAnswerFromResult(output);
+        printResponse(output);
       }
       return;
     }
 
-    const requestId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const responsePromise = waitForRunResponse(client, requestId, options.timeoutMs);
     const sent = client.send({
       type: 'send_text',
@@ -844,34 +834,32 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
       },
     });
 
-    const output: AgentResult = {
-      schema_version: 'agent_result_v1',
-      ids,
-      outcome: success ? 'success' : 'failure',
-      ...(answer ? { answer } : {}),
-      metrics: {
-        success: success ? 1 : 0,
+    const output: RunOutput = {
+      request_id: requestId,
+      ...(answer ? { response: answer } : {}),
+      ...(lastProvider && lastModel
+        ? { model: { provider: lastProvider, model: lastModel } }
+        : {}),
+      usage: {
         latency_ms: latencyMs,
-        total_tokens: tokensIn + tokensOut,
         tokens_in: tokensIn,
         tokens_out: tokensOut,
-        turn_count: modelCallCount,
-        tool_call_count: toolCallCount,
+        model_calls: modelCallCount,
+        tool_calls: toolCallCount,
       },
       ...(run.error
-        ? {
-            error: {
-              error_type: 'harness_run_error',
-              message: run.error,
-            },
-          }
+        ? { error: { type: 'harness_run_error', message: run.error } }
         : {}),
     };
 
     if (options.outputPath) {
-      writeAgentResult(options.outputPath, output);
+      writeRunOutput(options.outputPath, output);
     } else {
-      printAnswerFromResult(output);
+      printResponse(output);
+    }
+
+    if (!success) {
+      process.exitCode = 1;
     }
   } catch (error) {
     appendHookEvent({
@@ -880,30 +868,28 @@ export async function runHarnessRunCli(rawArgs: string[] = process.argv.slice(2)
       message: error instanceof Error ? error.message : String(error),
     });
 
-    const output: AgentResult = {
-      schema_version: 'agent_result_v1',
-      ids,
-      outcome: 'error',
-      metrics: {
-        success: 0,
+    const output: RunOutput = {
+      request_id: requestId,
+      ...(lastProvider && lastModel
+        ? { model: { provider: lastProvider, model: lastModel } }
+        : {}),
+      usage: {
         latency_ms: Date.now() - startedAt,
-        total_tokens: tokensIn + tokensOut,
         tokens_in: tokensIn,
         tokens_out: tokensOut,
-        turn_count: modelCallCount,
-        tool_call_count: toolCallCount,
+        model_calls: modelCallCount,
+        tool_calls: toolCallCount,
       },
       error: {
-        error_type: 'run_error',
+        type: 'run_error',
         message: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
       },
     };
 
     if (options.outputPath) {
-      writeAgentResult(options.outputPath, output);
+      writeRunOutput(options.outputPath, output);
     } else {
-      printAnswerFromResult(output);
+      printResponse(output);
     }
     throw error;
   } finally {
