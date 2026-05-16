@@ -804,9 +804,28 @@ export class OpenAIProvider implements LLMProviderAdapter {
       typeof id === 'string' && id.length > 0;
 
     const translateCall = (callId: string, codexName: string, argsRaw: unknown): ToolCall | null => {
-      // apply_patch: raw text payload, not JSON
+      // apply_patch: custom calls send raw text, JSON fallback sends { input: text }.
       if (codexName === 'apply_patch') {
-        const rawText = typeof argsRaw === 'string' ? argsRaw : '';
+        let rawText = '';
+        if (typeof argsRaw === 'string') {
+          rawText = argsRaw;
+          try {
+            const parsed = JSON.parse(argsRaw) as unknown;
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+              const argsObj = parsed as Record<string, unknown>;
+              if (typeof argsObj.input === 'string') {
+                rawText = argsObj.input;
+              }
+            }
+          } catch {
+            // Raw apply_patch text is expected for custom/freeform calls.
+          }
+        } else if (argsRaw && typeof argsRaw === 'object' && !Array.isArray(argsRaw)) {
+          const argsObj = argsRaw as Record<string, unknown>;
+          if (typeof argsObj.input === 'string') {
+            rawText = argsObj.input;
+          }
+        }
         return {
           id: callId,
           name: 'apply_patch',

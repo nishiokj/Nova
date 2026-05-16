@@ -17,6 +17,7 @@ function requireEnv(name: string): string {
 export function loadConfigFromEnv(): ServiceConfig {
   return {
     port: parsePositiveInt(process.env.PORT, 8080),
+    host: process.env.HOST?.trim() || '127.0.0.1',
     databaseUrl: requireEnv('METAREPO_DATABASE_URL'),
     workdir: requireEnv('METAREPO_WORKDIR'),
     gitBin: process.env.GIT_BIN ?? 'git',

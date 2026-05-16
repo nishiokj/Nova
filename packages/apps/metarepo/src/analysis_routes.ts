@@ -7,16 +7,22 @@ import {
   ValidationError,
 } from './service.js'
 import type {
+  BehaviorClaimStatus,
   BlueAssignRequest,
+  BlueAssignClaimRequest,
+  BlueClaimDefenseInput,
   BlueHandoffInput,
   ContractInterviewRequest,
+  CreateBehaviorClaimInput,
   CreateBugInput,
+  CreateBlueClaimDefenseRequest,
   CreateBlueHandoffRequest,
   CreateEnvProfileInput,
   CreateRepoInput,
   CreateSecretRefInput,
   MetarepoApi,
   MutationVerdictInput,
+  RedMutateRecordRequest,
   RefereeRunRequest,
   UpdateRepoInput,
 } from './types.js'
@@ -163,6 +169,18 @@ function parseCreateBugInput(body: unknown): CreateBugInput {
   }
 }
 
+function parseCreateBehaviorClaimInput(body: unknown): CreateBehaviorClaimInput {
+  const payload = asObject(body)
+  return {
+    behavior: asString(payload.behavior, 'behavior'),
+    scope: payload.scope as CreateBehaviorClaimInput['scope'],
+    evidence: payload.evidence as CreateBehaviorClaimInput['evidence'],
+    source: optionalString(payload.source),
+    status: optionalString(payload.status) as BehaviorClaimStatus | undefined,
+    sourceFingerprint: payload.sourceFingerprint as CreateBehaviorClaimInput['sourceFingerprint'],
+  }
+}
+
 function parseCreateEnvProfileInput(body: unknown): CreateEnvProfileInput {
   const payload = asObject(body)
   return {
@@ -200,6 +218,26 @@ function parseCreateBlueHandoffInput(body: unknown): CreateBlueHandoffRequest {
       bugIds: optionalStringArray(handoff.bugIds, 'handoff.bugIds'),
       contractIds: optionalStringArray(handoff.contractIds, 'handoff.contractIds'),
     } satisfies BlueHandoffInput,
+  }
+}
+
+function parseCreateBlueClaimDefenseInput(body: unknown): CreateBlueClaimDefenseRequest {
+  const payload = asObject(body)
+  const defense = asObject(payload.defense, 'defense')
+  return {
+    repoId: asString(payload.repoId, 'repoId'),
+    requestedBy: optionalString(payload.requestedBy),
+    sourceFingerprint: payload.sourceFingerprint as CreateBlueClaimDefenseRequest['sourceFingerprint'],
+    source: payload.source as { ref?: string } | undefined,
+    defense: {
+      assignmentArtifactId: asString(defense.assignmentArtifactId, 'defense.assignmentArtifactId'),
+      testFiles: stringArray(defense.testFiles, 'defense.testFiles'),
+      changedFiles: optionalStringArray(defense.changedFiles, 'defense.changedFiles'),
+      testCommand: stringArray(defense.testCommand, 'defense.testCommand'),
+      summary: optionalString(defense.summary),
+      notes: optionalString(defense.notes),
+      bugIds: optionalStringArray(defense.bugIds, 'defense.bugIds'),
+    } satisfies BlueClaimDefenseInput,
   }
 }
 
@@ -348,6 +386,12 @@ async function dispatchRpc(api: MetarepoApi, method: string, body: unknown): Pro
         requestedBy: optionalString(payload.requestedBy),
         source: payload.source as BlueAssignRequest['source'],
       })
+    case 'blue.assign-claim':
+      return api.blueAssignClaim({
+        repoId: asString(payload.repoId, 'repoId'),
+        selector: optionalString(payload.selector),
+        requestedBy: optionalString(payload.requestedBy),
+      } satisfies BlueAssignClaimRequest)
     case 'test.recent_paths':
       return api.testRecentPaths({
         repoId: asString(payload.repoId, 'repoId'),
@@ -391,6 +435,7 @@ async function dispatchRpc(api: MetarepoApi, method: string, body: unknown): Pro
       return api.startRedMutate({
         repoId: asString(payload.repoId, 'repoId'),
         proposal: asObject(payload.proposal, 'proposal') as never,
+        claimId: optionalString(payload.claimId),
         requestedBy: optionalString(payload.requestedBy),
         source: payload.source as { ref?: string } | undefined,
       })
@@ -398,8 +443,18 @@ async function dispatchRpc(api: MetarepoApi, method: string, body: unknown): Pro
       return api.redMutate({
         repoId: asString(payload.repoId, 'repoId'),
         proposal: asObject(payload.proposal, 'proposal') as never,
+        claimId: optionalString(payload.claimId),
         requestedBy: optionalString(payload.requestedBy),
         source: payload.source as { ref?: string } | undefined,
+      })
+    case 'red.mutate.record':
+      return api.recordRedMutate({
+        repoId: asString(payload.repoId, 'repoId'),
+        proposal: asObject(payload.proposal, 'proposal') as never,
+        result: asObject(payload.result, 'result') as unknown as RedMutateRecordRequest['result'],
+        claimId: optionalString(payload.claimId),
+        sourceFingerprint: payload.sourceFingerprint as RedMutateRecordRequest['sourceFingerprint'],
+        requestedBy: optionalString(payload.requestedBy),
       })
     case 'referee.run':
       return api.refereeRun({
@@ -468,6 +523,16 @@ export function createRequestListener(api: MetarepoApi) {
         return
       }
 
+      const repoBlueDefensesMatch = pathname.match(/^\/repos\/([^/]+)\/blue-defenses$/)
+      if (repoBlueDefensesMatch && method === 'POST') {
+        const parsed = parseCreateBlueClaimDefenseInput(await readJsonBody(req))
+        sendJson(res, 201, await api.createBlueClaimDefense({
+          ...parsed,
+          repoId: decodeURIComponent(repoBlueDefensesMatch[1]),
+        }))
+        return
+      }
+
       const repoLatestBlueHandoffMatch = pathname.match(/^\/repos\/([^/]+)\/blue-handoffs\/latest$/)
       if (repoLatestBlueHandoffMatch && method === 'GET') {
         sendJson(res, 200, await api.getLatestBlueHandoff(decodeURIComponent(repoLatestBlueHandoffMatch[1])))
@@ -492,6 +557,23 @@ export function createRequestListener(api: MetarepoApi) {
         sendJson(res, 201, await api.createBug(
           decodeURIComponent(repoBugsMatch[1]),
           parseCreateBugInput(await readJsonBody(req)),
+        ))
+        return
+      }
+
+      const repoClaimsMatch = pathname.match(/^\/repos\/([^/]+)\/claims$/)
+      if (repoClaimsMatch && method === 'GET') {
+        const status = url.searchParams.get('status') as BehaviorClaimStatus | null
+        sendJson(res, 200, await api.listBehaviorClaims(
+          decodeURIComponent(repoClaimsMatch[1]),
+          status ?? undefined,
+        ))
+        return
+      }
+      if (repoClaimsMatch && method === 'POST') {
+        sendJson(res, 201, await api.createBehaviorClaim(
+          decodeURIComponent(repoClaimsMatch[1]),
+          parseCreateBehaviorClaimInput(await readJsonBody(req)),
         ))
         return
       }

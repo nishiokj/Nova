@@ -284,6 +284,7 @@ export type {
   ProviderModelDefinition,
   ProviderModelEntry,
   ReasoningOptions,
+  ThinkingDialect,
 } from './providers.js';
 
 export {
@@ -303,6 +304,7 @@ export {
   getProviderTestEndpoint,
   getProviderDashboardUrl,
   getProviderResponseFormat,
+  getProviderThinkingDialect,
   providerRequiresAuth,
   getProviderDefinition,
   getAllProviders,

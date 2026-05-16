@@ -627,20 +627,10 @@ export class CodexProvider implements LLMProviderAdapter {
         if (!callId || !name) continue;
         let args = item.arguments as string | Record<string, unknown> | undefined;
 
-        if (name === 'apply_patch' && typeof args === 'string') {
-          try {
-            const parsed = JSON.parse(args) as Record<string, unknown>;
-            if (typeof parsed.input === 'string') {
-              args = parsed.input;
-            }
-          } catch {
-            // Keep raw patch text as-is.
-          }
-        } else if (name === 'apply_patch' && typeof args === 'object') {
-          const argsObj = args;
-          if (typeof argsObj.input === 'string') {
-            args = argsObj.input;
-          }
+        if (name === 'apply_patch') {
+          const patchInput = this.extractApplyPatchInput(args);
+          if (!patchInput) continue;
+          args = JSON.stringify({ input: patchInput });
         }
 
         // Translate Nova args → Codex args so the model sees its native param names
@@ -756,27 +746,12 @@ export class CodexProvider implements LLMProviderAdapter {
     if (!codexName) return null;
 
     if (codexName === 'apply_patch') {
-      if (typeof argsRaw === 'string') {
-        return {
-          id: callId,
-          name: 'apply_patch',
-          arguments: { input: argsRaw },
-        };
-      }
-      if (argsRaw && typeof argsRaw === 'object' && !Array.isArray(argsRaw)) {
-        const argsObj = argsRaw as Record<string, unknown>;
-        if (typeof argsObj.input === 'string') {
-          return {
-            id: callId,
-            name: 'apply_patch',
-            arguments: { input: argsObj.input },
-          };
-        }
-      }
+      const patchInput = this.extractApplyPatchInput(argsRaw);
+      if (!patchInput) return null;
       return {
         id: callId,
         name: 'apply_patch',
-        arguments: { input: '' },
+        arguments: { input: patchInput },
       };
     }
 
@@ -787,6 +762,36 @@ export class CodexProvider implements LLMProviderAdapter {
     const novaName = CODEX_TO_NOVA[codexName] ?? codexName;
 
     return { id: callId, name: novaName, arguments: args };
+  }
+
+  private extractApplyPatchInput(argsRaw: unknown): string | null {
+    if (typeof argsRaw === 'string') {
+      const trimmed = argsRaw.trim();
+      if (!trimmed) return null;
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const input = (parsed as Record<string, unknown>).input;
+          return this.normalizeApplyPatchText(input);
+        }
+        return null;
+      } catch {
+        return this.normalizeApplyPatchText(argsRaw);
+      }
+    }
+
+    if (argsRaw && typeof argsRaw === 'object' && !Array.isArray(argsRaw)) {
+      return this.normalizeApplyPatchText((argsRaw as Record<string, unknown>).input);
+    }
+
+    return null;
+  }
+
+  private normalizeApplyPatchText(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trimStart();
+    if (!trimmed.startsWith('*** Begin Patch')) return null;
+    return value;
   }
 
   private parseOutputItemText(item: Record<string, unknown>): string {

@@ -1,7 +1,13 @@
 import type {
   ArtifactRecord,
+  BehaviorClaimRecord,
+  BehaviorClaimStatus,
   BlueAssignmentRecord,
+  BlueAssignClaimRequest,
   BlueAssignRequest,
+  BlueClaimAssignmentRecord,
+  BlueClaimDefenseInput,
+  BlueClaimDefenseRecord,
   BlueHandoffInput,
   BlueHandoffRecord,
   BoundaryCandidate,
@@ -9,6 +15,8 @@ import type {
   BoundaryInfo,
   CallTreeNode,
   CreateBugInput,
+  CreateBehaviorClaimInput,
+  CreateBlueClaimDefenseRequest,
   CreateBlueHandoffRequest,
   CreateEnvProfileInput,
   CreateSecretRefInput,
@@ -21,6 +29,7 @@ import type {
   MutationVerdictRecord,
   MutationVerdictRequest,
   RedDossierRequest,
+  RedMutateRecordRequest,
   RedMutateRequest,
   RedTargetsRequest,
   RepoRecord,
@@ -95,6 +104,29 @@ export async function ensureLocalRepo(baseUrl: string, input: {
   })
 }
 
+export async function ensureGitRepo(baseUrl: string, input: {
+  name?: string
+  cloneUrl: string
+  defaultBranch?: string
+  registryPath?: string
+  defaultEnvProfileId?: string
+}): Promise<RepoRecord> {
+  return requestJson<RepoRecord>(baseUrl, {
+    path: '/repos',
+    method: 'POST',
+    body: {
+      name: input.name,
+      defaultEnvProfileId: input.defaultEnvProfileId,
+      source: {
+        kind: 'git',
+        cloneUrl: input.cloneUrl,
+        defaultBranch: input.defaultBranch,
+        registryPath: input.registryPath,
+      },
+    },
+  })
+}
+
 export async function updateRepo(baseUrl: string, repoId: string, input: {
   defaultEnvProfileId?: string | null
   name?: string
@@ -131,6 +163,21 @@ export async function createBug(baseUrl: string, repoId: string, input: CreateBu
   })
 }
 
+export async function listBehaviorClaims(baseUrl: string, repoId: string, status?: BehaviorClaimStatus): Promise<BehaviorClaimRecord[]> {
+  const suffix = status ? `?status=${encodeURIComponent(status)}` : ''
+  return requestJson<BehaviorClaimRecord[]>(baseUrl, {
+    path: `/repos/${encodeURIComponent(repoId)}/claims${suffix}`,
+  })
+}
+
+export async function createBehaviorClaim(baseUrl: string, repoId: string, input: CreateBehaviorClaimInput): Promise<BehaviorClaimRecord> {
+  return requestJson<BehaviorClaimRecord>(baseUrl, {
+    path: `/repos/${encodeURIComponent(repoId)}/claims`,
+    method: 'POST',
+    body: input,
+  })
+}
+
 export async function createBlueHandoff(
   baseUrl: string,
   repoId: string,
@@ -145,6 +192,25 @@ export async function createBlueHandoff(
       handoff: input,
       requestedBy,
     } satisfies CreateBlueHandoffRequest,
+  })
+}
+
+export async function createBlueClaimDefense(
+  baseUrl: string,
+  repoId: string,
+  input: BlueClaimDefenseInput,
+  requestedBy?: string,
+  sourceFingerprint?: CreateBlueClaimDefenseRequest['sourceFingerprint'],
+): Promise<BlueClaimDefenseRecord> {
+  return requestJson<BlueClaimDefenseRecord>(baseUrl, {
+    path: `/repos/${encodeURIComponent(repoId)}/blue-defenses`,
+    method: 'POST',
+    body: {
+      repoId,
+      defense: input,
+      sourceFingerprint,
+      requestedBy,
+    } satisfies CreateBlueClaimDefenseRequest,
   })
 }
 
@@ -175,6 +241,14 @@ export async function listRunArtifacts(baseUrl: string, runId: string): Promise<
 export async function blueAssign(baseUrl: string, input: BlueAssignRequest): Promise<WorkflowResponse<BlueAssignmentRecord>> {
   return requestJson<WorkflowResponse<BlueAssignmentRecord>>(baseUrl, {
     path: '/rpc/blue.assign',
+    method: 'POST',
+    body: input,
+  })
+}
+
+export async function blueAssignClaim(baseUrl: string, input: BlueAssignClaimRequest): Promise<WorkflowResponse<BlueClaimAssignmentRecord>> {
+  return requestJson<WorkflowResponse<BlueClaimAssignmentRecord>>(baseUrl, {
+    path: '/rpc/blue.assign-claim',
     method: 'POST',
     body: input,
   })
@@ -366,6 +440,14 @@ export async function startRedMutate(baseUrl: string, input: RedMutateRequest): 
 export async function redMutate(baseUrl: string, input: RedMutateRequest): Promise<WorkflowResponse<MutationEvaluationResult>> {
   return requestJson<WorkflowResponse<MutationEvaluationResult>>(baseUrl, {
     path: '/rpc/red.mutate',
+    method: 'POST',
+    body: input,
+  })
+}
+
+export async function recordRedMutate(baseUrl: string, input: RedMutateRecordRequest): Promise<WorkflowResponse<MutationEvaluationResult>> {
+  return requestJson<WorkflowResponse<MutationEvaluationResult>>(baseUrl, {
+    path: '/rpc/red.mutate.record',
     method: 'POST',
     body: input,
   })

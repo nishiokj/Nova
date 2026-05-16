@@ -26,6 +26,7 @@ export type {
 
 export interface ServiceConfig {
   port: number
+  host: string
   databaseUrl: string
   workdir: string
   gitBin: string
@@ -150,6 +151,109 @@ export interface CreateBugInput {
   sourceFingerprint?: SourceFingerprint | null
 }
 
+export type BehaviorClaimStatus = 'open' | 'assigned' | 'defended' | 'stale' | 'dismissed'
+
+export interface BehaviorClaimScope {
+  files: string[]
+  symbols?: string[]
+  language?: string
+  package?: string
+  metadata?: unknown
+}
+
+export interface BehaviorClaimEvidence {
+  testFiles?: string[]
+  testCommand?: string[]
+  notes?: string
+  metadata?: unknown
+}
+
+export interface CreateBehaviorClaimInput {
+  behavior: string
+  scope?: Partial<BehaviorClaimScope>
+  evidence?: BehaviorClaimEvidence
+  source?: string
+  status?: BehaviorClaimStatus
+  sourceFingerprint?: SourceFingerprint | null
+}
+
+export interface BehaviorClaimRecord {
+  id: string
+  repoId: string
+  behavior: string
+  scope: BehaviorClaimScope
+  evidence: BehaviorClaimEvidence
+  status: BehaviorClaimStatus
+  source: string | null
+  sourceFingerprint: SourceFingerprint | null
+  createdAt: string
+  updatedAt: string
+}
+
+export const BEHAVIOR_CLAIM_JSON_SCHEMA = {
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $id: 'metarepo/behavior-claim.schema.json',
+  title: 'Metarepo Behavior Claim',
+  type: 'object',
+  additionalProperties: false,
+  required: ['behavior'],
+  properties: {
+    behavior: { type: 'string', minLength: 1 },
+    scope: {
+      type: 'object',
+      additionalProperties: true,
+      properties: {
+        files: {
+          type: 'array',
+          items: { type: 'string', minLength: 1 },
+        },
+        symbols: {
+          type: 'array',
+          items: { type: 'string', minLength: 1 },
+        },
+        language: { type: 'string', minLength: 1 },
+        package: { type: 'string', minLength: 1 },
+        metadata: {},
+      },
+    },
+    evidence: {
+      type: 'object',
+      additionalProperties: true,
+      properties: {
+        testFiles: {
+          type: 'array',
+          items: { type: 'string', minLength: 1 },
+        },
+        testCommand: {
+          type: 'array',
+          items: { type: 'string', minLength: 1 },
+        },
+        notes: { type: 'string' },
+        metadata: {},
+      },
+    },
+    source: { type: 'string', minLength: 1 },
+    status: { enum: ['open', 'assigned', 'defended', 'stale', 'dismissed'] },
+    sourceFingerprint: {},
+  },
+} as const
+
+export const BEHAVIOR_CLAIM_EXAMPLE: CreateBehaviorClaimInput = {
+  behavior: 'processOrder rejects invalid SKUs before creating an order.',
+  scope: {
+    files: ['src/orders/process.ts'],
+    symbols: ['processOrder'],
+    language: 'typescript',
+    package: 'orders',
+  },
+  evidence: {
+    testFiles: ['tests/behavioral/orders/process.behavior.test.ts'],
+    testCommand: ['bun', 'test', 'tests/behavioral/orders/process.behavior.test.ts'],
+    notes: 'Existing tests should prove the externally visible validation behavior.',
+  },
+  source: 'agent:red-blue-team',
+}
+
 export interface SecretRefRecord {
   id: string
   repoId: string | null
@@ -218,6 +322,17 @@ export interface BlueAssignmentRecord {
   assignment: BlueAssignmentPayload
 }
 
+export interface BlueClaimAssignmentPayload {
+  selector: string
+  claim: BehaviorClaimRecord
+  reasons: string[]
+}
+
+export interface BlueClaimAssignmentRecord {
+  artifact: ArtifactRecord
+  assignment: BlueClaimAssignmentPayload
+}
+
 export interface BlueHandoffInput {
   assignmentArtifactId: string
   testFiles: string[]
@@ -248,6 +363,76 @@ export interface BlueHandoffRecord {
   handoff: BlueHandoffPayload
 }
 
+export interface BlueClaimDefenseInput {
+  assignmentArtifactId: string
+  testFiles: string[]
+  changedFiles?: string[]
+  testCommand: string[]
+  summary?: string
+  notes?: string
+  bugIds?: string[]
+}
+
+export interface BlueClaimDefensePayload {
+  selector: string
+  assignmentArtifactId: string
+  claimId: string
+  claim: BehaviorClaimRecord
+  testFiles: string[]
+  changedFiles: string[]
+  testCommand: string[]
+  summary?: string
+  notes?: string
+  bugIds: string[]
+}
+
+export interface BlueClaimDefenseRecord {
+  artifact: ArtifactRecord
+  defense: BlueClaimDefensePayload
+}
+
+export const BLUE_CLAIM_DEFENSE_JSON_SCHEMA = {
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $id: 'metarepo/blue-claim-defense.schema.json',
+  title: 'Metarepo Blue Claim Defense',
+  type: 'object',
+  additionalProperties: false,
+  required: ['assignmentArtifactId', 'testFiles', 'testCommand'],
+  properties: {
+    assignmentArtifactId: { type: 'string', minLength: 1 },
+    testFiles: {
+      type: 'array',
+      minItems: 1,
+      items: { type: 'string', minLength: 1 },
+    },
+    changedFiles: {
+      type: 'array',
+      items: { type: 'string', minLength: 1 },
+    },
+    testCommand: {
+      type: 'array',
+      minItems: 1,
+      items: { type: 'string', minLength: 1 },
+    },
+    summary: { type: 'string' },
+    notes: { type: 'string' },
+    bugIds: {
+      type: 'array',
+      items: { type: 'string', minLength: 1 },
+    },
+  },
+} as const
+
+export const BLUE_CLAIM_DEFENSE_EXAMPLE: BlueClaimDefenseInput = {
+  assignmentArtifactId: 'artifact-blue-claim-assignment',
+  testFiles: ['tests/behavioral/orders/process.behavior.test.ts'],
+  changedFiles: ['tests/behavioral/orders/process.behavior.test.ts'],
+  testCommand: ['bun', 'test', 'tests/behavioral/orders/process.behavior.test.ts'],
+  summary: 'Covers invalid SKU rejection, valid order creation, and duplicate order id behavior.',
+  notes: 'Uses the repo-native test runner and keeps owned collaborators real.',
+  bugIds: [],
+}
+
 export interface RunSourceRequest {
   ref?: string
 }
@@ -267,9 +452,23 @@ export interface BlueAssignRequest {
   requestedBy?: string
 }
 
+export interface BlueAssignClaimRequest {
+  repoId: string
+  selector?: string
+  requestedBy?: string
+}
+
 export interface CreateBlueHandoffRequest {
   repoId: string
   handoff: BlueHandoffInput
+  source?: RunSourceRequest
+  requestedBy?: string
+}
+
+export interface CreateBlueClaimDefenseRequest {
+  repoId: string
+  defense: BlueClaimDefenseInput
+  sourceFingerprint?: SourceFingerprint
   source?: RunSourceRequest
   requestedBy?: string
 }
@@ -617,7 +816,17 @@ export const MUTATION_PROPOSAL_EXAMPLE: MutationProposalInput = {
 export interface RedMutateRequest {
   repoId: string
   proposal: MutationProposalInput
+  claimId?: string
   source?: RunSourceRequest
+  requestedBy?: string
+}
+
+export interface RedMutateRecordRequest {
+  repoId: string
+  proposal: MutationProposalInput
+  result: MutationEvaluationResult
+  claimId?: string
+  sourceFingerprint?: Partial<SourceFingerprint>
   requestedBy?: string
 }
 
@@ -791,16 +1000,20 @@ export interface MetarepoApi {
   updateRepo(id: string, input: UpdateRepoInput): Promise<RepoRecord>
   blueAssign(input: BlueAssignRequest): Promise<WorkflowResponse<BlueAssignmentRecord>>
   createBlueHandoff(input: CreateBlueHandoffRequest): Promise<BlueHandoffRecord>
+  createBlueClaimDefense(input: CreateBlueClaimDefenseRequest): Promise<BlueClaimDefenseRecord>
   getLatestBlueHandoff(repoId: string): Promise<BlueHandoffRecord>
   listRepoArtifacts(id: string, kind?: string): Promise<ArtifactRecord[]>
   listRepoBugs(id: string): Promise<BugRecord[]>
   createBug(repoId: string, input: CreateBugInput): Promise<BugRecord>
+  listBehaviorClaims(repoId: string, status?: BehaviorClaimStatus): Promise<BehaviorClaimRecord[]>
+  createBehaviorClaim(repoId: string, input: CreateBehaviorClaimInput): Promise<BehaviorClaimRecord>
   createEnvProfile(repoId: string, input: CreateEnvProfileInput): Promise<EnvProfileRecord>
   createSecretRef(repoId: string, input: CreateSecretRefInput): Promise<SecretRefRecord>
   getRun(id: string): Promise<RunRecord>
   listRunEvents(id: string): Promise<EventLedgerRecord[]>
   listRunArtifacts(id: string): Promise<ArtifactRecord[]>
   getArtifact(id: string): Promise<ArtifactRecord>
+  blueAssignClaim(input: BlueAssignClaimRequest): Promise<WorkflowResponse<BlueClaimAssignmentRecord>>
   contractCompile(input: ContractCompileRequest): Promise<ContractCompileResult>
   contractInterview(input: ContractInterviewRequest): Promise<ContractInterviewResult>
   contractBatchCreate(input: ContractBatchCreateRequest): Promise<ContractBatchCreateResult>
@@ -824,6 +1037,7 @@ export interface MetarepoApi {
   redDossier(input: RedDossierRequest): Promise<WorkflowResponse<BoundaryDossier>>
   startRedMutate(input: RedMutateRequest): Promise<RunStartResponse>
   redMutate(input: RedMutateRequest): Promise<WorkflowResponse<MutationEvaluationResult>>
+  recordRedMutate(input: RedMutateRecordRequest): Promise<WorkflowResponse<MutationEvaluationResult>>
   refereeRun(input: RefereeRunRequest): Promise<WorkflowResponse<MutationEvaluationResult>>
   refereeVerdict(input: MutationVerdictRequest): Promise<MutationVerdictRecord>
 }

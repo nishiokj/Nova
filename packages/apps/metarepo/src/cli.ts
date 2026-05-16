@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
 import { execFileSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, mkdtemp, rm, readFile, stat, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import {
   blueAssign,
+  blueAssignClaim,
   contractAcknowledge,
   contractBatchCreate,
   contractChallenge,
@@ -16,10 +18,13 @@ import {
   contractSubmitProof,
   contractUpdateTestPaths,
   contractVerify,
+  createBlueClaimDefense,
   createBlueHandoff,
+  createBehaviorClaim,
   createBug,
   createEnvProfile,
   createSecretRef,
+  ensureGitRepo,
   ensureLocalRepo,
   getRun,
   getLatestBlueHandoff,
@@ -31,10 +36,12 @@ import {
   graphReadiness,
   graphTree,
   listRepoArtifacts,
+  listBehaviorClaims,
   listRunArtifacts,
   listRunEvents,
   redDossier,
   redTargets,
+  recordRedMutate,
   refereeRun,
   refereeVerdict,
   startRedMutate,
@@ -43,21 +50,33 @@ import {
   updateRepo,
 } from './client.js'
 import { main as serveMain } from './index.js'
+import { evaluateMutation, runCommand } from './mutation_evaluator.js'
 import {
   type ArtifactRecord,
+  BEHAVIOR_CLAIM_EXAMPLE,
+  BEHAVIOR_CLAIM_JSON_SCHEMA,
+  BLUE_CLAIM_DEFENSE_EXAMPLE,
+  BLUE_CLAIM_DEFENSE_JSON_SCHEMA,
+  type BehaviorClaimStatus,
   type EventLedgerRecord,
   MUTATION_PROPOSAL_EXAMPLE,
   MUTATION_PROPOSAL_JSON_SCHEMA,
   MUTATION_VERDICT_JSON_SCHEMA,
   type MutationEvaluationResult,
+  type MutationProposalInput,
   type MutationVerdictInput,
+  type RepoRecord,
   type RunRecord,
+  type SourceFingerprint,
   type WorkflowResponse,
 } from './types.js'
 
 type ClientRepoConfig = {
   rootPath: string
   name?: string
+  sourceKind?: 'local' | 'git'
+  cloneUrl?: string
+  defaultBranch?: string
 }
 
 type ClientState = {
@@ -67,6 +86,30 @@ type ClientState = {
 
 const DEFAULT_PORT = process.env.PORT?.trim() ? process.env.PORT.trim() : '8080'
 const DEFAULT_BASE_URL = process.env.METAREPO_BASE_URL?.trim() || `http://127.0.0.1:${DEFAULT_PORT}`
+const CLI_SOURCE_PATH = fileURLToPath(import.meta.url)
+const METAREPO_APP_ROOT = path.resolve(path.dirname(CLI_SOURCE_PATH), '..')
+const METAREPO_REPO_ROOT = path.resolve(METAREPO_APP_ROOT, '../../..')
+const METAREPO_WRAPPER_PATH = path.join(METAREPO_REPO_ROOT, 'metarepo')
+const RED_BLUE_SKILL_SOURCE = path.join(METAREPO_APP_ROOT, 'skills', 'red-blue-team')
+
+type CliErrorCode =
+  | 'METAREPO_USAGE'
+  | 'METAREPO_UNKNOWN_COMMAND'
+  | 'METAREPO_SERVER_UNAVAILABLE'
+  | 'METAREPO_REPO_NOT_CONFIGURED'
+  | 'METAREPO_REQUEST_FAILED'
+  | 'METAREPO_VALIDATION'
+  | 'METAREPO_INTERNAL'
+
+class CliError extends Error {
+  constructor(
+    readonly code: CliErrorCode,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'CliError'
+  }
+}
 
 function explicitStatePath(): string | null {
   const configured = process.env.METAREPO_CLIENT_STATE_PATH?.trim()
@@ -92,6 +135,9 @@ function coerceRepoConfig(value: unknown): ClientRepoConfig | null {
   return {
     rootPath: repo.rootPath,
     name: typeof repo.name === 'string' ? repo.name : undefined,
+    sourceKind: repo.sourceKind === 'git' ? 'git' : 'local',
+    cloneUrl: typeof repo.cloneUrl === 'string' ? repo.cloneUrl : undefined,
+    defaultBranch: typeof repo.defaultBranch === 'string' ? repo.defaultBranch : undefined,
   }
 }
 
@@ -171,6 +217,31 @@ function canonicalPath(input: string): string {
   }
 }
 
+function optionalGitOutput(rootPath: string, args: string[]): string | undefined {
+  try {
+    const output = execFileSync(
+      'git',
+      ['-C', rootPath, ...args],
+      { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim()
+    return output || undefined
+  } catch {
+    return undefined
+  }
+}
+
+function inferGitRemoteUrl(rootPath: string): string {
+  const remote = optionalGitOutput(rootPath, ['config', '--get', 'remote.origin.url'])
+  if (!remote) {
+    throw new Error('client-mode registration requires a git remote at remote.origin.url')
+  }
+  return remote
+}
+
+function inferGitBranch(rootPath: string): string | undefined {
+  return optionalGitOutput(rootPath, ['branch', '--show-current'])
+}
+
 export function parseEnvFileContents(contents: string): Record<string, string> {
   const values: Record<string, string> = {}
   for (const rawLine of contents.split(/\r?\n/)) {
@@ -213,10 +284,21 @@ function printUsage(): void {
     'Usage:',
     '  metarepo serve',
     '  metarepo status',
+    '  metarepo doctor [--base-url URL]',
+    '  metarepo install client [path] [--force]',
+    '  metarepo install skill [path] [--force]',
+    '  metarepo install all [path] [--force]',
     '  metarepo add [path] [--name repo-name]',
+    '  metarepo add --client [path] [--name repo-name]',
     '  metarepo repo show',
+    '  metarepo claims schema',
+    '  metarepo claims create --file claim.json',
+    '  metarepo claims list [--status open|assigned|defended|stale|dismissed]',
+    '  metarepo blue schema',
     '  metarepo blue assign [selector] [--max-depth 5]',
+    '  metarepo blue assign-claim [selector]',
     '  metarepo blue record --file payload.json',
+    '  metarepo blue record-defense --file payload.json',
     '  metarepo blue latest',
     '  metarepo secrets add --file path/to/.env [--profile default]',
     '  metarepo graph boundaries [filepath]',
@@ -236,7 +318,8 @@ function printUsage(): void {
     '  metarepo red schema',
     '  metarepo red targets [selector] [--max-depth 5]',
     '  metarepo red dossier <boundary-id> [--max-depth 5]',
-    '  metarepo red mutate --file payload.json',
+    '  metarepo red mutate --file payload.json [--claim-id claim-id]',
+    '  metarepo red evaluate --file payload.json [--claim-id claim-id]',
     '  metarepo referee <proposal-artifact-id>',
     '  metarepo referee schema',
     '  metarepo referee verdict --file payload.json',
@@ -257,9 +340,49 @@ function parsePositiveInt(value: string | undefined, field: string): number | un
   if (!value) return undefined
   const parsed = Number.parseInt(value, 10)
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`${field} must be a positive integer`)
+    throw new CliError('METAREPO_VALIDATION', `${field} must be a positive integer`)
   }
   return parsed
+}
+
+function classifyError(error: unknown): { code: CliErrorCode; message: string } {
+  if (error instanceof CliError) {
+    return { code: error.code, message: error.message }
+  }
+  const message = error instanceof Error ? error.message : String(error)
+  if (message.startsWith('No metarepo server is listening')) {
+    return { code: 'METAREPO_SERVER_UNAVAILABLE', message }
+  }
+  if (message.startsWith('No metarepo repo configured')) {
+    return { code: 'METAREPO_REPO_NOT_CONFIGURED', message }
+  }
+  if (message.startsWith('metarepo request failed:')) {
+    return { code: 'METAREPO_REQUEST_FAILED', message }
+  }
+  if (message.startsWith('Unknown metarepo')) {
+    return { code: 'METAREPO_UNKNOWN_COMMAND', message }
+  }
+  if (
+    message.includes('requires ')
+    || message.includes('must be ')
+    || message.includes('already exists')
+  ) {
+    return { code: 'METAREPO_VALIDATION', message }
+  }
+  return { code: 'METAREPO_INTERNAL', message }
+}
+
+function printCliError(error: unknown): void {
+  const classified = classifyError(error)
+  if (process.env.METAREPO_JSON_ERRORS === '1') {
+    console.error(JSON.stringify({
+      ok: false,
+      code: classified.code,
+      error: classified.message,
+    }))
+    return
+  }
+  console.error(`metarepo[${classified.code}]: ${classified.message}`)
 }
 
 function sleep(ms: number): Promise<void> {
@@ -361,23 +484,128 @@ function extractMutationWorkflowResponse(run: RunRecord, artifacts: ArtifactReco
   }
 }
 
+async function createLocalEvaluationWorkspace(sourceRoot: string): Promise<{
+  sourceRoot: string
+  cleanup: () => Promise<void>
+}> {
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'metarepo-local-eval-'))
+  const worktreeRoot = path.join(parent, 'repo')
+  const canUseWorktree = optionalGitOutput(sourceRoot, ['rev-parse', '--is-inside-work-tree']) === 'true'
+    && Boolean(optionalGitOutput(sourceRoot, ['rev-parse', '--verify', 'HEAD']))
+
+  try {
+    if (canUseWorktree) {
+      const headSha = optionalGitOutput(sourceRoot, ['rev-parse', 'HEAD']) ?? 'HEAD'
+      await runCommand({
+        command: 'git',
+        cwd: sourceRoot,
+        args: ['worktree', 'add', '--detach', worktreeRoot, headSha],
+        timeoutMs: 60_000,
+      })
+      await symlink(path.join(sourceRoot, 'node_modules'), path.join(worktreeRoot, 'node_modules')).catch(() => {})
+      await copyDirtyFiles(sourceRoot, worktreeRoot)
+      return {
+        sourceRoot: worktreeRoot,
+        cleanup: async () => {
+          await runCommand({
+            command: 'git',
+            cwd: sourceRoot,
+            args: ['worktree', 'remove', '--force', worktreeRoot],
+            timeoutMs: 60_000,
+            rejectOnNonZero: false,
+          }).catch(() => undefined)
+          await rm(parent, { recursive: true, force: true })
+        },
+      }
+    }
+
+    await cp(sourceRoot, worktreeRoot, {
+      recursive: true,
+      force: true,
+      filter: item => path.basename(item) !== '.git',
+    })
+    return {
+      sourceRoot: worktreeRoot,
+      cleanup: async () => {
+        await rm(parent, { recursive: true, force: true })
+      },
+    }
+  } catch (error) {
+    await rm(parent, { recursive: true, force: true }).catch(() => undefined)
+    throw error
+  }
+}
+
+async function copyDirtyFiles(sourceRoot: string, worktreeRoot: string): Promise<void> {
+  const modified = await runCommand({
+    command: 'git',
+    cwd: sourceRoot,
+    args: ['diff', '--name-only', '--diff-filter=AM'],
+    timeoutMs: 60_000,
+    rejectOnNonZero: false,
+  })
+  const untracked = await runCommand({
+    command: 'git',
+    cwd: sourceRoot,
+    args: ['ls-files', '--others', '--exclude-standard'],
+    timeoutMs: 60_000,
+    rejectOnNonZero: false,
+  })
+  const relPaths = [...new Set([
+    ...modified.stdout.split(/\r?\n/),
+    ...untracked.stdout.split(/\r?\n/),
+  ].map(item => item.trim()).filter(Boolean))]
+
+  for (const relPath of relPaths) {
+    const src = path.join(sourceRoot, relPath)
+    const dst = path.join(worktreeRoot, relPath)
+    await mkdir(path.dirname(dst), { recursive: true })
+    await cp(src, dst, { recursive: true, force: true }).catch(() => undefined)
+  }
+}
+
+async function copyMutationTargetFiles(sourceRoot: string, worktreeRoot: string, proposal: MutationProposalInput): Promise<void> {
+  const relPaths = [...new Set(proposal.patch.map(operation => operation.file))]
+  for (const relPath of relPaths) {
+    const src = path.join(sourceRoot, relPath)
+    const dst = path.join(worktreeRoot, relPath)
+    await mkdir(path.dirname(dst), { recursive: true })
+    await cp(src, dst, { recursive: true, force: true }).catch(() => undefined)
+  }
+}
+
+function buildClientFingerprint(repo: RepoRecord, configured: ClientRepoConfig): SourceFingerprint {
+  const rootPath = configured.rootPath
+  const status = optionalGitOutput(rootPath, ['status', '--porcelain'])
+  return {
+    repoId: repo.id,
+    sourceKind: repo.sourceKind,
+    rootPath,
+    cloneUrl: configured.cloneUrl ?? repo.cloneUrl ?? optionalGitOutput(rootPath, ['config', '--get', 'remote.origin.url']),
+    commitSha: optionalGitOutput(rootPath, ['rev-parse', 'HEAD']),
+    branch: inferGitBranch(rootPath),
+    dirty: status !== undefined ? status.length > 0 : true,
+    createdAt: new Date().toISOString(),
+  }
+}
+
 async function assertMetarepoAvailable(baseUrl: string): Promise<void> {
   const healthUrl = new URL('/healthz', baseUrl)
   let response: Response
   try {
     response = await fetch(healthUrl)
   } catch {
-    throw new Error(`No metarepo server is listening at ${baseUrl}. Start it with \`./metarepo serve\`.`)
+    throw new CliError('METAREPO_SERVER_UNAVAILABLE', `No metarepo server is listening at ${baseUrl}. Start it with \`./metarepo serve\`.`)
   }
   if (!response.ok) {
-    throw new Error(`Expected metarepo health endpoint at ${healthUrl.toString()}, got HTTP ${response.status}.`)
+    throw new CliError('METAREPO_SERVER_UNAVAILABLE', `Expected metarepo health endpoint at ${healthUrl.toString()}, got HTTP ${response.status}.`)
   }
 }
 
 async function resolveConfiguredRepo(state: ClientState, cwd: string): Promise<ClientRepoConfig> {
   const repo = state.repo
   if (!repo) {
-    throw new Error('No metarepo repo configured for this directory. Run `metarepo add` first.')
+    throw new CliError('METAREPO_REPO_NOT_CONFIGURED', 'No metarepo repo configured for this directory. Run `metarepo add` first.')
   }
   const actualRoot = canonicalPath(resolveRepoRoot(cwd))
   const configuredRoot = canonicalPath(repo.rootPath)
@@ -392,16 +620,22 @@ async function resolveConfiguredRepo(state: ClientState, cwd: string): Promise<C
 async function resolveCurrentRepo(baseUrlOverride: string | undefined): Promise<{
   baseUrl: string
   configured: ClientRepoConfig
-  repo: Awaited<ReturnType<typeof ensureLocalRepo>>
+  repo: RepoRecord
 }> {
   const state = await loadClientState(process.cwd())
   if (!state) {
-    throw new Error('No metarepo repo configured for this directory. Run `metarepo add` first.')
+    throw new CliError('METAREPO_REPO_NOT_CONFIGURED', 'No metarepo repo configured for this directory. Run `metarepo add` first.')
   }
   const configured = await resolveConfiguredRepo(state, process.cwd())
   const baseUrl = baseUrlOverride ?? DEFAULT_BASE_URL
   await assertMetarepoAvailable(baseUrl)
-  const repo = await ensureLocalRepo(baseUrl, configured)
+  const repo = configured.sourceKind === 'git'
+    ? await ensureGitRepo(baseUrl, {
+      name: configured.name,
+      cloneUrl: configured.cloneUrl ?? inferGitRemoteUrl(configured.rootPath),
+      defaultBranch: configured.defaultBranch,
+    })
+    : await ensureLocalRepo(baseUrl, configured)
   return { baseUrl, configured, repo }
 }
 
@@ -417,6 +651,147 @@ async function commandStatus(args: string[]): Promise<void> {
   printJson({ ok: true, baseUrl })
 }
 
+function commandVersion(command: string, args: string[] = ['--version']): string | null {
+  try {
+    return execFileSync(command, args, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+  } catch {
+    return null
+  }
+}
+
+async function commandDoctor(args: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args,
+    options: {
+      'base-url': { type: 'string' },
+    },
+  })
+  const baseUrl = values['base-url'] ?? DEFAULT_BASE_URL
+  const cwd = process.cwd()
+  const repoRoot = resolveRepoRoot(cwd)
+  const state = await loadClientState(cwd)
+  const server = await fetch(new URL('/healthz', baseUrl))
+    .then(async response => ({
+      ok: response.ok,
+      status: response.status,
+      body: await response.json().catch(() => null) as unknown,
+    }))
+    .catch(error => ({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    }))
+  const hasPackageJson = await exists(path.join(repoRoot, 'package.json'))
+  const hasCargoToml = await exists(path.join(repoRoot, 'Cargo.toml')) || await exists(path.join(repoRoot, 'rust', 'Cargo.toml'))
+
+  printJson({
+    ok: true,
+    baseUrl,
+    repoRoot,
+    client: {
+      configured: Boolean(state),
+      statePath: statePath(cwd),
+      wrapperPath: path.join(repoRoot, '.metarepo', 'bin', 'metarepo'),
+      skillPath: path.join(repoRoot, '.agents', 'red-blue-team', 'SKILL.md'),
+    },
+    server,
+    tools: {
+      bun: `bun ${Bun.version}`,
+      git: commandVersion('git'),
+      cargo: hasCargoToml ? commandVersion('cargo') : null,
+      npm: hasPackageJson ? commandVersion('npm') : null,
+    },
+    hints: {
+      installClient: !(await exists(path.join(repoRoot, '.metarepo', 'bin', 'metarepo'))),
+      installSkill: !(await exists(path.join(repoRoot, '.agents', 'red-blue-team', 'SKILL.md'))),
+      repoHasNodePackage: hasPackageJson,
+      repoHasRustPackage: hasCargoToml,
+    },
+  })
+}
+
+async function exists(file: string): Promise<boolean> {
+  return stat(file).then(() => true, () => false)
+}
+
+function clientWrapperContents(): string {
+  return [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    `exec ${JSON.stringify(METAREPO_WRAPPER_PATH)} "$@"`,
+    '',
+  ].join('\n')
+}
+
+async function installClientWrapper(targetRoot: string, force: boolean): Promise<string> {
+  const binDir = path.join(targetRoot, '.metarepo', 'bin')
+  const clientPath = path.join(binDir, 'metarepo')
+  await mkdir(binDir, { recursive: true })
+  if (!force && await exists(clientPath)) {
+    throw new CliError('METAREPO_USAGE', `${clientPath} already exists. Re-run with --force to replace it.`)
+  }
+  await writeFile(clientPath, clientWrapperContents(), { encoding: 'utf-8', mode: 0o755 })
+  await chmod(clientPath, 0o755)
+  return clientPath
+}
+
+async function installRedBlueSkill(targetRoot: string, force: boolean): Promise<string> {
+  const skillDir = path.join(targetRoot, '.agents', 'red-blue-team')
+  if (!force && await exists(skillDir)) {
+    throw new CliError('METAREPO_USAGE', `${skillDir} already exists. Re-run with --force to replace it.`)
+  }
+  await mkdir(path.dirname(skillDir), { recursive: true })
+  await cp(RED_BLUE_SKILL_SOURCE, skillDir, {
+    recursive: true,
+    force,
+    errorOnExist: !force,
+  })
+  return skillDir
+}
+
+async function commandInstall(subcommand: string | undefined, args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      force: { type: 'boolean' },
+    },
+  })
+  const targetRoot = resolveRepoRoot(path.resolve(positionals[0] ?? process.cwd()))
+  const force = Boolean(values.force)
+
+  switch (subcommand) {
+    case 'client': {
+      printJson({
+        ok: true,
+        kind: 'client',
+        path: await installClientWrapper(targetRoot, force),
+      })
+      return
+    }
+    case 'skill': {
+      printJson({
+        ok: true,
+        kind: 'skill',
+        path: await installRedBlueSkill(targetRoot, force),
+      })
+      return
+    }
+    case 'all': {
+      const clientPath = await installClientWrapper(targetRoot, force)
+      const skillPath = await installRedBlueSkill(targetRoot, force)
+      printJson({
+        ok: true,
+        kind: 'all',
+        clientPath,
+        skillPath,
+      })
+      return
+    }
+    default:
+      throw new CliError('METAREPO_UNKNOWN_COMMAND', `Unknown metarepo install command: ${subcommand ?? '(missing)'}`)
+  }
+}
+
 async function commandAdd(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
@@ -424,26 +799,38 @@ async function commandAdd(args: string[]): Promise<void> {
     options: {
       name: { type: 'string' },
       'base-url': { type: 'string' },
+      client: { type: 'boolean' },
     },
   })
   const rootPath = resolveRepoRoot(positionals[0] ?? process.cwd())
   const baseUrl = values['base-url'] ?? DEFAULT_BASE_URL
   await assertMetarepoAvailable(baseUrl)
-  const repo = await ensureLocalRepo(baseUrl, {
-    name: values.name,
-    rootPath,
-  })
+  const repo = values.client
+    ? await ensureGitRepo(baseUrl, {
+      name: values.name,
+      cloneUrl: inferGitRemoteUrl(rootPath),
+      defaultBranch: inferGitBranch(rootPath),
+    })
+    : await ensureLocalRepo(baseUrl, {
+      name: values.name,
+      rootPath,
+    })
   await saveClientState({
     version: 1,
     repo: {
       rootPath,
       name: repo.name,
+      sourceKind: values.client ? 'git' : 'local',
+      cloneUrl: repo.cloneUrl ?? undefined,
+      defaultBranch: repo.defaultBranch ?? undefined,
     },
   }, rootPath)
   printJson({
     ok: true,
     repoId: repo.id,
+    sourceKind: repo.sourceKind,
     rootPath,
+    cloneUrl: repo.cloneUrl,
   })
 }
 
@@ -456,6 +843,42 @@ async function commandRepoShow(args: string[]): Promise<void> {
   })
   const { repo } = await resolveCurrentRepo(values['base-url'])
   printJson(repo)
+}
+
+async function commandClaims(subcommand: string | undefined, args: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args,
+    options: {
+      file: { type: 'string' },
+      status: { type: 'string' },
+      'base-url': { type: 'string' },
+    },
+  })
+
+  switch (subcommand) {
+    case 'schema':
+      printJson({
+        schema: BEHAVIOR_CLAIM_JSON_SCHEMA,
+        example: BEHAVIOR_CLAIM_EXAMPLE,
+      })
+      return
+  }
+
+  const { baseUrl, repo } = await resolveCurrentRepo(values['base-url'])
+
+  switch (subcommand) {
+    case 'create': {
+      if (!values.file) throw new Error('claims create requires --file claim.json')
+      const claim = JSON.parse(await readFile(path.resolve(values.file), 'utf-8'))
+      printJson(await createBehaviorClaim(baseUrl, repo.id, claim))
+      return
+    }
+    case 'list':
+      printJson(await listBehaviorClaims(baseUrl, repo.id, values.status as BehaviorClaimStatus | undefined))
+      return
+    default:
+      throw new Error(`Unknown metarepo claims command: ${subcommand ?? '(missing)'}`)
+  }
 }
 
 async function commandSecretsAdd(args: string[]): Promise<void> {
@@ -508,6 +931,14 @@ async function commandBlue(subcommand: string | undefined, args: string[]): Prom
   })
 
   switch (subcommand) {
+    case 'schema':
+      printJson({
+        claimDefense: {
+          schema: BLUE_CLAIM_DEFENSE_JSON_SCHEMA,
+          example: BLUE_CLAIM_DEFENSE_EXAMPLE,
+        },
+      })
+      return
     case 'assign': {
       const { baseUrl, repo } = await resolveCurrentRepo(values['base-url'])
       const response = await blueAssign(baseUrl, {
@@ -524,14 +955,30 @@ async function commandBlue(subcommand: string | undefined, args: string[]): Prom
       })
       return
     }
+    case 'assign-claim': {
+      const { baseUrl, repo } = await resolveCurrentRepo(values['base-url'])
+      const response = await blueAssignClaim(baseUrl, {
+        repoId: repo.id,
+        selector: positionals[0],
+        requestedBy: 'metarepo-cli:blue.assign-claim',
+      })
+      printJson({
+        run: response.run,
+        artifacts: response.artifacts,
+        assignmentArtifactId: response.result.artifact.id,
+        assignment: response.result.assignment,
+      })
+      return
+    }
     case 'record':
+    case 'record-defense':
     case 'latest':
       break
     default:
       throw new Error(`Unknown metarepo blue command: ${subcommand ?? '(missing)'}`)
   }
 
-  const { baseUrl, repo } = await resolveCurrentRepo(values['base-url'])
+  const { baseUrl, configured, repo } = await resolveCurrentRepo(values['base-url'])
 
   switch (subcommand) {
     case 'record':
@@ -541,6 +988,16 @@ async function commandBlue(subcommand: string | undefined, args: string[]): Prom
         repo.id,
         JSON.parse(await readFile(path.resolve(values.file), 'utf-8')),
         'metarepo-cli:blue.record',
+      ))
+      return
+    case 'record-defense':
+      if (!values.file) throw new Error('blue record-defense requires --file payload.json')
+      printJson(await createBlueClaimDefense(
+        baseUrl,
+        repo.id,
+        JSON.parse(await readFile(path.resolve(values.file), 'utf-8')),
+        'metarepo-cli:blue.record-defense',
+        buildClientFingerprint(repo, configured),
       ))
       return
     case 'latest':
@@ -789,6 +1246,8 @@ async function commandRed(subcommand: string | undefined, args: string[]): Promi
       file: { type: 'string' },
       'max-depth': { type: 'string' },
       'base-url': { type: 'string' },
+      timeout: { type: 'string' },
+      'claim-id': { type: 'string' },
     },
   })
 
@@ -802,12 +1261,13 @@ async function commandRed(subcommand: string | undefined, args: string[]): Promi
     case 'targets':
     case 'dossier':
     case 'mutate':
+    case 'evaluate':
       break
     default:
       throw new Error(`Unknown metarepo red command: ${subcommand ?? '(missing)'}`)
   }
 
-  const { baseUrl, repo } = await resolveCurrentRepo(values['base-url'])
+  const { baseUrl, configured, repo } = await resolveCurrentRepo(values['base-url'])
   const maxDepth = parsePositiveInt(values['max-depth'], 'max-depth')
 
   switch (subcommand) {
@@ -835,6 +1295,7 @@ async function commandRed(subcommand: string | undefined, args: string[]): Promi
         const started = await startRedMutate(baseUrl, {
           ...payload,
           repoId: repo.id,
+          claimId: values['claim-id'],
           requestedBy: 'metarepo-cli:red.mutate',
         })
         printProgress(`started red mutate run ${started.run.id}`)
@@ -844,6 +1305,45 @@ async function commandRed(subcommand: string | undefined, args: string[]): Promi
           throw new Error(run.errorMessage || `red mutate run ${run.id} failed`)
         }
         printJson(extractMutationWorkflowResponse(run, artifacts))
+      }
+      return
+    case 'evaluate':
+      if (!values.file) throw new Error('red evaluate requires --file payload.json')
+      {
+        const proposal = JSON.parse(await readFile(path.resolve(values.file), 'utf-8')) as MutationProposalInput
+        const workspace = await createLocalEvaluationWorkspace(configured.rootPath)
+        try {
+          await copyMutationTargetFiles(configured.rootPath, workspace.sourceRoot, proposal)
+          printProgress(`prepared local evaluation workspace ${workspace.sourceRoot}`)
+          const result = await evaluateMutation({
+            sourceRoot: workspace.sourceRoot,
+            proposal,
+            proposalArtifactId: 'client-local',
+            env: process.env,
+            timeoutMs: parsePositiveInt(values.timeout, 'timeout') ?? 15 * 60 * 1000,
+            recordEvent: async (eventType, payload) => {
+              printProgress(formatRunEvent({
+                id: eventType,
+                repoId: repo.id,
+                runId: null,
+                eventType,
+                payload,
+                createdAt: new Date().toISOString(),
+              }))
+            },
+          })
+          const response = await recordRedMutate(baseUrl, {
+            repoId: repo.id,
+            proposal,
+            result,
+            claimId: values['claim-id'],
+            sourceFingerprint: buildClientFingerprint(repo, configured),
+            requestedBy: 'metarepo-cli:red.evaluate',
+          })
+          printJson(response)
+        } finally {
+          await workspace.cleanup()
+        }
       }
       return
   }
@@ -924,7 +1424,7 @@ async function commandBugCreate(args: string[]): Promise<void> {
 
 export async function runCli(argv: string[]): Promise<void> {
   const [command, subcommand, ...rest] = argv
-  if (!command || command === 'help' || command === '--help' || command === '-h') {
+  if (!command || command === 'help' || argv.includes('--help') || argv.includes('-h')) {
     printUsage()
     return
   }
@@ -937,12 +1437,24 @@ export async function runCli(argv: string[]): Promise<void> {
     await commandStatus([subcommand, ...rest].filter(Boolean))
     return
   }
+  if (command === 'doctor') {
+    await commandDoctor([subcommand, ...rest].filter(Boolean))
+    return
+  }
+  if (command === 'install') {
+    await commandInstall(subcommand, rest)
+    return
+  }
   if (command === 'add') {
     await commandAdd([subcommand, ...rest].filter(Boolean))
     return
   }
   if (command === 'repo' && subcommand === 'show') {
     await commandRepoShow(rest)
+    return
+  }
+  if (command === 'claims') {
+    await commandClaims(subcommand, rest)
     return
   }
   if (command === 'blue') {
@@ -982,12 +1494,12 @@ export async function runCli(argv: string[]): Promise<void> {
     return
   }
 
-  throw new Error(`Unknown metarepo command: ${[command, subcommand].filter(Boolean).join(' ')}`)
+  throw new CliError('METAREPO_UNKNOWN_COMMAND', `Unknown metarepo command: ${[command, subcommand].filter(Boolean).join(' ')}`)
 }
 
 if (import.meta.main) {
   runCli(process.argv.slice(2)).catch(error => {
-    console.error(error instanceof Error ? error.message : String(error))
+    printCliError(error)
     process.exit(1)
   })
 }

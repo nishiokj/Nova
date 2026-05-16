@@ -23,8 +23,8 @@ export async function main(): Promise<void> {
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
-    server.listen(config.port, () => {
-      console.log(`[metarepo] Listening on :${config.port}`)
+    server.listen(config.port, config.host, () => {
+      console.log(`[metarepo] Listening on ${config.host}:${config.port}`)
       resolve()
     })
   })

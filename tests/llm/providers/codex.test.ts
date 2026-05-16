@@ -175,6 +175,51 @@ describe('CodexProvider', () => {
     expect(response.stopReason).toBe('tool_use');
   });
 
+  it('unwraps apply_patch JSON fallback arguments from response output', () => {
+    const provider = new CodexProvider();
+    const patchText = '*** Begin Patch\n*** Add File: patched.txt\n+ok\n*** End Patch';
+
+    const calls = (provider as unknown as {
+      parseToolCalls(response: Record<string, unknown>): unknown[];
+    }).parseToolCalls({
+      output: [
+        {
+          type: 'function_call',
+          call_id: 'call_patch_1',
+          name: 'apply_patch',
+          arguments: JSON.stringify({ input: patchText }),
+        },
+      ],
+    });
+
+    expect(calls).toEqual([
+      {
+        id: 'call_patch_1',
+        name: 'apply_patch',
+        arguments: { input: patchText },
+      },
+    ]);
+  });
+
+  it('drops malformed apply_patch arguments instead of executing empty JSON as a patch', () => {
+    const provider = new CodexProvider();
+
+    const calls = (provider as unknown as {
+      parseToolCalls(response: Record<string, unknown>): unknown[];
+    }).parseToolCalls({
+      output: [
+        {
+          type: 'function_call',
+          call_id: 'call_patch_empty',
+          name: 'apply_patch',
+          arguments: '{}',
+        },
+      ],
+    });
+
+    expect(calls).toEqual([]);
+  });
+
   it('parses content_part events and broader tool-call item variants', async () => {
     const provider = new CodexProvider();
     const context = createContext();
@@ -288,6 +333,35 @@ describe('CodexProvider', () => {
         output: 'file body',
       },
     ]);
+  });
+
+  it('replays apply_patch history using the JSON function shape expected by Codex', () => {
+    const provider = new CodexProvider();
+    const patchText = '*** Begin Patch\n*** Add File: patched.txt\n+ok\n*** End Patch';
+
+    const input = (provider as unknown as {
+      formatInput(messages: Record<string, unknown>[]): Record<string, unknown>[];
+    }).formatInput([
+        {
+          type: 'function_call',
+          call_id: 'call_patch_history',
+          id: 'call_patch_history',
+          name: 'apply_patch',
+          arguments: { input: patchText },
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'call_patch_history',
+          output: 'Patch applied',
+        },
+      ]);
+
+    expect(input[0]).toEqual({
+      type: 'function_call',
+      call_id: 'call_patch_history',
+      name: 'apply_patch',
+      arguments: JSON.stringify({ input: patchText }),
+    });
   });
 
   it('compiles response schema for codex without anyOf', async () => {

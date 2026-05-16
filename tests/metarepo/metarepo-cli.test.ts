@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -9,6 +10,10 @@ function jsonResponse(status: number, payload: unknown): Response {
     status,
     headers: { 'content-type': 'application/json' },
   })
+}
+
+function git(rootPath: string, args: string[]): string {
+  return execFileSync('git', ['-C', rootPath, ...args], { encoding: 'utf-8' }).trim()
 }
 
 describe('metarepo cli primitive flow', () => {
@@ -41,6 +46,19 @@ describe('metarepo cli primitive flow', () => {
   it('adds a repo, imports secrets, records blue handoffs, and queries graph primitives without an explicit repo id', async () => {
     const repoRoot = path.join(tempRoot, 'repo')
     await writeFile(path.join(tempRoot, '.env'), 'APP_SECRET=super-secret\nNODE_ENV=test\n', 'utf-8')
+    await writeFile(path.join(tempRoot, 'claim.json'), JSON.stringify({
+      behavior: 'processOrder rejects invalid SKUs',
+      scope: {
+        files: ['src/orders/process.ts'],
+        symbols: ['processOrder'],
+        language: 'typescript',
+      },
+      evidence: {
+        testFiles: ['tests/behavioral/orders/process.behavior.test.ts'],
+        testCommand: ['bun', 'test', 'tests/behavioral/orders/process.behavior.test.ts'],
+      },
+      source: 'test',
+    }), 'utf-8')
     await mkdir(repoRoot, { recursive: true })
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -287,6 +305,174 @@ describe('metarepo cli primitive flow', () => {
           },
         })
       }
+      if (url.endsWith('/repos/repo-1/claims') && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { behavior: string }
+        return jsonResponse(201, {
+          id: 'claim-1',
+          repoId: 'repo-1',
+          behavior: body.behavior,
+          scope: {
+            files: ['src/orders/process.ts'],
+            symbols: ['processOrder'],
+            language: 'typescript',
+          },
+          evidence: {
+            testFiles: ['tests/behavioral/orders/process.behavior.test.ts'],
+            testCommand: ['bun', 'test', 'tests/behavioral/orders/process.behavior.test.ts'],
+          },
+          status: 'open',
+          source: 'test',
+          sourceFingerprint: null,
+          createdAt: '2026-03-11T00:00:00.000Z',
+          updatedAt: '2026-03-11T00:00:00.000Z',
+        })
+      }
+      if (url.endsWith('/repos/repo-1/claims?status=open') && init?.method !== 'POST') {
+        return jsonResponse(200, [{
+          id: 'claim-1',
+          repoId: 'repo-1',
+          behavior: 'processOrder rejects invalid SKUs',
+          scope: {
+            files: ['src/orders/process.ts'],
+            symbols: ['processOrder'],
+            language: 'typescript',
+          },
+          evidence: {
+            testFiles: ['tests/behavioral/orders/process.behavior.test.ts'],
+            testCommand: ['bun', 'test', 'tests/behavioral/orders/process.behavior.test.ts'],
+          },
+          status: 'open',
+          source: 'test',
+          sourceFingerprint: null,
+          createdAt: '2026-03-11T00:00:00.000Z',
+          updatedAt: '2026-03-11T00:00:00.000Z',
+        }])
+      }
+      if (url.endsWith('/rpc/blue.assign-claim') && init?.method === 'POST') {
+        return jsonResponse(200, {
+          run: {
+            id: 'run-blue-claim',
+            repoId: 'repo-1',
+            workflow: 'blue.assign-claim',
+            status: 'succeeded',
+            sourceFingerprint: {
+              repoId: 'repo-1',
+              sourceKind: 'local',
+              rootPath: repoRoot,
+              dirty: true,
+              createdAt: '2026-03-11T00:00:00.000Z',
+            },
+            requestedBy: 'metarepo-cli:blue.assign-claim',
+            errorMessage: null,
+            graphDatabaseName: null,
+            tempRootPath: null,
+            createdAt: '2026-03-11T00:00:00.000Z',
+            startedAt: '2026-03-11T00:00:00.000Z',
+            finishedAt: '2026-03-11T00:00:00.000Z',
+            updatedAt: '2026-03-11T00:00:00.000Z',
+          },
+          artifacts: [{
+            id: 'artifact-blue-claim',
+            repoId: 'repo-1',
+            runId: 'run-blue-claim',
+            kind: 'blue_claim_assignment',
+            title: 'claim-1',
+            payload: {},
+            sourceFingerprint: {
+              repoId: 'repo-1',
+              sourceKind: 'local',
+              rootPath: repoRoot,
+              dirty: true,
+              createdAt: '2026-03-11T00:00:00.000Z',
+            },
+            createdAt: '2026-03-11T00:00:00.000Z',
+          }],
+          result: {
+            artifact: {
+              id: 'artifact-blue-claim',
+              repoId: 'repo-1',
+              runId: 'run-blue-claim',
+              kind: 'blue_claim_assignment',
+              title: 'claim-1',
+              payload: {},
+              sourceFingerprint: {
+                repoId: 'repo-1',
+                sourceKind: 'local',
+                rootPath: repoRoot,
+                dirty: true,
+                createdAt: '2026-03-11T00:00:00.000Z',
+              },
+              createdAt: '2026-03-11T00:00:00.000Z',
+            },
+            assignment: {
+              selector: 'open',
+              reasons: ['claim-ledger', 'status=open'],
+              claim: {
+                id: 'claim-1',
+                repoId: 'repo-1',
+                behavior: 'processOrder rejects invalid SKUs',
+                scope: { files: ['src/orders/process.ts'], symbols: ['processOrder'], language: 'typescript' },
+                evidence: { testFiles: ['tests/behavioral/orders/process.behavior.test.ts'] },
+                status: 'assigned',
+                source: 'test',
+                sourceFingerprint: null,
+                createdAt: '2026-03-11T00:00:00.000Z',
+                updatedAt: '2026-03-11T00:00:00.000Z',
+              },
+            },
+          },
+        })
+      }
+      if (url.endsWith('/repos/repo-1/blue-defenses') && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as {
+          defense: {
+            assignmentArtifactId: string
+            testFiles: string[]
+            testCommand: string[]
+          }
+        }
+        return jsonResponse(201, {
+          artifact: {
+            id: 'artifact-blue-defense',
+            repoId: 'repo-1',
+            runId: 'run-blue-defense',
+            kind: 'blue_claim_defense',
+            title: 'claim-1',
+            payload: {},
+            sourceFingerprint: {
+              repoId: 'repo-1',
+              sourceKind: 'local',
+              rootPath: repoRoot,
+              dirty: true,
+              createdAt: '2026-03-11T00:00:00.000Z',
+            },
+            createdAt: '2026-03-11T00:00:00.000Z',
+          },
+          defense: {
+            selector: 'open',
+            assignmentArtifactId: body.defense.assignmentArtifactId,
+            claimId: 'claim-1',
+            claim: {
+              id: 'claim-1',
+              repoId: 'repo-1',
+              behavior: 'processOrder rejects invalid SKUs',
+              scope: { files: ['src/orders/process.ts'], symbols: ['processOrder'], language: 'typescript' },
+              evidence: { testFiles: ['tests/behavioral/orders/process.behavior.test.ts'] },
+              status: 'defended',
+              source: 'test',
+              sourceFingerprint: null,
+              createdAt: '2026-03-11T00:00:00.000Z',
+              updatedAt: '2026-03-11T00:00:00.000Z',
+            },
+            testFiles: body.defense.testFiles,
+            changedFiles: body.defense.testFiles,
+            testCommand: body.defense.testCommand,
+            summary: undefined,
+            notes: undefined,
+            bugIds: [],
+          },
+        })
+      }
       if (url.endsWith('/rpc/graph.index') && init?.method === 'POST') {
         const body = JSON.parse(String(init.body)) as { repoId: string }
         return jsonResponse(200, {
@@ -360,6 +546,15 @@ describe('metarepo cli primitive flow', () => {
       }), 'utf-8')
       await runCli(['blue', 'record', '--file', path.join(tempRoot, 'blue.json')])
       await runCli(['blue', 'latest'])
+      await runCli(['claims', 'create', '--file', path.join(tempRoot, 'claim.json')])
+      await runCli(['claims', 'list', '--status', 'open'])
+      await runCli(['blue', 'assign-claim'])
+      await writeFile(path.join(tempRoot, 'defense.json'), JSON.stringify({
+        assignmentArtifactId: 'artifact-blue-claim',
+        testFiles: ['tests/behavioral/orders/process.behavior.test.ts'],
+        testCommand: ['bun', 'test', 'tests/behavioral/orders/process.behavior.test.ts'],
+      }), 'utf-8')
+      await runCli(['blue', 'record-defense', '--file', path.join(tempRoot, 'defense.json')])
       await runCli(['graph', 'index'])
       await runCli(['bug', 'create', '--title', 'broken boundary', '--description', 'needs local postgres'])
     } finally {
@@ -370,6 +565,10 @@ describe('metarepo cli primitive flow', () => {
     expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/rpc/blue.assign'))).toBe(true)
     expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/repos/repo-1/blue-handoffs'))).toBe(true)
     expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/repos/repo-1/blue-handoffs/latest'))).toBe(true)
+    expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/repos/repo-1/claims'))).toBe(true)
+    expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/repos/repo-1/claims?status=open'))).toBe(true)
+    expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/rpc/blue.assign-claim'))).toBe(true)
+    expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/repos/repo-1/blue-defenses'))).toBe(true)
     expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/rpc/graph.index'))).toBe(true)
     expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/repos/repo-1/bugs'))).toBe(true)
   })
@@ -619,5 +818,195 @@ describe('metarepo cli primitive flow', () => {
     expect(payload.schema.title).toBe('Metarepo Mutation Proposal')
     expect(payload.example.targetFile).toBe('src/orders/process.ts')
     expect(payload.example.patch[0]?.op).toBe('replace')
+  })
+
+  it('prints claim and blue defense schemas without requiring a server', async () => {
+    globalThis.fetch = vi.fn(() => {
+      throw new Error('fetch should not be called for local schemas')
+    }) as unknown as typeof fetch
+
+    await runCli(['claims', 'schema'])
+    await runCli(['blue', 'schema'])
+
+    expect(console.log).toHaveBeenCalledTimes(2)
+    const claimPayload = JSON.parse(String((console.log as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] ?? '{}')) as {
+      schema: { title: string }
+      example: { behavior: string }
+    }
+    const bluePayload = JSON.parse(String((console.log as unknown as ReturnType<typeof vi.fn>).mock.calls[1]?.[0] ?? '{}')) as {
+      claimDefense: { schema: { title: string }; example: { assignmentArtifactId: string } }
+    }
+    expect(claimPayload.schema.title).toBe('Metarepo Behavior Claim')
+    expect(claimPayload.example.behavior).toContain('processOrder')
+    expect(bluePayload.claimDefense.schema.title).toBe('Metarepo Blue Claim Defense')
+    expect(bluePayload.claimDefense.example.assignmentArtifactId).toBe('artifact-blue-claim-assignment')
+  })
+
+  it('installs the repo-local client wrapper and red-blue skill', async () => {
+    const repoRoot = path.join(tempRoot, 'repo-install')
+    await mkdir(repoRoot, { recursive: true })
+
+    await runCli(['install', 'all', repoRoot])
+
+    const clientWrapper = await readFile(path.join(repoRoot, '.metarepo', 'bin', 'metarepo'), 'utf-8')
+    const skill = await readFile(path.join(repoRoot, '.agents', 'red-blue-team', 'SKILL.md'), 'utf-8')
+    expect(clientWrapper).toContain('exec ')
+    expect(clientWrapper).toContain('metarepo')
+    expect(skill).toContain('name: red-blue-team')
+    expect(skill).toContain('claim-first test-strength loop')
+  })
+
+  it('preflights server, client, skill, and repo toolchains with doctor', async () => {
+    const repoRoot = path.join(tempRoot, 'repo-doctor')
+    await mkdir(repoRoot, { recursive: true })
+    await writeFile(path.join(repoRoot, 'package.json'), '{"scripts":{"test":"bun test"}}\n', 'utf-8')
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe('http://127.0.0.1:8080/healthz')
+      return jsonResponse(200, { ok: true, service: 'metarepo' })
+    }) as unknown as typeof fetch
+
+    const previousCwd = process.cwd()
+    process.chdir(repoRoot)
+    try {
+      await runCli(['doctor'])
+    } finally {
+      process.chdir(previousCwd)
+    }
+
+    const output = JSON.parse(String((console.log as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] ?? '{}')) as {
+      server: { ok: boolean }
+      hints: { repoHasNodePackage: boolean; installClient: boolean; installSkill: boolean }
+      tools: { bun: string; npm: string | null }
+    }
+    expect(output.server.ok).toBe(true)
+    expect(output.hints.repoHasNodePackage).toBe(true)
+    expect(output.hints.installClient).toBe(true)
+    expect(output.hints.installSkill).toBe(true)
+    expect(output.tools.bun).toContain('bun ')
+  })
+
+  it('prints stable CLI error codes from the executable entrypoint', () => {
+    const cliPath = path.resolve('packages/apps/metarepo/src/cli.ts')
+
+    try {
+      execFileSync('bun', [cliPath, 'repo', 'show'], {
+        cwd: tempRoot,
+        env: {
+          ...process.env,
+          METAREPO_CLIENT_STATE_PATH: path.join(tempRoot, 'missing-client.json'),
+        },
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      throw new Error('expected cli command to fail')
+    } catch (error) {
+      const stderr = String((error as { stderr?: Buffer | string }).stderr ?? '')
+      expect(stderr).toContain('metarepo[METAREPO_REPO_NOT_CONFIGURED]')
+    }
+  })
+
+  it('can register by git remote and submit a locally evaluated mutation result', async () => {
+    const repoRoot = path.join(tempRoot, 'repo-client')
+    await mkdir(path.join(repoRoot, 'src'), { recursive: true })
+    await writeFile(path.join(repoRoot, 'src', 'value.txt'), 'alive\n', 'utf-8')
+    git(repoRoot, ['init', '-b', 'main'])
+    git(repoRoot, ['config', 'user.email', 'tests@example.com'])
+    git(repoRoot, ['config', 'user.name', 'Tests'])
+    git(repoRoot, ['remote', 'add', 'origin', 'git@example.com:org/repo-client.git'])
+    git(repoRoot, ['add', '.'])
+    git(repoRoot, ['commit', '-m', 'base'])
+
+    const mutationPath = path.join(tempRoot, 'mutation-client.json')
+    await writeFile(mutationPath, JSON.stringify({
+      family: 'wrong-value',
+      targetFile: 'src/value.txt',
+      targetSymbol: 'file:src/value.txt',
+      whyThisBoundary: 'The file content stands in for a repo-native behavior check.',
+      patch: [{ op: 'replace', file: 'src/value.txt', find: 'alive', replace: 'dead' }],
+      testTarget: {
+        command: [
+          'bun',
+          '-e',
+          "const text = await Bun.file('src/value.txt').text(); if (!text.includes('alive')) process.exit(1)",
+        ],
+      },
+      predictedOutcome: 'killed',
+      survivalRationale: 'The local command should reject the changed observable value.',
+    }), 'utf-8')
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/healthz')) {
+        return jsonResponse(200, { ok: true, service: 'metarepo' })
+      }
+      if (url.endsWith('/repos') && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as {
+          source: { kind: string; cloneUrl: string }
+        }
+        expect(body.source.kind).toBe('git')
+        expect(body.source.cloneUrl).toBe('git@example.com:org/repo-client.git')
+        return jsonResponse(201, {
+          id: 'repo-client',
+          name: 'repo-client',
+          sourceKind: 'git',
+          rootPath: null,
+          cloneUrl: body.source.cloneUrl,
+          defaultBranch: 'main',
+          authRef: null,
+          registryPath: null,
+          defaultEnvProfileId: null,
+          createdAt: '2026-03-11T00:00:00.000Z',
+          updatedAt: '2026-03-11T00:00:00.000Z',
+        })
+      }
+      if (url.endsWith('/rpc/red.mutate.record') && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as {
+          result: { status: string; patchApplied: boolean }
+          sourceFingerprint: { rootPath: string; cloneUrl: string; dirty: boolean }
+        }
+        expect(body.result.status).toBe('killed')
+        expect(body.result.patchApplied).toBe(true)
+        expect(realpathSync(body.sourceFingerprint.rootPath)).toBe(realpathSync(repoRoot))
+        expect(body.sourceFingerprint.cloneUrl).toBe('git@example.com:org/repo-client.git')
+        expect(body.sourceFingerprint.dirty).toBe(true)
+        return jsonResponse(200, {
+          run: {
+            id: 'run-local-red',
+            repoId: 'repo-client',
+            workflow: 'red.mutate.local',
+            status: 'succeeded',
+            sourceFingerprint: body.sourceFingerprint,
+            requestedBy: 'metarepo-cli:red.evaluate',
+            errorMessage: null,
+            graphDatabaseName: null,
+            tempRootPath: null,
+            createdAt: '2026-03-11T00:00:00.000Z',
+            startedAt: '2026-03-11T00:00:00.000Z',
+            finishedAt: '2026-03-11T00:00:01.000Z',
+            updatedAt: '2026-03-11T00:00:01.000Z',
+          },
+          artifacts: [],
+          result: body.result,
+        })
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const previousCwd = process.cwd()
+    process.chdir(repoRoot)
+    try {
+      await runCli(['add', '--client'])
+      await runCli(['red', 'evaluate', '--file', mutationPath])
+    } finally {
+      process.chdir(previousCwd)
+    }
+
+    expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/rpc/red.mutate.record'))).toBe(true)
+    const output = JSON.parse(String((console.log as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] ?? '{}')) as {
+      result: { status: string }
+    }
+    expect(output.result.status).toBe('killed')
+    expect(await readFile(path.join(repoRoot, 'src', 'value.txt'), 'utf-8')).toBe('alive\n')
   })
 })

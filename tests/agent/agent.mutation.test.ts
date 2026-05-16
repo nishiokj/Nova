@@ -114,6 +114,10 @@ function createToolRegistry(overrides?: Partial<ToolRegistry>): ToolRegistry {
       description: 'Edit a file',
       parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
     }, {
+      name: 'apply_patch',
+      description: 'Apply a patch',
+      parameters: { type: 'object', properties: { input: { type: 'string' } }, required: ['input'] },
+    }, {
       name: 'SleepTool',
       description: 'Mock sleep tool',
       parameters: { type: 'object', properties: { ms: { type: 'number' } }, required: [] },
@@ -131,6 +135,9 @@ function createToolRegistry(overrides?: Partial<ToolRegistry>): ToolRegistry {
       }
       if (name === 'Write' || name === 'Edit') {
         return successResult(name, 'ok', 1);
+      }
+      if (name === 'apply_patch') {
+        return successResult(name, 'patch applied', 1, { changedPaths: ['/tmp/patched.ts'] });
       }
       if (name === 'SleepTool') {
         return successResult('SleepTool', 'slept', 1);
@@ -628,6 +635,40 @@ describe('Agent Mutation Tests', () => {
       const result = await runAgent(agent);
 
       expect(result.invalidatedPaths).toContain('/tmp/out.ts');
+    });
+
+    it('allows Codex apply_patch when config grants legacy write tools', async () => {
+      const registry = createToolRegistry();
+      const llm = createMockLLM([
+        createResponse({
+          action: 'continue',
+          response: '',
+          goalStateReached: false,
+          toolCalls: [{
+            id: 'c1',
+            name: 'apply_patch',
+            arguments: {
+              input: '*** Begin Patch\n*** Update File: /tmp/patched.ts\n@@\n-old\n+new\n*** End Patch\n',
+            },
+          }],
+        }),
+        createResponse({ action: 'done', response: 'done', goalStateReached: true }),
+      ]);
+      const agent = createAgent(llm, registry, {
+        tools: ['Read', 'Write', 'Edit'],
+      }, {
+        llmConfig: {
+          provider: 'codex',
+          model: 'gpt-5.5',
+          apiKey: 'test-key',
+          contextWindow: 200_000,
+        },
+      });
+      const result = await runAgent(agent);
+
+      expect((registry as unknown as { __calls: string[] }).__calls).toContain('apply_patch');
+      expect(result.toolErrors.some(e => e.includes('not allowed'))).toBe(false);
+      expect(result.invalidatedPaths).toContain('/tmp/patched.ts');
     });
 
     it('preToolUse hook can block a tool call', async () => {

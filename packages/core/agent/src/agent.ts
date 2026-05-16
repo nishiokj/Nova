@@ -1446,8 +1446,25 @@ export class Agent {
 
   private filterAllowedTools(allTools: ToolDefinition[]): ToolDefinition[] {
     if (this.config.tools.length === 0) return [];
-    const allowed = new Set(this.config.tools.map((t) => t.toLowerCase()));
+    const allowed = new Set(this.getEffectiveAllowedToolNames().map((t) => t.toLowerCase()));
     return allTools.filter((tool) => allowed.has(tool.name.toLowerCase()));
+  }
+
+  private getEffectiveAllowedToolNames(): string[] {
+    if (this.config.tools.length === 0) return [];
+
+    const tools = [...this.config.tools];
+    const lower = new Set(tools.map((tool) => tool.toLowerCase()));
+    const usesCodexToolSkin =
+      this.llmConfig.provider === 'openai' || this.llmConfig.provider === 'codex';
+    const hasLegacyEditTool =
+      lower.has('write') || lower.has('edit') || lower.has('batchedit');
+
+    if (usesCodexToolSkin && hasLegacyEditTool && !lower.has('apply_patch')) {
+      tools.push('apply_patch');
+    }
+
+    return tools;
   }
 
   private buildGlobalContextView(globalContext: ContextWindow, workItem: WorkItem): ContextWindow {
@@ -1804,10 +1821,11 @@ export class Agent {
       | { type: 'prompt'; call: ToolCall; questions: UserPromptQuestion[] };
 
     return Effect.gen(this, function* () {
-      const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
+      const effectiveToolNames = this.getEffectiveAllowedToolNames();
+      const allowedTools = new Set(effectiveToolNames.map((t) => t.toLowerCase()));
       const itemWorkId = workItemId ?? workItem.workId;
       const canonicalNames = new Map<string, string>();
-      for (const toolName of this.config.tools) {
+      for (const toolName of effectiveToolNames) {
         canonicalNames.set(toolName.toLowerCase(), toolName);
       }
 
@@ -1852,6 +1870,13 @@ export class Agent {
                 if (!edit || typeof edit !== 'object') continue;
                 const editArgs = edit as Record<string, unknown>;
                 invalidatePath(editArgs.path);
+              }
+            }
+          } else if (nameLower === 'apply_patch') {
+            const changedPaths = toolResult.metadata?.changedPaths;
+            if (Array.isArray(changedPaths)) {
+              for (const changedPath of changedPaths) {
+                invalidatePath(changedPath);
               }
             }
           }
@@ -1923,7 +1948,7 @@ export class Agent {
         metrics.toolCallsMade++;
         const nameLower = call.name.toLowerCase();
 
-        if (this.config.tools.length === 0 || !allowedTools.has(nameLower)) {
+        if (effectiveToolNames.length === 0 || !allowedTools.has(nameLower)) {
           flushParallelBuffer();
           plannedSteps.push({ type: 'disallowed', call });
           continue;
@@ -2347,7 +2372,7 @@ export class Agent {
     runControl?: AgentRunParams['runControl']
   ): Effect.Effect<void> {
     return Effect.gen(this, function* () {
-      const allowedTools = new Set(this.config.tools.map((t) => t.toLowerCase()));
+      const allowedTools = new Set(this.getEffectiveAllowedToolNames().map((t) => t.toLowerCase()));
       if (!allowedTools.has('read')) {
         return;
       }

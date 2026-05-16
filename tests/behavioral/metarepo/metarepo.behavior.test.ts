@@ -153,6 +153,7 @@ describeWithDb('metarepo behavioral flow', () => {
 
     const started = await startServer({
       port: 0,
+      host: '127.0.0.1',
       databaseUrl: TEST_DB_URL!,
       workdir,
       gitBin: 'git',

@@ -31,7 +31,16 @@ export type SupportedProvider =
   | 'z.ai-coder'
   | 'lmstudio'
   | 'replicate'
-  | 'claude';
+  | 'claude'
+  | 'deepinfra';
+
+/**
+ * Dialect of the `thinking` request-body parameter for openai-compat providers
+ * that drive reasoning via a non-standard field rather than `reasoning_effort`.
+ * - 'glm':  z.ai-coder / GLM   — `{ type: 'enabled', clear_thinking: false }`
+ * - 'kimi': Moonshot Kimi K2.x — `{ type: 'enabled', keep: 'all' }`
+ */
+export type ThinkingDialect = 'glm' | 'kimi';
 
 /**
  * Provider definition containing all metadata about a provider.
@@ -49,6 +58,12 @@ export interface ProviderDefinition {
   models?: ProviderModelDefinition[];
   /** Structured output response format for openai-compat providers */
   responseFormat?: ProviderResponseFormat;
+  /**
+   * Thinking-mode dialect for openai-compat providers that use a `thinking`
+   * request field instead of `reasoning_effort`. Omit if the provider doesn't
+   * expose a thinking toggle via the Chat Completions body.
+   */
+  thinkingDialect?: ThinkingDialect;
   /** Environment variable name for API key */
   envVar?: string;
   /** Whether this provider requires authentication (defaults to true) */
@@ -165,6 +180,11 @@ export const PROVIDER_MODEL_DEFAULTS: Partial<
     powerful: 'claude-opus-4',
     reasoning: 'claude-opus-4',
   },
+  deepinfra: {
+    standard: 'moonshotai/Kimi-K2.6',
+    powerful: 'moonshotai/Kimi-K2.6',
+    reasoning: 'moonshotai/Kimi-K2.6',
+  },
 };
 
 // ============================================
@@ -211,6 +231,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     canonicalProvider: 'openai',
     baseUrl: 'https://api.openai.com',
     models: [
+      { id: 'gpt-5.5', name: 'gpt-5.5', context_window: 256_000, reasoning: ['low', 'medium', 'high'] },
       { id: 'gpt-5.2', name: 'gpt-5.2', context_window: 256_000, reasoning: ['low', 'medium', 'high'] },
       { id: 'gpt-5-mini', name: 'gpt-5-mini', context_window: 128_000, reasoning: ['low', 'medium', 'high'] },
       { id: 'gpt-5-nano', name: 'gpt-5-nano', context_window: 128_000 },
@@ -227,6 +248,18 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     // ChatGPT OAuth uses a different backend endpoint than the public API
     baseUrl: 'https://chatgpt.com/backend-api/codex',
     models: [
+      {
+        id: 'gpt-5.5',
+        name: 'GPT-5.5',
+        context_window: 256_000,
+        reasoning: ['low', 'medium', 'high'],
+      },
+      {
+        id: 'gpt-5.4',
+        name: 'GPT-5.4',
+        context_window: 256_000,
+        reasoning: ['low', 'medium', 'high'],
+      },
       {
         id: 'gpt-5.3-codex',
         name: 'GPT-5.3 Codex',
@@ -303,6 +336,7 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     canonicalProvider: 'openai-compat',
     baseUrl: 'https://api.z.ai/api/coding/paas/v4',
     responseFormat: 'json_object',
+    thinkingDialect: 'glm',
     models: [
       {
         id: 'glm-5',
@@ -366,6 +400,29 @@ export const PROVIDER_REGISTRY: Record<SupportedProvider, ProviderDefinition> = 
     envVar: 'REPLICATE_API_TOKEN',
     testEndpoint: 'https://api.replicate.com/v1/models',
     dashboardUrl: 'https://replicate.com/account/api-tokens',
+  },
+  deepinfra: {
+    id: 'deepinfra',
+    displayName: 'DeepInfra',
+    canonicalProvider: 'openai-compat',
+    baseUrl: 'https://api.deepinfra.com/v1/openai',
+    thinkingDialect: 'kimi',
+    // DeepInfra's hosted Kimi K2.6 ignores `response_format.json_schema` and
+    // wraps output in markdown code fences when `response_format` is sent at all.
+    // Verified empirically: only the schema-in-system-prompt path produces clean JSON.
+    responseFormat: 'none',
+    models: [
+      {
+        id: 'moonshotai/Kimi-K2.6',
+        name: 'Kimi K2.6',
+        context_window: 262_144,
+        description: 'Moonshot Kimi K2.6 — 1T MoE, fp4 quantized, agentic',
+        reasoning: ['on', 'off'],
+      },
+    ],
+    envVar: 'DEEPINFRA_TOKEN',
+    testEndpoint: 'https://api.deepinfra.com/v1/openai/models',
+    dashboardUrl: 'https://deepinfra.com/dash/billing',
   },
   claude: {
     id: 'claude',
@@ -523,6 +580,17 @@ export function getProviderResponseFormat(provider: string): ProviderResponseFor
     return PROVIDER_REGISTRY[provider].responseFormat ?? 'json_schema';
   }
   return 'json_schema';
+}
+
+/**
+ * Get the thinking-mode dialect for an openai-compat provider.
+ * Returns undefined for providers that don't drive reasoning via a `thinking` body field.
+ */
+export function getProviderThinkingDialect(provider: string): ThinkingDialect | undefined {
+  if (isSupportedProvider(provider)) {
+    return PROVIDER_REGISTRY[provider].thinkingDialect;
+  }
+  return undefined;
 }
 
 /**
