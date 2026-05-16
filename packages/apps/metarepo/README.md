@@ -4,6 +4,138 @@ Deployable HTTP service for repo-aware structural analysis, review, artifact per
 
 Local v1 is intentionally unauthenticated. Run it on your machine and treat the process environment as the bootstrap boundary.
 
+## Product lifecycle
+
+Metarepo has three shipped surfaces:
+
+- server: durable state, health checks, workflow APIs, and scorekeeping artifacts
+- client CLI: installed into repos so agents can call stable commands from any checkout
+- skill package: instructions that tell a coding agent how to drive the red/blue loop
+
+The agent is the product interface. The CLI is the tool contract the agent uses.
+
+## Packaging
+
+The package is `packages/apps/metarepo` and exposes the `metarepo` CLI. The repo-root `./metarepo` wrapper is the development entrypoint and auto-loads `/.env.metarepo` when present.
+
+Build and validate from the repo root:
+
+```bash
+./metarepo build
+./metarepo lint
+./metarepo test
+```
+
+The distributable skill lives at:
+
+```text
+packages/apps/metarepo/skills/red-blue-team/SKILL.md
+```
+
+## Installation
+
+Start the server first, then install the client and skill into each repository under test.
+
+```bash
+./metarepo serve
+```
+
+From the target repo:
+
+```bash
+/path/to/agent/metarepo install all
+.metarepo/bin/metarepo add --client
+.metarepo/bin/metarepo doctor
+```
+
+Install pieces separately when needed:
+
+```bash
+/path/to/agent/metarepo install client
+/path/to/agent/metarepo install skill
+```
+
+Client placement:
+
+- `.metarepo/bin/metarepo` is the repo-local CLI wrapper for agents and humans.
+- `.metarepo/client.json` stores the repo binding.
+- `.agents/red-blue-team/SKILL.md` is the repo-local agent skill copy.
+
+Re-run install commands with `--force` to replace existing local wrappers or skill files.
+
+## Server deployment
+
+Local single-user deployment:
+
+```bash
+METAREPO_DATABASE_URL=postgres://localhost/metarepo \
+METAREPO_WORKDIR=/tmp/metarepo \
+METAREPO_SECRET_MASTER_KEY="$(openssl rand -hex 32)" \
+HOST=127.0.0.1 \
+PORT=8080 \
+./metarepo serve
+```
+
+Shared deployment is possible but not product-hardened yet. Before exposing beyond localhost, add authentication, authorization, TLS, tenant isolation, and a policy for which clients can record scorekeeping artifacts.
+
+Minimum runtime dependencies:
+
+- Bun
+- Git
+- Postgres with permission to create/drop temporary graph databases
+- the repo-under-test toolchain on the client side, for example Cargo for Rust or Bun/npm for TypeScript
+
+Server-side graph workflows may also need the language/tooling required by the entity graph indexer. Claim-first blue defense and local red evaluation intentionally run through the client repo so they can use whatever toolchain the target repo already has.
+
+## CLI contract
+
+Help is available at any depth:
+
+```bash
+metarepo --help
+metarepo blue --help
+metarepo red evaluate --help
+```
+
+Schema commands are stable contracts for agents:
+
+```bash
+metarepo claims schema
+metarepo blue schema
+metarepo red schema
+metarepo referee schema
+```
+
+Preflight the full local lifecycle:
+
+```bash
+metarepo doctor
+```
+
+`doctor` reports server health, repo binding, installed client/skill paths, and detected repo toolchains such as Cargo or npm.
+
+CLI errors print stable codes:
+
+```text
+metarepo[METAREPO_REPO_NOT_CONFIGURED]: No metarepo repo configured for this directory. Run `metarepo add` first.
+```
+
+Set `METAREPO_JSON_ERRORS=1` for machine-readable stderr:
+
+```json
+{"ok":false,"code":"METAREPO_REPO_NOT_CONFIGURED","error":"No metarepo repo configured for this directory. Run `metarepo add` first."}
+```
+
+Current codes:
+
+- `METAREPO_USAGE`
+- `METAREPO_UNKNOWN_COMMAND`
+- `METAREPO_SERVER_UNAVAILABLE`
+- `METAREPO_REPO_NOT_CONFIGURED`
+- `METAREPO_REQUEST_FAILED`
+- `METAREPO_VALIDATION`
+- `METAREPO_INTERNAL`
+
 ## Runtime model
 
 `metarepo` persists:
@@ -34,6 +166,7 @@ For each graph-backed workflow run it:
 ## Optional env vars
 
 - `PORT` (default `8080`)
+- `HOST` (default `127.0.0.1`)
 - `GIT_BIN` (default `git`)
 - `REQUEST_TIMEOUT_MS` (default `900000`)
 
@@ -115,6 +248,9 @@ curl http://127.0.0.1:8080/readyz
 - `GET /repos/:id/artifacts`
 - `GET /repos/:id/bugs`
 - `POST /repos/:id/bugs`
+- `GET /repos/:id/claims`
+- `POST /repos/:id/claims`
+- `POST /repos/:id/blue-defenses`
 - `POST /repos/:id/env-profiles`
 - `POST /repos/:id/secret-refs`
 - `GET /runs/:id`
@@ -133,9 +269,11 @@ curl http://127.0.0.1:8080/readyz
 - `POST /rpc/test.recent_paths`
 - `POST /rpc/test.smells`
 - `POST /rpc/review.run`
+- `POST /rpc/blue.assign-claim`
 - `POST /rpc/red.targets`
 - `POST /rpc/red.dossier`
 - `POST /rpc/red.mutate`
+- `POST /rpc/red.mutate.record`
 - `POST /rpc/referee.run`
 
 Example:

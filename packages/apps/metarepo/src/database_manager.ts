@@ -102,6 +102,25 @@ CREATE TABLE IF NOT EXISTS metarepo.bugs (
 
 CREATE INDEX IF NOT EXISTS metarepo_bugs_repo_id_idx ON metarepo.bugs(repo_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS metarepo.behavior_claims (
+  id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL REFERENCES metarepo.repos(id) ON DELETE CASCADE,
+  behavior TEXT NOT NULL,
+  scope_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'assigned', 'defended', 'stale', 'dismissed')),
+  source TEXT,
+  source_fingerprint_json JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS metarepo_behavior_claims_repo_id_idx
+  ON metarepo.behavior_claims(repo_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS metarepo_behavior_claims_status_idx
+  ON metarepo.behavior_claims(repo_id, status, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS metarepo.secret_refs (
   id TEXT PRIMARY KEY,
   repo_id TEXT REFERENCES metarepo.repos(id) ON DELETE CASCADE,

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { cp, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import postgres from 'postgres'
 import type { Sql } from 'postgres'
@@ -19,14 +19,31 @@ import { parseValidationSpec, serializeValidationSpec, buildValidationSpec, make
 import { createChallenge, createAcknowledgement, activeAcknowledgement, openChallengesForContract } from '../../../plugins/entity-graph/src/contracts/challenge.js'
 import { verifyContracts } from '../../../plugins/entity-graph/src/contracts/verify.js'
 import { DatabaseManager } from './database_manager.js'
+import {
+  evaluateMutation,
+  pickParentEnv,
+  runCommand,
+  type CommandResult,
+  type RunCommandInput,
+} from './mutation_evaluator.js'
 import { decryptSecretValue, encryptSecretValue } from './secrets.js'
 import { recentTestPaths, summarizeSmells } from './test_smells.js'
 import type {
   ArtifactRecord,
+  BehaviorClaimEvidence,
+  BehaviorClaimRecord,
+  BehaviorClaimScope,
+  BehaviorClaimStatus,
   BlueAssignedBoundary,
   BlueAssignmentPayload,
   BlueAssignmentRecord,
+  BlueAssignClaimRequest,
   BlueAssignRequest,
+  BlueClaimAssignmentPayload,
+  BlueClaimAssignmentRecord,
+  BlueClaimDefenseInput,
+  BlueClaimDefensePayload,
+  BlueClaimDefenseRecord,
   BlueHandoffInput,
   BlueHandoffPayload,
   BlueHandoffRecord,
@@ -39,7 +56,9 @@ import type {
   ContractCompileResult,
   ContractInterviewRequest,
   ContractInterviewResult,
+  CreateBehaviorClaimInput,
   CreateBugInput,
+  CreateBlueClaimDefenseRequest,
   CreateBlueHandoffRequest,
   CreateEnvProfileInput,
   CreateRepoInput,
@@ -59,13 +78,13 @@ import type {
   GraphTreeRequest,
   MetarepoApi,
   MutationEvaluationResult,
-  MutationPatchOperation,
   MutationProposalInput,
   MutationVerdictInput,
   MutationVerdictRecord,
   MutationVerdictRequest,
   ProjectIndex,
   RedDossierRequest,
+  RedMutateRecordRequest,
   RedMutateRequest,
   RedTargetsRequest,
   ReadinessVerdict,
@@ -86,21 +105,6 @@ import type {
   WorkflowResponse,
 } from './types.js'
 import { VERDICT_BASIS_BY_DISPOSITION } from './types.js'
-
-type RunCommandInput = {
-  cwd: string
-  args: string[]
-  env?: NodeJS.ProcessEnv
-  timeoutMs: number
-  command?: string
-  rejectOnNonZero?: boolean
-}
-
-type CommandResult = {
-  stdout: string
-  stderr: string
-  exitCode: number
-}
 
 type PreparedSourceRoot = {
   sourceRoot: string
@@ -208,6 +212,19 @@ type BugRow = {
   updated_at: Date
 }
 
+type BehaviorClaimRow = {
+  id: string
+  repo_id: string
+  behavior: string
+  scope_json: unknown
+  evidence_json: unknown
+  status: string
+  source: string | null
+  source_fingerprint_json: unknown
+  created_at: Date
+  updated_at: Date
+}
+
 type EnvProfileRow = {
   id: string
   repo_id: string
@@ -229,20 +246,6 @@ type SecretRefRow = {
   created_at: Date
   updated_at: Date
 }
-
-const TEST_FAILURE_INVALID_RE = /syntaxerror|transform failed|build failed|compilation failed|unexpected token|no test files found|no tests found/i
-const ALLOWED_PARENT_ENV_KEYS = [
-  'PATH',
-  'HOME',
-  'TMPDIR',
-  'TMP',
-  'TEMP',
-  'SYSTEMROOT',
-  'COMSPEC',
-  'TERM',
-  'SHELL',
-  'PWD',
-] as const
 
 function toIsoString(value: Date | null): string | null {
   return value ? value.toISOString() : null
@@ -331,10 +334,24 @@ function mapBlueAssignment(artifact: ArtifactRecord): BlueAssignmentRecord {
   }
 }
 
+function mapBlueClaimAssignment(artifact: ArtifactRecord): BlueClaimAssignmentRecord {
+  return {
+    artifact,
+    assignment: normalizeBlueClaimAssignmentPayload(artifact.payload),
+  }
+}
+
 function mapBlueHandoff(artifact: ArtifactRecord): BlueHandoffRecord {
   return {
     artifact,
     handoff: normalizeBlueHandoffPayload(artifact.payload),
+  }
+}
+
+function mapBlueClaimDefense(artifact: ArtifactRecord): BlueClaimDefenseRecord {
+  return {
+    artifact,
+    defense: normalizeBlueClaimDefensePayload(artifact.payload),
   }
 }
 
@@ -347,6 +364,21 @@ function mapBug(row: BugRow): BugRecord {
     description: row.description,
     status: row.status,
     payload: row.payload_json,
+    sourceFingerprint: row.source_fingerprint_json ? normalizeSourceFingerprint(row.source_fingerprint_json) : null,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  }
+}
+
+function mapBehaviorClaim(row: BehaviorClaimRow): BehaviorClaimRecord {
+  return {
+    id: row.id,
+    repoId: row.repo_id,
+    behavior: row.behavior,
+    scope: normalizeClaimScope(row.scope_json),
+    evidence: normalizeClaimEvidence(row.evidence_json),
+    status: normalizeClaimStatus(row.status),
+    source: row.source,
     sourceFingerprint: row.source_fingerprint_json ? normalizeSourceFingerprint(row.source_fingerprint_json) : null,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -385,6 +417,55 @@ function asStringRecord(value: unknown): Record<string, string> {
   return Object.fromEntries(
     Object.entries(payload).filter(([, item]) => typeof item === 'string') as Array<[string, string]>,
   )
+}
+
+function isClaimStatus(value: string): value is BehaviorClaimStatus {
+  return value === 'open' || value === 'assigned' || value === 'defended' || value === 'stale' || value === 'dismissed'
+}
+
+function normalizeClaimStatus(value: unknown): BehaviorClaimStatus {
+  return typeof value === 'string' && isClaimStatus(value) ? value : 'open'
+}
+
+function normalizeClaimScope(value: unknown): BehaviorClaimScope {
+  const payload = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const scope: BehaviorClaimScope = {
+    files: normalizeStringList(payload.files, 'claim.scope.files'),
+  }
+  const symbols = normalizeStringList(payload.symbols, 'claim.scope.symbols')
+  if (symbols.length > 0) scope.symbols = symbols
+  if (typeof payload.language === 'string' && payload.language.trim()) scope.language = payload.language.trim()
+  if (typeof payload.package === 'string' && payload.package.trim()) scope.package = payload.package.trim()
+  if (payload.metadata !== undefined) scope.metadata = payload.metadata
+  return scope
+}
+
+function normalizeClaimEvidence(value: unknown): BehaviorClaimEvidence {
+  const payload = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const evidence: BehaviorClaimEvidence = {}
+  const testFiles = normalizeStringList(payload.testFiles, 'claim.evidence.testFiles')
+  const testCommand = normalizeStringList(payload.testCommand, 'claim.evidence.testCommand')
+  if (testFiles.length > 0) evidence.testFiles = testFiles
+  if (testCommand.length > 0) evidence.testCommand = testCommand
+  if (typeof payload.notes === 'string' && payload.notes.trim()) evidence.notes = payload.notes.trim()
+  if (payload.metadata !== undefined) evidence.metadata = payload.metadata
+  return evidence
+}
+
+function normalizeBehaviorClaimRecord(value: unknown, field: string): BehaviorClaimRecord {
+  const payload = asObjectRecord(value, field)
+  return {
+    id: requireTrimmedString(payload.id, `${field}.id`),
+    repoId: requireTrimmedString(payload.repoId, `${field}.repoId`),
+    behavior: requireTrimmedString(payload.behavior, `${field}.behavior`),
+    scope: normalizeClaimScope(payload.scope),
+    evidence: normalizeClaimEvidence(payload.evidence),
+    status: normalizeClaimStatus(payload.status),
+    source: typeof payload.source === 'string' && payload.source.trim() ? payload.source.trim() : null,
+    sourceFingerprint: payload.sourceFingerprint ? normalizeSourceFingerprint(payload.sourceFingerprint) : null,
+    createdAt: typeof payload.createdAt === 'string' ? payload.createdAt : new Date(0).toISOString(),
+    updatedAt: typeof payload.updatedAt === 'string' ? payload.updatedAt : new Date(0).toISOString(),
+  }
 }
 
 function normalizeStringList(value: unknown, field: string, opts?: { min?: number }): string[] {
@@ -433,6 +514,15 @@ function normalizeBlueAssignmentPayload(value: unknown): BlueAssignmentPayload {
   }
 }
 
+function normalizeBlueClaimAssignmentPayload(value: unknown): BlueClaimAssignmentPayload {
+  const payload = asObjectRecord(value, 'blue claim assignment')
+  return {
+    selector: requireTrimmedString(payload.selector, 'assignment.selector'),
+    claim: normalizeBehaviorClaimRecord(payload.claim, 'assignment.claim'),
+    reasons: normalizeStringList(payload.reasons, 'assignment.reasons'),
+  }
+}
+
 function buildBlueHandoffPayload(input: BlueHandoffInput, assignment: BlueAssignmentPayload): BlueHandoffPayload {
   if (!input?.assignmentArtifactId?.trim()) {
     throw new ValidationError('handoff.assignmentArtifactId is required')
@@ -459,6 +549,49 @@ function buildBlueHandoffPayload(input: BlueHandoffInput, assignment: BlueAssign
     notes: input.notes?.trim() || undefined,
     bugIds,
     contractIds,
+  }
+}
+
+function buildBlueClaimDefensePayload(input: BlueClaimDefenseInput, assignment: BlueClaimAssignmentPayload): BlueClaimDefensePayload {
+  if (!input?.assignmentArtifactId?.trim()) {
+    throw new ValidationError('defense.assignmentArtifactId is required')
+  }
+  const testFiles = normalizeStringList(input.testFiles, 'defense.testFiles', { min: 1 })
+  const testCommand = normalizeStringList(input.testCommand, 'defense.testCommand', { min: 1 })
+  const changedFiles = normalizeStringList(
+    [...(input.changedFiles ?? []), ...testFiles],
+    'defense.changedFiles',
+    { min: 1 },
+  )
+  const bugIds = normalizeStringList(input.bugIds ?? [], 'defense.bugIds')
+
+  return {
+    selector: assignment.selector,
+    assignmentArtifactId: input.assignmentArtifactId.trim(),
+    claimId: assignment.claim.id,
+    claim: assignment.claim,
+    testFiles,
+    changedFiles,
+    testCommand,
+    summary: input.summary?.trim() || undefined,
+    notes: input.notes?.trim() || undefined,
+    bugIds,
+  }
+}
+
+function normalizeBlueClaimDefensePayload(value: unknown): BlueClaimDefensePayload {
+  const payload = asObjectRecord(value, 'blue claim defense')
+  return {
+    selector: requireTrimmedString(payload.selector, 'defense.selector'),
+    assignmentArtifactId: requireTrimmedString(payload.assignmentArtifactId, 'defense.assignmentArtifactId'),
+    claimId: requireTrimmedString(payload.claimId, 'defense.claimId'),
+    claim: normalizeBehaviorClaimRecord(payload.claim, 'defense.claim'),
+    testFiles: normalizeStringList(payload.testFiles, 'defense.testFiles', { min: 1 }),
+    changedFiles: normalizeStringList(payload.changedFiles, 'defense.changedFiles', { min: 1 }),
+    testCommand: normalizeStringList(payload.testCommand, 'defense.testCommand', { min: 1 }),
+    summary: typeof payload.summary === 'string' && payload.summary.trim() ? payload.summary.trim() : undefined,
+    notes: typeof payload.notes === 'string' && payload.notes.trim() ? payload.notes.trim() : undefined,
+    bugIds: normalizeStringList(payload.bugIds, 'defense.bugIds'),
   }
 }
 
@@ -533,27 +666,6 @@ async function assertAbsoluteDirectory(absPath: string, label: string): Promise<
 function resolveRegistryPath(sourceRoot: string, registryPath: string | null): string | undefined {
   if (!registryPath) return undefined
   return path.isAbsolute(registryPath) ? registryPath : path.join(sourceRoot, registryPath)
-}
-
-function summarizeOutput(output: string): string | undefined {
-  const trimmed = output.trim()
-  if (!trimmed) return undefined
-  return trimmed.length > 4000 ? `${trimmed.slice(0, 4000)}...` : trimmed
-}
-
-function pickParentEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {}
-  for (const key of ALLOWED_PARENT_ENV_KEYS) {
-    const value = process.env[key]
-    if (typeof value === 'string' && value.length > 0) {
-      env[key] = value
-    }
-  }
-  return env
-}
-
-function normalizeContentSignal(content: string): string {
-  return content.replace(/\s+/g, '')
 }
 
 function normalizeSelector(selector?: string): string {
@@ -708,49 +820,6 @@ export class ValidationError extends Error {
 
 export async function runGitCommand(input: Omit<RunCommandInput, 'command'>): Promise<CommandResult> {
   return runCommand({ ...input, command: 'git' })
-}
-
-async function runCommand(input: RunCommandInput): Promise<CommandResult> {
-  const command = input.command ?? 'git'
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, input.args, {
-      cwd: input.cwd,
-      env: input.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-
-    let stdout = ''
-    let stderr = ''
-
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      reject(new Error(`Command timed out after ${input.timeoutMs}ms: ${command} ${input.args.join(' ')}`))
-    }, input.timeoutMs)
-
-    child.stdout.on('data', chunk => {
-      stdout += chunk.toString()
-    })
-
-    child.stderr.on('data', chunk => {
-      stderr += chunk.toString()
-    })
-
-    child.on('error', error => {
-      clearTimeout(timer)
-      reject(error)
-    })
-
-    child.on('close', code => {
-      clearTimeout(timer)
-      const exitCode = code ?? 1
-      const result = { stdout, stderr, exitCode }
-      if (exitCode !== 0 && input.rejectOnNonZero !== false) {
-        reject(new Error(`Command failed (${exitCode}): ${command} ${input.args.join(' ')}\n${stderr}`))
-        return
-      }
-      resolve(result)
-    })
-  })
 }
 
 export class MetarepoService implements MetarepoApi {
@@ -942,6 +1011,76 @@ export class MetarepoService implements MetarepoApi {
     }
   }
 
+  async createBlueClaimDefense(input: CreateBlueClaimDefenseRequest): Promise<BlueClaimDefenseRecord> {
+    await this.ensureStarted()
+    const repo = await this.requireRepo(input.repoId)
+    const prepared = input.sourceFingerprint
+      ? { sourceFingerprint: input.sourceFingerprint, cleanup: undefined }
+      : await this.prepareSourceRoot(repo, input.source, undefined, false)
+    const assignmentArtifact = await this.getArtifact(input.defense.assignmentArtifactId)
+    if (assignmentArtifact.repoId !== repo.id) {
+      throw new ValidationError(`blue claim assignment ${assignmentArtifact.id} does not belong to repo ${repo.id}`)
+    }
+    if (assignmentArtifact.kind !== 'blue_claim_assignment') {
+      throw new ValidationError(`artifact ${assignmentArtifact.id} is not a blue claim assignment`)
+    }
+    const assignment = mapBlueClaimAssignment(assignmentArtifact).assignment
+    const defense = buildBlueClaimDefensePayload(input.defense, assignment)
+    let run: RunRecord | null = null
+
+    try {
+      run = await this.createRun(repo.id, 'blue.record-defense', prepared.sourceFingerprint, input.requestedBy)
+      await this.recordEvent(repo.id, run.id, 'run.created', { workflow: 'blue.record-defense' })
+      run = await this.updateRun(run.id, {
+        status: 'running',
+        tempRootPath: serializeTempRoot(prepared.cleanup),
+        startedAt: new Date(),
+      })
+      await this.markBehaviorClaimDefended(defense.claimId)
+      const artifact = await this.insertArtifact(
+        repo.id,
+        run.id,
+        'blue_claim_defense',
+        defense.claimId,
+        {
+          ...defense,
+          claim: await this.requireBehaviorClaim(defense.claimId),
+        },
+        prepared.sourceFingerprint,
+      )
+      await this.recordEvent(repo.id, run.id, 'blue.claim_defense.recorded', {
+        artifactId: artifact.id,
+        assignmentArtifactId: assignmentArtifact.id,
+        claimId: defense.claimId,
+        changedFiles: defense.changedFiles,
+        testFiles: defense.testFiles,
+      })
+      run = await this.updateRun(run.id, {
+        status: 'succeeded',
+        finishedAt: new Date(),
+      })
+      await this.recordEvent(repo.id, run.id, 'run.succeeded', {
+        workflow: 'blue.record-defense',
+        artifactCount: 1,
+      })
+      return mapBlueClaimDefense(artifact)
+    } catch (error) {
+      if (run) {
+        await this.updateRun(run.id, {
+          status: 'failed',
+          errorMessage: stringifyError(error),
+          finishedAt: new Date(),
+        }).catch(() => null)
+        await this.recordEvent(repo.id, run.id, 'run.failed', { error: stringifyError(error) }).catch(() => {})
+      }
+      throw error
+    } finally {
+      if (prepared.cleanup) {
+        await this.cleanupPreparedSource(prepared.cleanup).catch(() => {})
+      }
+    }
+  }
+
   async getLatestBlueHandoff(repoId: string): Promise<BlueHandoffRecord> {
     await this.ensureStarted()
     await this.requireRepo(repoId)
@@ -1018,6 +1157,125 @@ export class MetarepoService implements MetarepoApi {
       RETURNING *
     `
     return mapBug(rows[0]!)
+  }
+
+  async listBehaviorClaims(repoId: string, status?: BehaviorClaimStatus): Promise<BehaviorClaimRecord[]> {
+    await this.ensureStarted()
+    await this.requireRepo(repoId)
+    const sql = this.databaseManager.getAppSql()
+    const rows = status
+      ? await sql<BehaviorClaimRow[]>`
+          SELECT * FROM metarepo.behavior_claims
+          WHERE repo_id = ${repoId}
+            AND status = ${status}
+          ORDER BY updated_at DESC, created_at DESC
+        `
+      : await sql<BehaviorClaimRow[]>`
+          SELECT * FROM metarepo.behavior_claims
+          WHERE repo_id = ${repoId}
+          ORDER BY updated_at DESC, created_at DESC
+        `
+    return rows.map(mapBehaviorClaim)
+  }
+
+  async createBehaviorClaim(repoId: string, input: CreateBehaviorClaimInput): Promise<BehaviorClaimRecord> {
+    await this.ensureStarted()
+    await this.requireRepo(repoId)
+    const behavior = input.behavior?.trim()
+    if (!behavior) {
+      throw new ValidationError('claim.behavior is required')
+    }
+    const scope = normalizeClaimScope(input.scope ?? {})
+    const evidence = normalizeClaimEvidence(input.evidence ?? {})
+    const status = normalizeClaimStatus(input.status)
+    const sql = this.databaseManager.getAppSql()
+    const rows = await sql<BehaviorClaimRow[]>`
+      INSERT INTO metarepo.behavior_claims (
+        id,
+        repo_id,
+        behavior,
+        scope_json,
+        evidence_json,
+        status,
+        source,
+        source_fingerprint_json
+      ) VALUES (
+        ${randomUUID()},
+        ${repoId},
+        ${behavior},
+        ${sql.json(scope as any)},
+        ${sql.json(evidence as any)},
+        ${status},
+        ${input.source?.trim() || null},
+        ${input.sourceFingerprint ? sql.json(input.sourceFingerprint as any) : null}
+      )
+      RETURNING *
+    `
+    return mapBehaviorClaim(rows[0]!)
+  }
+
+  async blueAssignClaim(input: BlueAssignClaimRequest): Promise<WorkflowResponse<BlueClaimAssignmentRecord>> {
+    await this.ensureStarted()
+    const repo = await this.requireRepo(input.repoId)
+    const claim = await this.selectBehaviorClaim(repo.id, input.selector)
+    const sourceFingerprint = this.buildClientSourceFingerprint(repo, claim.sourceFingerprint ?? undefined)
+    const run = await this.createRun(repo.id, 'blue.assign-claim', sourceFingerprint, input.requestedBy)
+    const artifacts: ArtifactRecord[] = []
+
+    try {
+      const activeRun = await this.updateRun(run.id, {
+        status: 'running',
+        startedAt: new Date(),
+      })
+      await this.recordEvent(repo.id, run.id, 'run.created', { workflow: 'blue.assign-claim' })
+      await this.markBehaviorClaimAssigned(claim.id)
+      const assignedClaim = await this.requireBehaviorClaim(claim.id)
+      const assignment: BlueClaimAssignmentPayload = {
+        selector: input.selector?.trim() || 'open',
+        claim: assignedClaim,
+        reasons: ['claim-ledger', `previousStatus=${claim.status}`],
+      }
+      const artifact = await this.insertArtifact(
+        repo.id,
+        run.id,
+        'blue_claim_assignment',
+        claim.id,
+        assignment,
+        sourceFingerprint,
+      )
+      artifacts.push(artifact)
+      const completedRun = await this.updateRun(run.id, {
+        status: 'succeeded',
+        finishedAt: new Date(),
+      })
+      await this.recordEvent(repo.id, run.id, 'blue.claim_assignment.created', {
+        artifactId: artifact.id,
+        claimId: claim.id,
+      })
+      await this.recordEvent(repo.id, run.id, 'run.succeeded', {
+        workflow: 'blue.assign-claim',
+        artifactCount: artifacts.length,
+      })
+      return {
+        run: {
+          ...completedRun,
+          startedAt: activeRun.startedAt,
+        },
+        artifacts,
+        result: {
+          artifact,
+          assignment,
+        },
+      }
+    } catch (error) {
+      await this.updateRun(run.id, {
+        status: 'failed',
+        errorMessage: stringifyError(error),
+        finishedAt: new Date(),
+      }).catch(() => null)
+      await this.recordEvent(repo.id, run.id, 'run.failed', { error: stringifyError(error) }).catch(() => {})
+      throw error
+    }
   }
 
   async createEnvProfile(repoId: string, input: CreateEnvProfileInput): Promise<EnvProfileRecord> {
@@ -1608,7 +1866,7 @@ export class MetarepoService implements MetarepoApi {
     const run = await this.createRun(repo.id, 'red.mutate', prepared.sourceFingerprint, input.requestedBy)
     await this.recordEvent(repo.id, run.id, 'run.created', { workflow: 'red.mutate' })
 
-    const task = this.executeStartedRedMutate(run, repo, prepared, input.proposal)
+    const task = this.executeStartedRedMutate(run, repo, prepared, input.proposal, input.claimId)
     this.backgroundRuns.set(run.id, task)
     void task.finally(() => {
       this.backgroundRuns.delete(run.id)
@@ -1625,11 +1883,106 @@ export class MetarepoService implements MetarepoApi {
       input.requestedBy,
       input.source,
       async ctx => {
-        return this.runSubmittedMutation(ctx, input.proposal)
+        return this.runSubmittedMutation(ctx, input.proposal, input.claimId)
       },
       undefined,
       true,
     )
+  }
+
+  async recordRedMutate(input: RedMutateRecordRequest): Promise<WorkflowResponse<MutationEvaluationResult>> {
+    await this.ensureStarted()
+    this.validateMutationProposal(input.proposal)
+    const repo = await this.requireRepo(input.repoId)
+    const sourceFingerprint = this.buildClientSourceFingerprint(repo, input.sourceFingerprint)
+    const run = await this.createRun(repo.id, 'red.mutate.local', sourceFingerprint, input.requestedBy)
+    const artifacts: ArtifactRecord[] = []
+
+    try {
+      const activeRun = await this.updateRun(run.id, {
+        status: 'running',
+        startedAt: new Date(),
+      })
+      await this.recordEvent(repo.id, run.id, 'run.created', { workflow: 'red.mutate.local' })
+      await this.recordEvent(repo.id, run.id, 'mutation.local_result.received', {
+        claimId: input.claimId,
+        targetFile: input.proposal.targetFile,
+        targetSymbol: input.proposal.targetSymbol,
+        status: input.result.status,
+      })
+
+      const proposalArtifact = await this.insertArtifact(
+        repo.id,
+        run.id,
+        'mutation_proposal',
+        input.proposal.title ?? input.proposal.targetSymbol,
+        input.claimId ? { ...input.proposal, claimId: input.claimId } : input.proposal,
+        sourceFingerprint,
+      )
+      artifacts.push(proposalArtifact)
+
+      const result: MutationEvaluationResult = {
+        ...input.result,
+        id: proposalArtifact.id,
+      }
+      const resultArtifact = await this.insertArtifact(
+        repo.id,
+        run.id,
+        'mutation_result',
+        `Mutation result ${proposalArtifact.id}`,
+        result,
+        sourceFingerprint,
+      )
+      artifacts.push(resultArtifact)
+      artifacts.push(await this.insertArtifact(
+        repo.id,
+        run.id,
+        'referee_result',
+        `Referee result ${proposalArtifact.id}`,
+        {
+          proposalArtifactId: proposalArtifact.id,
+          claimId: input.claimId,
+          result,
+          executor: 'client-local',
+        },
+        sourceFingerprint,
+      ))
+
+      await this.recordEvent(repo.id, run.id, 'mutation.result.recorded', {
+        artifactId: resultArtifact.id,
+        proposalArtifactId: proposalArtifact.id,
+        claimId: input.claimId,
+        status: result.status,
+        realMutation: result.realMutation,
+        patchApplied: result.patchApplied,
+        executor: 'client-local',
+      })
+
+      const completedRun = await this.updateRun(run.id, {
+        status: 'succeeded',
+        finishedAt: new Date(),
+      })
+      await this.recordEvent(repo.id, run.id, 'run.succeeded', {
+        workflow: 'red.mutate.local',
+        artifactCount: artifacts.length,
+      })
+      return {
+        run: {
+          ...completedRun,
+          startedAt: activeRun.startedAt,
+        },
+        artifacts,
+        result,
+      }
+    } catch (error) {
+      await this.updateRun(run.id, {
+        status: 'failed',
+        errorMessage: stringifyError(error),
+        finishedAt: new Date(),
+      }).catch(() => null)
+      await this.recordEvent(repo.id, run.id, 'run.failed', { error: stringifyError(error) }).catch(() => {})
+      throw error
+    }
   }
 
   private async executeStartedRedMutate(
@@ -1637,13 +1990,14 @@ export class MetarepoService implements MetarepoApi {
     repo: RepoRecord,
     prepared: PreparedSourceRoot,
     proposal: MutationProposalInput,
+    claimId?: string,
   ): Promise<void> {
     await this.executePreparedMutationWorkflow(
       run,
       repo,
       'red.mutate',
       prepared,
-      async ctx => this.runSubmittedMutation(ctx, proposal),
+      async ctx => this.runSubmittedMutation(ctx, proposal, claimId),
     ).catch(() => {})
   }
 
@@ -1876,6 +2230,54 @@ export class MetarepoService implements MetarepoApi {
     return mapRepo(rows[0])
   }
 
+  private async requireBehaviorClaim(id: string): Promise<BehaviorClaimRecord> {
+    const sql = this.databaseManager.getAppSql()
+    const rows = await sql<BehaviorClaimRow[]>`
+      SELECT * FROM metarepo.behavior_claims WHERE id = ${id} LIMIT 1
+    `
+    if (!rows[0]) throw new ValidationError(`behavior claim not found: ${id}`)
+    return mapBehaviorClaim(rows[0])
+  }
+
+  private async selectBehaviorClaim(repoId: string, selector: string | undefined): Promise<BehaviorClaimRecord> {
+    const claims = await this.listBehaviorClaims(repoId)
+    const normalizedSelector = selector?.trim()
+    const candidates = normalizedSelector && normalizedSelector !== 'open'
+      ? claims.filter(claim => {
+        if (claim.id === normalizedSelector) return true
+        if (claim.behavior.toLowerCase().includes(normalizedSelector.toLowerCase())) return true
+        if (claim.scope.files.some(file => matchesPath(file, normalizedSelector))) return true
+        return claim.scope.symbols?.some(symbol => symbol.includes(normalizedSelector)) ?? false
+      })
+      : claims.filter(claim => claim.status === 'open')
+
+    const selected = candidates[0] ?? claims.find(claim => claim.status === 'open') ?? claims[0]
+    if (!selected) {
+      throw new ValidationError('no behavior claims are available for this repo')
+    }
+    return selected
+  }
+
+  private async markBehaviorClaimAssigned(claimId: string): Promise<void> {
+    const sql = this.databaseManager.getAppSql()
+    await sql`
+      UPDATE metarepo.behavior_claims
+      SET status = CASE WHEN status = 'open' THEN 'assigned' ELSE status END,
+          updated_at = NOW()
+      WHERE id = ${claimId}
+    `
+  }
+
+  private async markBehaviorClaimDefended(claimId: string): Promise<void> {
+    const sql = this.databaseManager.getAppSql()
+    await sql`
+      UPDATE metarepo.behavior_claims
+      SET status = 'defended',
+          updated_at = NOW()
+      WHERE id = ${claimId}
+    `
+  }
+
   private async createRun(repoId: string, workflow: string, sourceFingerprint: SourceFingerprint, requestedBy?: string): Promise<RunRecord> {
     const sql = this.databaseManager.getAppSql()
     const rows = await sql<RunRow[]>`
@@ -2051,19 +2453,28 @@ export class MetarepoService implements MetarepoApi {
   private async runSubmittedMutation(
     ctx: MutationWorkflowContext,
     proposal: MutationProposalInput,
+    claimId?: string,
   ): Promise<MutationEvaluationResult> {
     const proposalArtifact = await ctx.createArtifact(
       'mutation_proposal',
       proposal.title ?? proposal.targetSymbol,
-      proposal,
+      claimId ? { ...proposal, claimId } : proposal,
     )
     await ctx.recordEvent('mutation.proposal.persisted', {
       artifactId: proposalArtifact.id,
+      claimId,
       family: proposal.family,
       targetFile: proposal.targetFile,
       targetSymbol: proposal.targetSymbol,
     })
-    const result = await this.evaluateMutation(ctx, proposal, proposalArtifact.id)
+    const result = await evaluateMutation({
+      sourceRoot: ctx.sourceRoot,
+      proposal,
+      proposalArtifactId: proposalArtifact.id,
+      env: await this.resolveExecutionEnv(ctx.repo),
+      timeoutMs: this.config.requestTimeoutMs,
+      recordEvent: ctx.recordEvent,
+    })
     const mutationResultArtifact = await ctx.createArtifact(
       'mutation_result',
       `Mutation result ${proposalArtifact.id}`,
@@ -2071,11 +2482,13 @@ export class MetarepoService implements MetarepoApi {
     )
     await ctx.createArtifact('referee_result', `Referee result ${proposalArtifact.id}`, {
       proposalArtifactId: proposalArtifact.id,
+      claimId,
       result,
     })
     await ctx.recordEvent('mutation.result.recorded', {
       artifactId: mutationResultArtifact.id,
       proposalArtifactId: proposalArtifact.id,
+      claimId,
       status: result.status,
       realMutation: result.realMutation,
       patchApplied: result.patchApplied,
@@ -2088,7 +2501,14 @@ export class MetarepoService implements MetarepoApi {
     proposalArtifactId: string,
     proposal: MutationProposalInput,
   ): Promise<MutationEvaluationResult> {
-    const result = await this.evaluateMutation(ctx, proposal, proposalArtifactId)
+    const result = await evaluateMutation({
+      sourceRoot: ctx.sourceRoot,
+      proposal,
+      proposalArtifactId,
+      env: await this.resolveExecutionEnv(ctx.repo),
+      timeoutMs: this.config.requestTimeoutMs,
+      recordEvent: ctx.recordEvent,
+    })
     await ctx.createArtifact('referee_result', `Referee result ${proposalArtifactId}`, {
       proposalArtifactId,
       result,
@@ -2370,6 +2790,20 @@ export class MetarepoService implements MetarepoApi {
     }
   }
 
+  private buildClientSourceFingerprint(repo: RepoRecord, input: Partial<SourceFingerprint> | undefined): SourceFingerprint {
+    return {
+      repoId: repo.id,
+      sourceKind: repo.sourceKind,
+      rootPath: input?.rootPath ?? repo.rootPath ?? undefined,
+      cloneUrl: input?.cloneUrl ?? repo.cloneUrl ?? undefined,
+      ref: input?.ref,
+      commitSha: input?.commitSha,
+      branch: input?.branch,
+      dirty: input?.dirty ?? true,
+      createdAt: input?.createdAt ?? new Date().toISOString(),
+    }
+  }
+
   private async buildGraph(databaseUrl: string, sourceRoot: string): Promise<GraphBuildStats> {
     const sql = postgres(databaseUrl, { max: 4, idle_timeout: 30, connect_timeout: 10 })
     try {
@@ -2379,264 +2813,6 @@ export class MetarepoService implements MetarepoApi {
       })
     } finally {
       await sql.end()
-    }
-  }
-
-  private async evaluateMutation(
-    ctx: MutationWorkflowContext,
-    proposal: MutationProposalInput,
-    proposalArtifactId: string,
-  ): Promise<MutationEvaluationResult> {
-    const commandLabel = proposal.testTarget.command.join(' ')
-    const evaluationStartedAt = Date.now()
-    await ctx.recordEvent('mutation.evaluation.started', {
-      proposalArtifactId,
-      targetFile: proposal.targetFile,
-      targetSymbol: proposal.targetSymbol,
-      command: proposal.testTarget.command,
-    })
-
-    const baselineStartedAt = Date.now()
-    await ctx.recordEvent('mutation.baseline.started', {
-      proposalArtifactId,
-      command: proposal.testTarget.command,
-    })
-    const baseline = await runCommand({
-      cwd: ctx.sourceRoot,
-      command: proposal.testTarget.command[0],
-      args: proposal.testTarget.command.slice(1),
-      env: await this.resolveExecutionEnv(ctx.repo),
-      timeoutMs: this.config.requestTimeoutMs,
-      rejectOnNonZero: false,
-    })
-    await ctx.recordEvent('mutation.baseline.finished', {
-      proposalArtifactId,
-      exitCode: baseline.exitCode,
-      durationMs: Date.now() - baselineStartedAt,
-    })
-
-    if (baseline.exitCode !== 0) {
-      await ctx.recordEvent('mutation.result', {
-        proposalArtifactId,
-        status: 'invalid',
-        stage: 'baseline',
-        durationMs: Date.now() - evaluationStartedAt,
-      })
-      return {
-        id: proposalArtifactId,
-        status: 'invalid',
-        realMutation: false,
-        preservesIntendedBehavior: null,
-        patchApplied: false,
-        workspacePath: ctx.sourceRoot,
-        testTarget: proposal.testTarget,
-        testsRun: [commandLabel],
-        summary: 'Baseline target does not pass before mutation',
-        reason: 'The named test target failed before the mutation was applied.',
-        stdoutSummary: summarizeOutput(baseline.stdout),
-        stderrSummary: summarizeOutput(baseline.stderr),
-      }
-    }
-
-    await ctx.recordEvent('mutation.patch.started', {
-      proposalArtifactId,
-      operationCount: proposal.patch.length,
-    })
-    const patchResult = await this.applyMutationPatch(ctx.sourceRoot, proposal.patch)
-    if (!patchResult.patchApplied || !patchResult.realMutation) {
-      await ctx.recordEvent('mutation.patch.rejected', {
-        proposalArtifactId,
-        patchApplied: patchResult.patchApplied,
-        realMutation: patchResult.realMutation,
-        reason: patchResult.reason,
-      })
-      await ctx.recordEvent('mutation.result', {
-        proposalArtifactId,
-        status: 'invalid',
-        stage: 'patch',
-        durationMs: Date.now() - evaluationStartedAt,
-      })
-      return {
-        id: proposalArtifactId,
-        status: 'invalid',
-        realMutation: patchResult.realMutation,
-        preservesIntendedBehavior: null,
-        patchApplied: patchResult.patchApplied,
-        workspacePath: ctx.sourceRoot,
-        testTarget: proposal.testTarget,
-        testsRun: [commandLabel],
-        summary: 'Mutation proposal did not apply as a real code change',
-        reason: patchResult.reason,
-      }
-    }
-    await ctx.recordEvent('mutation.patch.applied', {
-      proposalArtifactId,
-      operationCount: proposal.patch.length,
-    })
-
-    const mutatedStartedAt = Date.now()
-    await ctx.recordEvent('mutation.test.started', {
-      proposalArtifactId,
-      command: proposal.testTarget.command,
-    })
-    const mutated = await runCommand({
-      cwd: ctx.sourceRoot,
-      command: proposal.testTarget.command[0],
-      args: proposal.testTarget.command.slice(1),
-      env: await this.resolveExecutionEnv(ctx.repo),
-      timeoutMs: this.config.requestTimeoutMs,
-      rejectOnNonZero: false,
-    })
-    await ctx.recordEvent('mutation.test.finished', {
-      proposalArtifactId,
-      exitCode: mutated.exitCode,
-      durationMs: Date.now() - mutatedStartedAt,
-    })
-
-    if (mutated.exitCode === 0) {
-      await ctx.recordEvent('mutation.result', {
-        proposalArtifactId,
-        status: 'survived',
-        stage: 'mutated-test',
-        durationMs: Date.now() - evaluationStartedAt,
-      })
-      return {
-        id: proposalArtifactId,
-        status: 'survived',
-        realMutation: true,
-        preservesIntendedBehavior: null,
-        patchApplied: true,
-        workspacePath: ctx.sourceRoot,
-        testTarget: proposal.testTarget,
-        testsRun: [commandLabel],
-        summary: 'Mutation survived the named test target',
-        reason: 'The named test target still passed after applying the mutation.',
-        stdoutSummary: summarizeOutput(mutated.stdout),
-        stderrSummary: summarizeOutput(mutated.stderr),
-      }
-    }
-
-    const output = `${mutated.stdout}\n${mutated.stderr}`
-    if (TEST_FAILURE_INVALID_RE.test(output)) {
-      await ctx.recordEvent('mutation.result', {
-        proposalArtifactId,
-        status: 'invalid',
-        stage: 'mutated-test',
-        durationMs: Date.now() - evaluationStartedAt,
-      })
-      return {
-        id: proposalArtifactId,
-        status: 'invalid',
-        realMutation: true,
-        preservesIntendedBehavior: null,
-        patchApplied: true,
-        workspacePath: ctx.sourceRoot,
-        testTarget: proposal.testTarget,
-        testsRun: [commandLabel],
-        summary: 'Mutation caused setup/build failure instead of an observed behavioral failure',
-        reason: 'The named target failed before the tests could cleanly evaluate the mutation.',
-        stdoutSummary: summarizeOutput(mutated.stdout),
-        stderrSummary: summarizeOutput(mutated.stderr),
-      }
-    }
-
-    await ctx.recordEvent('mutation.result', {
-      proposalArtifactId,
-      status: 'killed',
-      stage: 'mutated-test',
-      durationMs: Date.now() - evaluationStartedAt,
-    })
-    return {
-      id: proposalArtifactId,
-      status: 'killed',
-      realMutation: true,
-      preservesIntendedBehavior: null,
-      patchApplied: true,
-      workspacePath: ctx.sourceRoot,
-      testTarget: proposal.testTarget,
-      testsRun: [commandLabel],
-      summary: 'Mutation was killed by the named test target',
-      reason: 'The named test target failed after the mutation was applied.',
-      stdoutSummary: summarizeOutput(mutated.stdout),
-      stderrSummary: summarizeOutput(mutated.stderr),
-    }
-  }
-
-  private async applyMutationPatch(
-    sourceRoot: string,
-    operations: MutationPatchOperation[],
-  ): Promise<{ patchApplied: boolean; realMutation: boolean; reason: string }> {
-    for (const operation of operations) {
-      if (operation.op !== 'replace') {
-        return {
-          patchApplied: false,
-          realMutation: false,
-          reason: `Unsupported patch operation: ${String((operation as { op?: string }).op ?? 'unknown')}`,
-        }
-      }
-
-      const targetPath = path.resolve(sourceRoot, operation.file)
-      const rootPath = path.resolve(sourceRoot)
-      if (targetPath !== rootPath && !targetPath.startsWith(`${rootPath}${path.sep}`)) {
-        return {
-          patchApplied: false,
-          realMutation: false,
-          reason: `Patch target escapes repo root: ${operation.file}`,
-        }
-      }
-
-      const before = await readFile(targetPath, 'utf-8').catch(() => null)
-      if (before === null) {
-        return {
-          patchApplied: false,
-          realMutation: false,
-          reason: `Patch target does not exist: ${operation.file}`,
-        }
-      }
-
-      if (!operation.find) {
-        return {
-          patchApplied: false,
-          realMutation: false,
-          reason: `Patch operation for ${operation.file} is missing a non-empty find string`,
-        }
-      }
-
-      const matches = before.split(operation.find).length - 1
-      const expectedMatches = operation.expectedMatches ?? 1
-      if (matches !== expectedMatches) {
-        return {
-          patchApplied: false,
-          realMutation: false,
-          reason: `Expected ${expectedMatches} exact matches for ${operation.file}, found ${matches}`,
-        }
-      }
-
-      const after = before.replace(operation.find, operation.replace)
-      if (after === before) {
-        return {
-          patchApplied: false,
-          realMutation: false,
-          reason: `Patch for ${operation.file} did not change file contents`,
-        }
-      }
-
-      const realMutation = normalizeContentSignal(after) !== normalizeContentSignal(before)
-      if (!realMutation) {
-        return {
-          patchApplied: false,
-          realMutation: false,
-          reason: `Patch for ${operation.file} only changed formatting or whitespace`,
-        }
-      }
-
-      await writeFile(targetPath, after, 'utf-8')
-    }
-
-    return {
-      patchApplied: true,
-      realMutation: true,
-      reason: 'Patch applied',
     }
   }
 

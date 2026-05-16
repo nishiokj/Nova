@@ -4,6 +4,15 @@
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
+  "bin": {
+    "metarepo": "./src/cli.ts"
+  },
+  "files": [
+    "src",
+    "skills",
+    "README.md",
+    "package.json"
+  ],
   "scripts": {
     "start": "bun run src/index.ts",
     "cli": "bun run src/cli.ts",
