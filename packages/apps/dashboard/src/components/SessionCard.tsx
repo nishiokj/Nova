@@ -76,11 +76,11 @@ export const SessionCard = memo(function SessionCard({
         label={`Toggle session ${session.id}`}
         variant={variant}
         summary={
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0">
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+            <div className="min-w-0 flex flex-wrap items-center gap-x-3 gap-y-1">
               {/* Session ID and badges */}
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-sm font-semibold text-[var(--text-primary)]">
+              <div className="flex items-center gap-1.5">
+                <span className="font-mono text-xs font-semibold text-[var(--text-primary)]">
                   {session.id}
                 </span>
                 <StatusBadge tone={envTone(session.env)}>{session.env}</StatusBadge>
@@ -94,8 +94,8 @@ export const SessionCard = memo(function SessionCard({
                 )}
               </div>
 
-              {/* Session metadata row */}
-              <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--text-muted)]">
+              {/* Session metadata — inline with ID */}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-[var(--text-muted)]">
                 <span className="font-mono">{session.userId}</span>
                 <span>{formatDateTime(session.startedAt)}</span>
                 <span>{formatDuration(insights.durationMs)}</span>
@@ -108,7 +108,7 @@ export const SessionCard = memo(function SessionCard({
             </div>
 
             {/* Right side: request stats */}
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
               {/* Request count */}
               <div className="flex items-center gap-1.5">
                 <span className="font-mono text-sm tabular-nums text-[var(--text-secondary)]">
@@ -196,11 +196,11 @@ export const SessionCard = memo(function SessionCard({
           </div>
         }
       >
-        <div className="space-y-3">
+        <div className="space-y-2">
           {/* Watcher Decisions */}
           {session.watcherDecisions.length > 0 && (
-            <div className="mb-4">
-              <div className="flex items-center gap-2 mb-2">
+            <div className="mb-2">
+              <div className="flex items-center gap-1.5 mb-1">
                 <svg className="w-4 h-4 text-[var(--text-muted)]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                   <path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
@@ -224,7 +224,7 @@ export const SessionCard = memo(function SessionCard({
 
           {/* Requests list */}
           {session.requests.length > 0 ? (
-            <div className="space-y-2">
+            <div className="space-y-1">
               {visibleRequests.map((request) => (
                 <RequestRow key={request.id} request={request} />
               ))}
@@ -232,17 +232,17 @@ export const SessionCard = memo(function SessionCard({
                 <button
                   type="button"
                   onClick={() => setVisibleRequestCount((prev) => prev + REQUESTS_PAGE_SIZE)}
-                  className="w-full py-2 text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] rounded transition-colors"
+                  className="w-full py-1.5 text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] rounded transition-colors"
                 >
                   Show older requests ({session.requests.length - visibleRequestCount} more)
                 </button>
               )}
             </div>
           ) : (
-            <div className="py-8 text-center">
-              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-[var(--bg-elevated)] mb-3">
+            <div className="py-4 text-center">
+              <div className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-[var(--bg-elevated)] mb-2">
                 <svg
-                  className="w-6 h-6 text-[var(--text-muted)]"
+                  className="w-4 h-4 text-[var(--text-muted)]"
                   fill="none"
                   viewBox="0 0 24 24"
                   stroke="currentColor"
@@ -255,8 +255,8 @@ export const SessionCard = memo(function SessionCard({
                   />
                 </svg>
               </div>
-              <p className="text-sm text-[var(--text-muted)]">No requests in this session</p>
-              <p className="text-xs text-[var(--text-muted)] mt-1">
+              <p className="text-xs text-[var(--text-muted)]">No requests in this session</p>
+              <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
                 Requests will appear when the agent processes user input
               </p>
             </div>

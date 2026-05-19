@@ -49,25 +49,25 @@ function LLMEventRow({ call, toolCount }: { call: LLMCall; toolCount: number }) 
   return (
     <div className="relative">
       {/* Timeline connector line */}
-      <div className="absolute left-[11px] top-6 bottom-0 w-px bg-[var(--border-subtle)]" />
+      <div className="absolute left-[11px] top-5 bottom-0 w-px bg-[var(--border-subtle)]" />
 
-      <div className="border border-[var(--border-subtle)] rounded-lg overflow-hidden bg-[var(--bg-surface)]">
+      <div className="border border-[var(--border-subtle)] rounded-md overflow-hidden bg-[var(--bg-surface)]">
         <button
           onClick={() => setExpanded(!expanded)}
-          className="w-full text-left px-3 py-2 hover:bg-[var(--bg-hover)] transition-colors"
+          className="w-full text-left px-2 py-1.5 hover:bg-[var(--bg-hover)] transition-colors"
         >
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             {/* LLM indicator */}
             <div
-              className="w-[22px] h-[22px] rounded-full flex items-center justify-center flex-shrink-0"
+              className="w-[18px] h-[18px] rounded-full flex items-center justify-center flex-shrink-0"
               style={{ backgroundColor: `${color}20`, border: `2px solid ${color}` }}
             >
-              <svg className="w-3 h-3" style={{ color }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <svg className="w-2.5 h-2.5" style={{ color }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" />
               </svg>
             </div>
 
-            <div className="flex-1 min-w-0 flex items-center gap-2">
+            <div className="flex-1 min-w-0 flex items-center gap-1.5">
               <span
                 className="px-1.5 py-0.5 rounded text-xs font-mono uppercase font-medium"
                 style={{ backgroundColor: `${color}20`, color }}
@@ -80,7 +80,7 @@ function LLMEventRow({ call, toolCount }: { call: LLMCall; toolCount: number }) 
               <span className="text-xs text-[var(--text-secondary)] font-mono truncate">{call.model}</span>
             </div>
 
-            <div className="flex items-center gap-3 text-xs text-[var(--text-muted)] flex-shrink-0">
+            <div className="flex items-center gap-2 text-xs text-[var(--text-muted)] flex-shrink-0">
               <span className="tabular-nums">{call.totalTokens.toLocaleString()} tok</span>
               {toolCount > 0 && (
                 <span className="tabular-nums text-[var(--accent-cyan)]">→ {toolCount} tools</span>
@@ -97,20 +97,20 @@ function LLMEventRow({ call, toolCount }: { call: LLMCall; toolCount: number }) 
         </button>
 
         {expanded && (
-          <div className="border-t border-[var(--border-subtle)] px-3 py-3 space-y-3 bg-[var(--bg-elevated)]">
+          <div className="border-t border-[var(--border-subtle)] px-2 py-2 space-y-2 bg-[var(--bg-elevated)]">
             <div>
               <span className="text-xs font-medium uppercase text-[var(--text-muted)]">Prompt Preview</span>
-              <pre className="mt-1 text-xs font-mono text-[var(--text-secondary)] whitespace-pre-wrap overflow-x-auto max-h-32 overflow-y-auto bg-[var(--bg-surface)] p-2 rounded">
+              <pre className="mt-1 text-xs font-mono text-[var(--text-secondary)] whitespace-pre-wrap overflow-x-auto max-h-24 overflow-y-auto bg-[var(--bg-surface)] p-1.5 rounded">
                 {call.promptPreview || '(empty)'}
               </pre>
             </div>
             <div>
               <span className="text-xs font-medium uppercase text-[var(--text-muted)]">Response Preview</span>
-              <pre className="mt-1 text-xs font-mono text-[var(--text-secondary)] whitespace-pre-wrap overflow-x-auto max-h-32 overflow-y-auto bg-[var(--bg-surface)] p-2 rounded">
+              <pre className="mt-1 text-xs font-mono text-[var(--text-secondary)] whitespace-pre-wrap overflow-x-auto max-h-24 overflow-y-auto bg-[var(--bg-surface)] p-1.5 rounded">
                 {call.responsePreview || '(empty)'}
               </pre>
             </div>
-            <div className="flex gap-4 text-xs text-[var(--text-muted)]">
+            <div className="flex gap-3 text-xs text-[var(--text-muted)]">
               <span>Prompt: {call.promptTokens.toLocaleString()} tok</span>
               <span>Completion: {call.completionTokens.toLocaleString()} tok</span>
               {call.toolCallsCount > 0 && <span>Tool calls: {call.toolCallsCount}</span>}
@@ -186,17 +186,17 @@ function ToolEventRow({ call, isLast }: { call: ToolCall; isLast: boolean }) {
     call.durationMs < 1000 ? `${call.durationMs}ms` : `${(call.durationMs / 1000).toFixed(1)}s`
 
   return (
-    <div className="relative pl-6">
+    <div className="relative pl-5">
       {/* Timeline connector */}
       {!isLast && (
         <div className="absolute left-[11px] top-0 bottom-0 w-px bg-[var(--border-subtle)]" />
       )}
       {/* Tool node */}
-      <div className="absolute left-[6px] top-2 w-[12px] h-[12px] rounded-full border-2 border-[var(--border-default)] bg-[var(--bg-surface)]" />
+      <div className="absolute left-[6px] top-1.5 w-[10px] h-[10px] rounded-full border-2 border-[var(--border-default)] bg-[var(--bg-surface)]" />
 
       <div
         className={cn(
-          'rounded border transition-all ml-2',
+          'rounded border transition-all ml-1.5',
           call.success
             ? 'border-[var(--border-subtle)] hover:border-[var(--border-default)]'
             : 'border-[var(--error-muted)] bg-[var(--error-bg)]'
@@ -205,13 +205,13 @@ function ToolEventRow({ call, isLast }: { call: ToolCall; isLast: boolean }) {
         <button
           onClick={() => setExpanded(!expanded)}
           className={cn(
-            'w-full flex items-center gap-2 px-2.5 py-1.5 text-left',
+            'w-full flex items-center gap-1.5 px-2 py-1 text-left',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--running)]'
           )}
         >
           <StatusDot status={call.success ? 'success' : 'error'} />
 
-          <span className="flex items-center gap-1.5 text-[var(--text-secondary)]">
+          <span className="flex items-center gap-1 text-[var(--text-secondary)]">
             <ToolIcon tool={call.toolName} />
             <span className="font-mono text-xs font-medium">{call.toolName}</span>
           </span>
@@ -245,11 +245,11 @@ function ToolEventRow({ call, isLast }: { call: ToolCall; isLast: boolean }) {
         </button>
 
         {expanded && (
-          <div className="px-2.5 pb-2.5 pt-0 space-y-2 animate-fade-in">
-            <div className="grid grid-cols-2 gap-2">
+          <div className="px-2 pb-2 pt-0 space-y-1.5 animate-fade-in">
+            <div className="grid grid-cols-2 gap-1.5">
               <div>
                 <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Arguments</span>
-                <pre className="mt-1 p-2 rounded bg-[var(--bg-base)] text-xs font-mono text-[var(--text-secondary)] overflow-x-auto max-h-32">
+                <pre className="mt-0.5 p-1.5 rounded bg-[var(--bg-base)] text-xs font-mono text-[var(--text-secondary)] overflow-x-auto max-h-24">
                   {JSON.stringify(call.arguments, null, 2)}
                 </pre>
               </div>
@@ -257,7 +257,7 @@ function ToolEventRow({ call, isLast }: { call: ToolCall; isLast: boolean }) {
                 <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Result</span>
                 <pre
                   className={cn(
-                    'mt-1 p-2 rounded text-xs font-mono overflow-x-auto max-h-32',
+                    'mt-0.5 p-1.5 rounded text-xs font-mono overflow-x-auto max-h-24',
                     call.success
                       ? 'bg-[var(--bg-base)] text-[var(--text-secondary)]'
                       : 'bg-[var(--error-bg)] text-[var(--error)]'
@@ -340,20 +340,20 @@ export function ExecutionFlow({ llmCalls, toolCalls, maxVisible = 10 }: Executio
   }
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-1.5">
       <div className="flex items-center justify-between text-xs text-[var(--text-muted)]">
         <span>{llmCalls.length} LLM calls · {toolCalls.length} tool calls</span>
         <span>{totalTokens.toLocaleString()} tokens · {formatDuration(totalDuration)}</span>
       </div>
 
-      <div className={showAll && events.length > 30 ? 'space-y-2 max-h-[600px] overflow-auto' : 'space-y-2'}>
+      <div className={showAll && events.length > 30 ? 'space-y-1.5 max-h-[520px] overflow-auto' : 'space-y-1.5'}>
         {visible.map((event, idx) => renderEvent(event, idx, visible))}
       </div>
 
       {hasMore && !showAll && (
         <button
           onClick={() => setShowAll(true)}
-          className="w-full text-center py-2 text-xs text-[var(--running)] hover:underline"
+          className="w-full text-center py-1.5 text-xs text-[var(--running)] hover:underline"
         >
           Show {events.length - maxVisible} more events
         </button>

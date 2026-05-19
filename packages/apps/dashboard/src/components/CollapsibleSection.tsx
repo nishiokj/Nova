@@ -50,7 +50,7 @@ export function CollapsibleSection({
       <button
         type="button"
         className={cn(
-          'flex w-full items-start justify-between gap-4 px-4 py-3 text-left',
+          'flex w-full items-start justify-between gap-3 px-3 py-1.5 text-left',
           'transition-colors hover:bg-[var(--bg-hover)]',
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--running)]',
           'rounded-lg',
@@ -63,7 +63,7 @@ export function CollapsibleSection({
         <div className="min-w-0 flex-1">{summary}</div>
         <ChevronRight
           className={cn(
-            'mt-1 text-[var(--text-muted)] transition-transform duration-200',
+            'mt-0.5 text-[var(--text-muted)] transition-transform duration-200',
             open ? 'rotate-90' : 'rotate-0'
           )}
         />
@@ -76,7 +76,7 @@ export function CollapsibleSection({
         )}
       >
         <div className="overflow-hidden">
-          <div className="border-t border-[var(--border-subtle)] px-4 pb-4 pt-3">
+          <div className="border-t border-[var(--border-subtle)] px-3 pb-2.5 pt-2">
             {children}
           </div>
         </div>

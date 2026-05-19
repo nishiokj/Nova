@@ -2290,16 +2290,13 @@ export class Agent {
       subResult.isIncomplete = true;
     }
 
-    const responseStreamedToUser = !!agentConfig.outputSchema && !!enhancedResponse;
-
     const payload = {
       agent: agentConfig.type,
       workId: subWorkItem.workId,
       success: subResult.success,
       response: enhancedResponse,
-      responseStreamedToUser,
       filesRead: subResult.filesRead,
-      artifacts: Array.isArray(artifacts) ? artifacts : [],
+      artifacts: extractedArtifacts,
       error: subResult.error,
       postProcessingError,
       metrics: subResult.metrics,
@@ -2309,10 +2306,47 @@ export class Agent {
       if (postProcessingError) {
         (payload as Record<string, unknown>).warning = postProcessingError;
       }
-      return successResult(call.name, JSON.stringify(payload), 0);
+      return successResult(
+        call.name,
+        this.formatSubAgentSuccessOutput(agentConfig.type, subResult, enhancedResponse, extractedArtifacts.length, postProcessingError),
+        0,
+        { subAgentResult: payload }
+      );
     }
 
     return errorResult(call.name, this.formatSubAgentError(agentConfig.type, subResult, enhancedResponse, postProcessingError), 0);
+  }
+
+  private formatSubAgentSuccessOutput(
+    agentType: string,
+    subResult: AgentResult,
+    enhancedResponse: string,
+    artifactCount: number,
+    postProcessingError: string | null
+  ): string {
+    const label = agentType.charAt(0).toUpperCase() + agentType.slice(1);
+    const lines: string[] = [
+      `${label} completed ${subResult.needsUserInput ? 'and needs user input' : 'successfully'}.`,
+    ];
+
+    const response = enhancedResponse.trim();
+    if (response.length > 0) {
+      lines.push('', response);
+    }
+
+    const filesReadCount = subResult.filesRead.length;
+    if (filesReadCount > 0 || artifactCount > 0) {
+      const parts: string[] = [];
+      if (filesReadCount > 0) parts.push(`${filesReadCount} file${filesReadCount === 1 ? '' : 's'} read`);
+      if (artifactCount > 0) parts.push(`${artifactCount} artifact${artifactCount === 1 ? '' : 's'} merged into context`);
+      lines.push('', `Runtime captured: ${parts.join(', ')}.`);
+    }
+
+    if (postProcessingError) {
+      lines.push('', `Warning: ${postProcessingError}`);
+    }
+
+    return lines.join('\n');
   }
 
   /**

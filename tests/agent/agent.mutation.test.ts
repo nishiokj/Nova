@@ -32,6 +32,7 @@
 
 import { Effect, Stream } from 'effect';
 import { Agent } from 'agent/agent.js';
+import { AgentRegistry } from 'agent/agent-registry.js';
 import type { AgentConfig, MutableAgentResult, AgentControlDirective } from 'agent/types.js';
 import { DEFAULT_AGENT_BUDGET, noopEmit, noopHookQueue } from 'agent/types.js';
 import { ContextWindow } from 'context';
@@ -887,6 +888,74 @@ describe('Agent Mutation Tests', () => {
   // Explorer agent specific behaviors
   // ================================================================
   describe('explorer agent edge cases', () => {
+    it('standard receives explorer results as text while artifacts merge through runtime context', async () => {
+      const llm = createMockLLM([
+        createResponse({
+          action: 'continue',
+          response: '',
+          goalStateReached: false,
+          toolCalls: [{
+            id: 'call-explorer',
+            name: 'explorer',
+            arguments: { objective: 'Find where auth is configured' },
+          }],
+        }),
+        createResponse({
+          action: 'done',
+          response: 'Auth config lives in /tmp/auth.ts.',
+          goalStateReached: true,
+          artifacts: [{
+            sourcePath: '/tmp/auth.ts',
+            kind: 'function',
+            name: 'configureAuth',
+          }],
+        }),
+        createResponse({
+          action: 'done',
+          response: 'Explorer found the auth configuration path.',
+          goalStateReached: true,
+        }),
+      ]);
+
+      const explorerConfig: AgentConfig = {
+        type: 'explorer',
+        systemPrompt: 'Explore code',
+        tools: [],
+        budget: {
+          maxIterations: 2,
+          maxToolCalls: 4,
+          maxDurationMs: 30_000,
+          llmStreamTimeoutMs: 5_000,
+        },
+        llmParams: { maxTokens: 1024, temperature: 0 },
+        outputSchema: getOutputSchemaJson('explorer'),
+      };
+      const standardConfig: Partial<AgentConfig> = {
+        type: 'standard',
+        tools: ['explorer'],
+        outputSchema: getOutputSchemaJson('agent_action'),
+      };
+      const agentRegistry = new AgentRegistry([explorerConfig]);
+      const agent = createAgent(llm, createToolRegistry(), standardConfig, {
+        agentRegistry,
+        getModelSelection: () => ({
+          provider: 'openai',
+          model: 'mock-model',
+          contextWindow: 200_000,
+        }),
+      });
+
+      const result = await runAgent(agent);
+      const outputs = result.localContext.getItemsByType('function_call_output') as { output: string }[];
+      const explorerOutput = outputs.find((output) => output.output.includes('Explorer completed successfully.'));
+
+      expect(explorerOutput).toBeDefined();
+      expect(explorerOutput!.output.trim().startsWith('{')).toBe(false);
+      expect(() => JSON.parse(explorerOutput!.output)).toThrow();
+      expect(explorerOutput!.output).toContain('artifact merged into context');
+      expect(result.localContext.getArtifactsByPath('/tmp/auth.ts')).toHaveLength(1);
+    });
+
     it('explorer with files read but no artifacts synthesizes fallback artifacts', async () => {
       const llm = createMockLLM([
         createResponse({
