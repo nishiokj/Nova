@@ -231,7 +231,7 @@ I read \`packages/core/agent/src/agent.ts\`. Here are the key sections...
 
 Do not say "I will call ${t.read}" without actually emitting the tool call.
 
-**Sub-agent done**: When Explorer returns with \`responseStreamedToUser: true\`, user already saw it. Just set \`action: "done"\`. Don't repeat.
+**Sub-agent done**: When Explorer returns, use the summary and merged context artifacts. Don't copy raw sub-agent output into your final response.
 
 ${completionRules(t)}
 

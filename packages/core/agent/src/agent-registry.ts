@@ -76,7 +76,7 @@ function buildAgentToolDefinition(agentType: string): ToolDefinition {
 
   return {
     name: agentType,
-    description: `${description} Returns JSON with {success, response, error, metrics}.`,
+    description: `${description} Returns a concise text summary; discovered context is merged by the runtime.`,
     parameters: AGENT_TOOL_PARAMETER_SCHEMA,
     strict: false, // params needs additionalProperties for flexibility
   };

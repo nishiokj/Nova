@@ -24,7 +24,7 @@ export function StatusBadge({
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 rounded px-2 py-0.5 text-xs font-medium border',
+        'inline-flex items-center gap-1 rounded px-1.5 py-0 text-[10px] leading-[1.4] font-medium border',
         'font-mono tracking-tight',
         toneClasses[tone],
         pulse && 'animate-pulse-glow',

@@ -128,15 +128,15 @@ export default function App() {
 
   return (
     <div className="min-h-dvh bg-[var(--bg-base)]">
-      <div className="mx-auto max-w-6xl p-6">
+      <div className="mx-auto max-w-7xl px-4 py-3">
         {/* Header */}
-        <header className="mb-8">
-          <div className="flex items-start justify-between gap-4 flex-wrap">
-            <div>
-              <h1 className="text-xl font-semibold text-[var(--text-primary)] tracking-tight">
+        <header className="mb-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-baseline gap-3">
+              <h1 className="text-base font-semibold text-[var(--text-primary)] tracking-tight">
                 Agent Monitor
               </h1>
-              <p className="mt-1 text-sm text-[var(--text-muted)]">
+              <p className="text-xs text-[var(--text-muted)]">
                 Execution telemetry and task insights
                 {showMockWarning && (
                   <span className="ml-2 text-[var(--error)]" title={error ?? undefined}>
@@ -151,70 +151,70 @@ export default function App() {
           </div>
 
           {/* Summary stats bar */}
-          <div className="mt-4 flex items-center gap-6 py-3 px-4 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)]">
-            <div className="flex items-center gap-2">
-              <span className="text-2xl font-semibold font-mono tabular-nums text-[var(--text-primary)]">
+          <div className="mt-2 flex items-center gap-4 py-1.5 px-3 rounded-md bg-[var(--bg-surface)] border border-[var(--border-subtle)]">
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-base font-semibold font-mono tabular-nums text-[var(--text-primary)]">
                 {totals.sessions}
               </span>
-              <span className="text-sm text-[var(--text-muted)]">sessions</span>
+              <span className="text-xs text-[var(--text-muted)]">sessions</span>
             </div>
 
-            <div className="w-px h-6 bg-[var(--border-subtle)]" />
+            <div className="w-px h-4 bg-[var(--border-subtle)]" />
 
-            <div className="flex items-center gap-2">
-              <span className="text-2xl font-semibold font-mono tabular-nums text-[var(--text-primary)]">
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-base font-semibold font-mono tabular-nums text-[var(--text-primary)]">
                 {totals.requests}
               </span>
-              <span className="text-sm text-[var(--text-muted)]">requests</span>
+              <span className="text-xs text-[var(--text-muted)]">requests</span>
             </div>
 
             {totals.running > 0 && (
               <>
-                <div className="w-px h-6 bg-[var(--border-subtle)]" />
-                <div className="flex items-center gap-2">
+                <div className="w-px h-4 bg-[var(--border-subtle)]" />
+                <div className="flex items-center gap-1.5">
                   <StatusDot status="running" pulse />
-                  <span className="text-lg font-semibold font-mono tabular-nums text-[var(--running)]">
+                  <span className="text-sm font-semibold font-mono tabular-nums text-[var(--running)]">
                     {totals.running}
                   </span>
-                  <span className="text-sm text-[var(--text-muted)]">running</span>
+                  <span className="text-xs text-[var(--text-muted)]">running</span>
                 </div>
               </>
             )}
 
             {totals.errors > 0 && (
               <>
-                <div className="w-px h-6 bg-[var(--border-subtle)]" />
-                <div className="flex items-center gap-2">
+                <div className="w-px h-4 bg-[var(--border-subtle)]" />
+                <div className="flex items-center gap-1.5">
                   <StatusDot status="error" />
-                  <span className="text-lg font-semibold font-mono tabular-nums text-[var(--error)]">
+                  <span className="text-sm font-semibold font-mono tabular-nums text-[var(--error)]">
                     {totals.errors}
                   </span>
-                  <span className="text-sm text-[var(--text-muted)]">failed</span>
+                  <span className="text-xs text-[var(--text-muted)]">failed</span>
                 </div>
               </>
             )}
 
             {totals.completed > 0 && (
               <>
-                <div className="w-px h-6 bg-[var(--border-subtle)]" />
-                <div className="flex items-center gap-2">
+                <div className="w-px h-4 bg-[var(--border-subtle)]" />
+                <div className="flex items-center gap-1.5">
                   <StatusDot status="success" />
-                  <span className="text-lg font-semibold font-mono tabular-nums text-[var(--success)]">
+                  <span className="text-sm font-semibold font-mono tabular-nums text-[var(--success)]">
                     {totals.completed}
                   </span>
-                  <span className="text-sm text-[var(--text-muted)]">done</span>
+                  <span className="text-xs text-[var(--text-muted)]">done</span>
                 </div>
               </>
             )}
 
             {/* Live indicator */}
             {hasRunningRequests && (
-              <div className="ml-auto flex items-center gap-2">
+              <div className="ml-auto flex items-center gap-1.5">
                 <span className="relative flex h-2 w-2">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--running)] opacity-75" />
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-[var(--running)]" />
                 </span>
-                <span className="text-xs text-[var(--text-muted)]">LIVE</span>
+                <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Live</span>
               </div>
             )}
           </div>
@@ -222,20 +222,20 @@ export default function App() {
 
         {/* Error Banner */}
         {state === 'error' && (
-          <div className="mb-4 p-4 rounded-lg bg-[var(--error)]/10 border border-[var(--error)]/30">
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <svg className="h-5 w-5 text-[var(--error)] flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="mb-2 px-3 py-2 rounded-md bg-[var(--error)]/10 border border-[var(--error)]/30">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <svg className="h-4 w-4 text-[var(--error)] flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                 </svg>
-                <div>
-                  <p className="text-sm font-medium text-[var(--error)]">Connection Error</p>
-                  <p className="text-xs text-[var(--text-muted)]">{error ?? 'Failed to connect to backend'}</p>
-                </div>
+                <p className="text-xs">
+                  <span className="font-medium text-[var(--error)]">Connection error</span>
+                  <span className="ml-2 text-[var(--text-muted)]">{error ?? 'Failed to connect to backend'}</span>
+                </p>
               </div>
               <button
                 onClick={refetch}
-                className="px-3 py-1.5 text-xs font-medium rounded bg-[var(--error)]/20 text-[var(--error)] hover:bg-[var(--error)]/30 transition-colors"
+                className="px-2 py-1 text-xs font-medium rounded bg-[var(--error)]/20 text-[var(--error)] hover:bg-[var(--error)]/30 transition-colors"
               >
                 Retry
               </button>
@@ -244,7 +244,7 @@ export default function App() {
         )}
 
         {/* Content */}
-        <main className="space-y-3">
+        <main className="space-y-2">
           {state === 'loading' && <LoadingSkeleton count={3} />}
 
           {state === 'success' && filteredSessions.length === 0 && filter === 'all' && (
@@ -283,10 +283,10 @@ export default function App() {
           {(state === 'success' || state === 'error') && filteredSessions.length > 0 && (
             <>
               {/* Active/Inactive Tabs */}
-              <div className="flex gap-1 p-1 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] w-fit">
+              <div className="flex gap-0.5 p-0.5 rounded-md bg-[var(--bg-surface)] border border-[var(--border-subtle)] w-fit">
                 <button
                   onClick={() => setTab('active')}
-                  className={`px-3 py-1.5 text-sm font-medium rounded transition-colors ${
+                  className={`px-2.5 py-1 text-xs font-medium rounded transition-colors ${
                     tab === 'active'
                       ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)]'
                       : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
@@ -294,14 +294,14 @@ export default function App() {
                 >
                   Active
                   {activeSessions.length > 0 && (
-                    <span className="ml-1.5 px-1.5 py-0.5 text-xs rounded-full bg-[var(--running)]/20 text-[var(--running)]">
+                    <span className="ml-1.5 px-1.5 py-0.5 text-[10px] leading-none rounded-full bg-[var(--running)]/20 text-[var(--running)]">
                       {activeSessions.length}
                     </span>
                   )}
                 </button>
                 <button
                   onClick={() => setTab('inactive')}
-                  className={`px-3 py-1.5 text-sm font-medium rounded transition-colors ${
+                  className={`px-2.5 py-1 text-xs font-medium rounded transition-colors ${
                     tab === 'inactive'
                       ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)]'
                       : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
@@ -309,7 +309,7 @@ export default function App() {
                 >
                   Inactive
                   {inactiveSessions.length > 0 && (
-                    <span className="ml-1.5 px-1.5 py-0.5 text-xs rounded-full bg-[var(--text-muted)]/20 text-[var(--text-muted)]">
+                    <span className="ml-1.5 px-1.5 py-0.5 text-[10px] leading-none rounded-full bg-[var(--text-muted)]/20 text-[var(--text-muted)]">
                       {inactiveSessions.length}
                     </span>
                   )}
@@ -318,7 +318,7 @@ export default function App() {
 
               {/* Active Sessions */}
               {tab === 'active' && (
-                <div className="space-y-3">
+                <div className="space-y-1.5">
                   {activeSessions.length === 0 ? (
                     <div className="py-8 text-center">
                       <p className="text-sm text-[var(--text-muted)]">No active sessions</p>
@@ -343,7 +343,7 @@ export default function App() {
                       {hasMoreActive && (
                         <button
                           onClick={loadMoreActive}
-                          className="w-full py-3 text-sm font-medium text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] rounded-lg transition-colors"
+                          className="w-full py-1.5 text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] rounded-md transition-colors"
                         >
                           Load more ({activeSessions.length - activeLimit} remaining)
                         </button>
@@ -355,7 +355,7 @@ export default function App() {
 
               {/* Inactive Sessions (lazy loaded) */}
               {tab === 'inactive' && (
-                <div className="space-y-3">
+                <div className="space-y-1.5">
                   {inactiveSessions.length === 0 ? (
                     <div className="py-8 text-center">
                       <p className="text-sm text-[var(--text-muted)]">No inactive sessions</p>
@@ -380,7 +380,7 @@ export default function App() {
                       {hasMoreInactive && (
                         <button
                           onClick={loadMoreInactive}
-                          className="w-full py-3 text-sm font-medium text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] rounded-lg transition-colors"
+                          className="w-full py-1.5 text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] rounded-md transition-colors"
                         >
                           Load more ({inactiveSessions.length - inactiveLimit} remaining)
                         </button>
@@ -394,8 +394,8 @@ export default function App() {
         </main>
 
         {/* Footer */}
-        <footer className="mt-12 pt-6 border-t border-[var(--border-subtle)]">
-          <p className="text-xs text-[var(--text-muted)] text-center">
+        <footer className="mt-6 pt-3 border-t border-[var(--border-subtle)]">
+          <p className="text-[10px] text-[var(--text-muted)] text-center">
             Agent Monitor • Polling every 2s when tasks running
           </p>
         </footer>

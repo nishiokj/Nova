@@ -130,13 +130,13 @@ export const RequestRow = memo(function RequestRow({ request, defaultExpanded = 
       <button
         onClick={() => setExpanded(!expanded)}
         className={cn(
-          'w-full text-left px-3 py-2.5',
+          'w-full text-left px-2.5 py-2',
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--running)]',
           'hover:bg-[var(--bg-hover)] transition-colors'
         )}
       >
         {/* Top row: status, prompt, metrics */}
-        <div className="flex items-start gap-3">
+        <div className="flex items-start gap-2.5">
           <StatusDot
             status={
               request.state === 'success'
@@ -152,7 +152,7 @@ export const RequestRow = memo(function RequestRow({ request, defaultExpanded = 
           />
 
           {/* Request content */}
-          <div className="flex-1 min-w-0 space-y-1.5">
+          <div className="flex-1 min-w-0 space-y-1">
             {/* Prompt */}
             <p className="text-sm font-medium text-[var(--text-primary)] break-words">
               {request.userInput}
@@ -176,7 +176,7 @@ export const RequestRow = memo(function RequestRow({ request, defaultExpanded = 
 
             {/* Collapsed summary row */}
             {!expanded && (
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-0.5">
                 {/* Progress */}
                 {hasWorkItems && (
                   <div className="flex items-center gap-1.5">
@@ -254,25 +254,25 @@ export const RequestRow = memo(function RequestRow({ request, defaultExpanded = 
 
       {/* Expanded content */}
       {expanded && (
-        <div className="px-3 pb-3 pt-0 space-y-4 animate-fade-in border-t border-[var(--border-subtle)]">
+        <div className="px-2.5 pb-2 pt-1.5 space-y-1.5 animate-fade-in border-t border-[var(--border-subtle)]">
           {/* Files touched summary */}
           {filesTouched.length > 0 && (
-            <div className="pt-3">
-              <span className="text-xs font-medium uppercase tracking-wider text-[var(--text-muted)]">
+            <div>
+              <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-muted)]">
                 Files Touched ({filesTouched.length})
               </span>
-              <div className="mt-2 flex flex-wrap gap-1.5">
+              <div className="mt-0.5 flex flex-wrap gap-1">
                 {filesTouched.slice(0, 10).map((path) => (
                   <span
                     key={path}
-                    className="px-2 py-0.5 text-xs font-mono bg-[var(--bg-elevated)] rounded border border-[var(--border-subtle)] text-[var(--text-secondary)]"
+                    className="px-1.5 py-0 text-[11px] font-mono bg-[var(--bg-elevated)] rounded border border-[var(--border-subtle)] text-[var(--text-secondary)]"
                     title={path}
                   >
                     {path.split('/').pop()}
                   </span>
                 ))}
                 {filesTouched.length > 10 && (
-                  <span className="px-2 py-0.5 text-xs text-[var(--text-muted)]">
+                  <span className="px-1.5 py-0 text-[11px] text-[var(--text-muted)]">
                     +{filesTouched.length - 10} more
                   </span>
                 )}
@@ -281,11 +281,11 @@ export const RequestRow = memo(function RequestRow({ request, defaultExpanded = 
           )}
 
           {request.userPrompts.length > 0 && (
-            <div className="pt-3">
-              <span className="text-xs font-medium uppercase tracking-wider text-[var(--text-muted)]">
+            <div>
+              <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-muted)]">
                 User Input Requests ({request.userPrompts.length})
               </span>
-              <div className="mt-2 space-y-2">
+              <div className="mt-0.5 space-y-1">
                 {request.userPrompts.map((prompt) => (
                   <UserPromptDisplay key={prompt.requestId} prompt={prompt} />
                 ))}
@@ -295,41 +295,41 @@ export const RequestRow = memo(function RequestRow({ request, defaultExpanded = 
 
           {/* Execution plan */}
           {hasWorkItems && (
-            <div className="pt-3">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-medium uppercase tracking-wider text-[var(--text-muted)]">
+            <div>
+              <div className="flex items-center justify-between mb-0.5">
+                <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-muted)]">
                   Work Items ({request.plan!.workItems.length})
                 </span>
                 {request.plan?.systemContext && (
-                  <span className="text-xs text-[var(--text-muted)] font-mono">
+                  <span className="text-[11px] text-[var(--text-muted)] font-mono">
                     {request.plan.systemContext.languages.join(', ')}
                   </span>
                 )}
               </div>
-              <div className="bg-[var(--bg-elevated)] rounded-lg p-3 border border-[var(--border-subtle)]">
+              <div className="bg-[var(--bg-elevated)] rounded-md p-1.5 border border-[var(--border-subtle)]">
                 <VerticalTimeline workItems={request.plan!.workItems} />
               </div>
             </div>
           )}
 
-          {/* Execution Flow - interleaved LLM and tool calls */}
+          {/* Trace - interleaved LLM and tool calls */}
           {(request.llmCalls.length > 0 || request.toolCalls.length > 0) && (
-            <div className="pt-3">
-              <span className="text-xs font-medium uppercase tracking-wider text-[var(--text-muted)]">
-                Execution Flow
+            <div>
+              <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-muted)]">
+                Trace
               </span>
-              <div className="mt-2 bg-[var(--bg-elevated)] rounded-lg p-3 border border-[var(--border-subtle)]">
+              <div className="mt-0.5 bg-[var(--bg-elevated)] rounded-md p-1.5 border border-[var(--border-subtle)]">
                 <ExecutionFlow llmCalls={request.llmCalls} toolCalls={request.toolCalls} />
               </div>
             </div>
           )}
 
           {request.memoryInjections.length > 0 && (
-            <div className="pt-3">
-              <span className="text-xs font-medium uppercase tracking-wider text-[var(--text-muted)]">
+            <div>
+              <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-muted)]">
                 Memory Injection ({request.memoryInjections.length})
               </span>
-              <div className="mt-2 bg-[var(--bg-elevated)] rounded-lg p-3 border border-[var(--border-subtle)]">
+              <div className="mt-0.5 bg-[var(--bg-elevated)] rounded-md p-1.5 border border-[var(--border-subtle)]">
                 <MemoryInjectionList injections={request.memoryInjections} />
               </div>
             </div>
@@ -338,10 +338,10 @@ export const RequestRow = memo(function RequestRow({ request, defaultExpanded = 
           {/* Reflection */}
           {request.reflection && (
             <div>
-              <span className="text-xs font-medium uppercase tracking-wider text-[var(--text-muted)]">
+              <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-muted)]">
                 Reflection
               </span>
-              <div className="mt-2">
+              <div className="mt-0.5">
                 <ReflectionPanel reflection={request.reflection} />
               </div>
             </div>
@@ -349,26 +349,11 @@ export const RequestRow = memo(function RequestRow({ request, defaultExpanded = 
 
           {/* No data warning */}
           {!hasTelemetry && (
-            <div className="pt-3 text-center py-6">
-              <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-[var(--bg-elevated)] mb-2">
-                <svg
-                  className="w-5 h-5 text-[var(--warning)]"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={1.5}
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"
-                  />
-                </svg>
-              </div>
-              <p className="text-sm text-[var(--text-muted)]">
+            <div className="text-center py-2">
+              <p className="text-xs text-[var(--text-muted)]">
                 No execution telemetry available
               </p>
-              <p className="text-xs text-[var(--text-muted)] mt-1">
+              <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
                 Wizard events were not recorded for this request
               </p>
             </div>
