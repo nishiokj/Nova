@@ -36,6 +36,7 @@ const __dirname = path.dirname(__filename);
 const DAEMON_HOST = process.env.EVENT_BUS_HOST ?? '127.0.0.1';
 const DAEMON_PORT = Number(process.env.EVENT_BUS_PORT ?? '9555');
 const DAEMON_STARTUP_TIMEOUT = 5000; // 5 seconds to wait for daemon
+const DAEMON_RESTART_TIMEOUT = 3000;
 
 // Paths - resolve relative to launcher location
 const getProjectRoot = () => {
@@ -243,6 +244,12 @@ function buildDaemonArgs(): string[] {
   return daemonArgs;
 }
 
+function hasDaemonConfigEnvOverride(): boolean {
+  return process.env.NOVA_TOOL_EXECUTION_BACKEND !== undefined ||
+    process.env.NOVA_EXECUTIONER_WORKSPACE !== undefined ||
+    process.env.HARNESS_CONFIG_PATH !== undefined;
+}
+
 /**
  * Start the daemon in background
  */
@@ -322,7 +329,7 @@ async function killExistingDaemon(): Promise<void> {
     execSync('pkill -TERM -f harness-daemon', { stdio: 'ignore' });
     // Wait for graceful shutdown
     const startTime = Date.now();
-    while (Date.now() - startTime < 3000) {
+    while (Date.now() - startTime < DAEMON_RESTART_TIMEOUT) {
       if (!(await isDaemonRunning())) {
         return;
       }
@@ -382,7 +389,12 @@ async function main(): Promise<void> {
     console.log('[nova] --dangerous mode: Will enable for this session only');
   }
 
-  if (!daemonRunning) {
+  if (daemonRunning && hasDaemonConfigEnvOverride()) {
+    console.log('[nova] Restarting daemon to apply environment config overrides...');
+    await killExistingDaemon();
+  }
+
+  if (!daemonRunning || hasDaemonConfigEnvOverride()) {
     try {
       await startDaemon();
     } catch (error) {

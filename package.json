@@ -74,6 +74,8 @@
     "metarepo:lint": "./metarepo lint",
     "metarepo:test": "./metarepo test",
     "smoke:interprocess": "bun run scripts/smoke/interprocess-smoke.ts",
+    "smoke:executioner": "bun run tests/smoke/executioner-sdk-import-smoke.ts",
+    "smoke:executioner-tools": "bun run tests/smoke/executioner-tool-registry-smoke.ts",
     "typecheck:split-runtime": "bun run --cwd packages/core/types lint && bun run --cwd packages/core/runtime lint && bun run --cwd packages/core/shared lint && bun run --cwd packages/infra/comms-bus lint && bun run --cwd packages/infra/harness-client lint && bun run --cwd packages/infra/graphd lint && bun run --cwd packages/plugins/agent-memory lint && bun run --cwd packages/plugins/memory lint && bun run --cwd packages/infra/harness-daemon lint",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -89,6 +91,7 @@
     "profile:daemon": "PROFILE=1 bun run start:daemon"
   },
   "dependencies": {
+    "@executioner/sdk": "file:../executioner/packages/executioner-js",
     "effect": "^3.18.2",
     "fast-glob": "^3.3.3",
     "minimatch": "^10.1.1",

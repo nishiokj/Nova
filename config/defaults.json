@@ -78,6 +78,8 @@
   "tools": {
     "bash_timeout_ms": 120000,
     "max_output_length": 10000,
+    "execution_backend": "native",
+    "executioner_workspace": "existing",
     "browser": {
       "default_screenshot_dir": "~/Desktop"
     }

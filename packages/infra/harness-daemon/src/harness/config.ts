@@ -90,9 +90,14 @@ export const AgentConfigEntrySchema = z.object({
 });
 
 /** Tools configuration */
+export const ToolExecutionBackendSchema = z.enum(['native', 'executioner']);
+export const ExecutionerWorkspaceModeSchema = z.enum(['existing', 'new']);
+
 export const ToolsConfigSchema = z.object({
   bash_timeout_ms: z.number().positive(),
   max_output_length: z.number().positive(),
+  execution_backend: ToolExecutionBackendSchema.optional(),
+  executioner_workspace: ExecutionerWorkspaceModeSchema.optional(),
 });
 
 /** GraphD configuration */
@@ -221,6 +226,8 @@ export type AgentLLMConfig = z.infer<typeof AgentLLMConfigSchema>;
 export type AgentBudgetConfig = z.infer<typeof AgentBudgetConfigSchema>;
 export type AgentConfigEntry = z.infer<typeof AgentConfigEntrySchema>;
 export type ToolsConfigSection = z.infer<typeof ToolsConfigSchema>;
+export type ToolExecutionBackend = z.infer<typeof ToolExecutionBackendSchema>;
+export type ExecutionerWorkspaceMode = z.infer<typeof ExecutionerWorkspaceModeSchema>;
 export type GraphDConfigSection = z.infer<typeof GraphDConfigSchema>;
 export type ContextConfigSection = z.infer<typeof ContextConfigSchema>;
 export type SkillConfigEntry = z.infer<typeof SkillConfigEntrySchema>;
@@ -282,6 +289,8 @@ export interface FullHarnessConfig {
     repoRoot: string;
     bashTimeoutMs: number;
     maxOutputLength: number;
+    executionBackend: ToolExecutionBackend;
+    executionerWorkspace: ExecutionerWorkspaceMode;
   };
   graphd: {
     enabled: boolean;
@@ -345,6 +354,8 @@ export interface FullHarnessConfig {
 export const DEFAULT_TOOLS_CONFIG: ToolsConfigSection = {
   bash_timeout_ms: 120000,
   max_output_length: 10000,
+  execution_backend: 'native',
+  executioner_workspace: 'existing',
 };
 
 export const DEFAULT_GRAPHD_CONFIG: GraphDConfigSection = {

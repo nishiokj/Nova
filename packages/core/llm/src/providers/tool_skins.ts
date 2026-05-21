@@ -369,10 +369,11 @@ export function vocabForProvider(canonicalProvider: string): ToolVocabulary {
  */
 export function formatToolForOpenAI(
   tool: ToolDefinition,
-  model: string
+  model: string,
+  options: { useApplyPatch?: boolean } = {}
 ): Record<string, unknown> | null {
   // Filter out tools replaced by apply_patch
-  if (FILTERED_NOVA_TOOLS.has(tool.name)) {
+  if ((options.useApplyPatch ?? true) && FILTERED_NOVA_TOOLS.has(tool.name)) {
     return null;
   }
 

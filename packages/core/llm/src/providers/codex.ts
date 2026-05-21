@@ -592,13 +592,14 @@ export class CodexProvider implements LLMProviderAdapter {
 
   formatTools(tools: ToolDefinition[], model?: string): Record<string, unknown>[] {
     const effectiveModel = model ?? '';
+    const useApplyPatch = tools.some((tool) => tool.name === 'apply_patch');
     const formatted: Record<string, unknown>[] = [];
     for (const tool of tools) {
-      const skinned = formatToolForOpenAI(tool, effectiveModel);
+      const skinned = formatToolForOpenAI(tool, effectiveModel, { useApplyPatch });
       if (!skinned) continue;
       // Codex backend expects function tools in this path; keep apply_patch in JSON mode.
       if (tool.name === 'apply_patch' && skinned.type === 'custom') {
-        const fallback = formatToolForOpenAI(tool, 'gpt-3.5-turbo');
+        const fallback = formatToolForOpenAI(tool, 'gpt-3.5-turbo', { useApplyPatch });
         if (fallback) formatted.push(fallback);
         continue;
       }

@@ -33,6 +33,17 @@ export {
 // Registry
 export { ToolRegistry, type ToolExecuteOptions } from './registry.js';
 
+export {
+  executionerToolOptions,
+  isExecutionerToolName,
+  withExecutionerToolExecutors,
+  type ExecutionerSubmitResult,
+  type ExecutionerToolLogEvent,
+  type ExecutionerToolLogger,
+  type ExecutionerToolEnvironment,
+  type ExecutionerToolEnvironmentProvider,
+} from './executioner_tools.js';
+
 // Tool argument schemas
 export {
   TOOL_SCHEMAS,

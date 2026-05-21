@@ -22,12 +22,13 @@ import {
   type InternalHookContext,
   buildAgentConfig,
 } from 'agent';
+import { ExecutionerEnvironment } from '@executioner/sdk';
 import { Effect, Layer, ManagedRuntime } from 'effect';
 import os from 'os';
 import { execSync } from 'child_process';
 import { createAdapter, hasCodexCredentials, type ProviderKeyService } from 'llm';
 import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
-import type { ToolRegistry } from 'tools';
+import { DANGEROUS_PATTERNS, type ToolRegistry } from 'tools';
 import { createEvent, getProviderEnvVar, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
 import type { ContextWindow } from 'context';
 import { profiler } from 'shared';
@@ -424,6 +425,7 @@ export class AgentHarness {
   private entityGraph: EntityGraphInstance | null = null;
   private memoryInjector: MemoryInjector | null = null;
   private traceSubscriber: TraceSubscriber | null = null;
+  private executionerEnvironment: Promise<ExecutionerEnvironment> | null = null;
   private initializedModelSelections = new Set<string>();
   private readonly pendingSessionHookTasks = new Set<Promise<void>>();
   private readonly closingSessionHooks = new Set<string>();
@@ -476,7 +478,45 @@ export class AgentHarness {
 
     const workingDir = config.tools.workingDir;
 
-    this.toolRegistry = createToolRegistry(config, workingDir, config.dangerousMode);
+    if (config.tools.executionBackend === 'executioner') {
+      const executionerWorkspace = config.tools.executionerWorkspace === 'new'
+        ? { kind: 'new' as const }
+        : { kind: 'existing' as const, root: workingDir };
+      this.executionerEnvironment = ExecutionerEnvironment.create({
+        workspace: executionerWorkspace,
+        worker: { kind: 'managed', id: 'nova-tool-worker', idleSleepMs: 1 },
+        lifecycle: {
+          destroyOnClose: true,
+          cleanupQueueOnClose: true,
+          cleanupStateOnClose: true,
+        },
+        policy: {
+          process: {
+            allowExec: true,
+            deniedCommands: config.dangerousMode ? [] : [...DANGEROUS_PATTERNS],
+          },
+        },
+      });
+      this.executionerEnvironment.catch((error) => {
+        this.logger.warning('Executioner environment failed to start', { error: String(error) });
+      });
+      this.executionerEnvironment.then((env) => {
+        this.logger.info('Executioner tool backend enabled', {
+          workspaceMode: config.tools.executionerWorkspace,
+          sourceWorkingDir: workingDir,
+          sandboxRoot: env.session.workspace.root,
+          logicalRoot: env.session.workspace.logicalRoot,
+        });
+      }).catch(() => undefined);
+    }
+
+    this.toolRegistry = createToolRegistry(
+      config,
+      workingDir,
+      config.dangerousMode,
+      this.executionerEnvironment ?? undefined,
+      this.logger
+    );
 
     // Initialize GraphD if enabled
     // Note: config.graphd.dbPath is already an absolute path (resolved in config_loader.ts)
@@ -2549,6 +2589,18 @@ export class AgentHarness {
       }
     }
     this.toolRegistry.clearCache();
+
+    if (this.executionerEnvironment) {
+      try {
+        const env = await this.executionerEnvironment;
+        await env.close();
+        this.logger.info('Executioner environment closed');
+      } catch (error) {
+        this.logger.warning('Executioner environment close failed', { error: String(error) });
+      } finally {
+        this.executionerEnvironment = null;
+      }
+    }
 
     // Clean up entity graph
     if (this.entityGraph) {

@@ -16,6 +16,7 @@
     "build": "tsc"
   },
   "dependencies": {
+    "@executioner/sdk": "file:../../../../executioner/packages/executioner-js",
     "agent": "workspace:*",
     "comms-bus": "workspace:*",
     "context": "workspace:*",
