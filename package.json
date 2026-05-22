@@ -91,7 +91,6 @@
     "profile:daemon": "PROFILE=1 bun run start:daemon"
   },
   "dependencies": {
-    "@executioner/sdk": "file:../executioner/packages/executioner-js",
     "effect": "^3.18.2",
     "fast-glob": "^3.3.3",
     "minimatch": "^10.1.1",

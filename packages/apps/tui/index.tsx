@@ -109,6 +109,7 @@ const NOVA_ANIM_FRAMES = [
   ],
 ];
 const NOVA_ANIM_INTERVAL = 300;
+const NOVA_PIXEL_COLOR = "#ff5fd2";
 
 function resolveBusConfig(): { host: string; port: number } {
   const host = process.env.EVENT_BUS_HOST ?? DEFAULT_EVENT_BUS_HOST;
@@ -2811,14 +2812,12 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
 
     for (let x = 0; x < chars.length; x++) {
       const fg = chars[x];
-      const sh = (x + 1) < chars.length ? chars[x + 1] : undefined;
       const fgEmpty = !fg || fg === "\u2800" || fg === " ";
-      const shEmpty = !sh || sh === "\u2800" || sh === " ";
 
-      const char = !fgEmpty ? fg : !shEmpty ? sh : " ";
-      const color = !fgEmpty ? colors.accent : !shEmpty ? colors.border : "";
+      const char = !fgEmpty ? fg : " ";
+      const color = !fgEmpty ? NOVA_PIXEL_COLOR : "";
       const bold = !fgEmpty ? true : undefined;
-      const dim = fgEmpty && !shEmpty ? true : undefined;
+      const dim = undefined;
 
       const last = segments[segments.length - 1];
       if (last && last.color === color && last.bold === bold && last.dim === dim) {

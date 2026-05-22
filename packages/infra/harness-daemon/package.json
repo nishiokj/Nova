@@ -13,7 +13,7 @@
     "profile:cpu": "BUN_JSC_dumpSamplingProfilerData=1 bun run src/index.ts",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "build": "tsc"
+    "build": "bun build src/index.ts --outdir dist --target node"
   },
   "dependencies": {
     "@executioner/sdk": "file:../../../../executioner/packages/executioner-js",

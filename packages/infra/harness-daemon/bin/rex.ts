@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 
-declare const __REX_VERSION__: string | undefined;
+declare const __NOVA_VERSION__: string | undefined;
 
-const VERSION = typeof __REX_VERSION__ === "string" ? __REX_VERSION__ : "dev";
+const VERSION = typeof __NOVA_VERSION__ === "string" ? __NOVA_VERSION__ : "dev";
 
 function printUsage(): void {
-  console.log(`Usage: rex run [options]\n\nCommands:\n  run                 Execute a headless harness run\n\nOptions:\n  -h, --help          Show this help\n  -v, --version       Print version\n\nExamples:\n  rex run --input-file /agentlab/in/task.json --output /agentlab/out/result.json\n  rex run --help`);
+  console.log(`Usage: nova run [options]\n\nCommands:\n  run                 Execute a headless harness run\n\nOptions:\n  -h, --help          Show this help\n  -v, --version       Print version\n\nExamples:\n  nova run --input-file /agentlab/in/task.json --output /agentlab/out/result.json\n  nova run --help`);
 }
 
 async function runCli(args: string[]): Promise<void> {
@@ -22,7 +22,7 @@ async function main(): Promise<void> {
     return;
   }
   if (first === "--version" || first === "-v") {
-    console.log(`rex ${VERSION}`);
+    console.log(`nova ${VERSION}`);
     return;
   }
   if (first === "run") {
@@ -40,6 +40,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error("[rex] Fatal error:", error instanceof Error ? error.message : error);
+  console.error("[nova] Fatal error:", error instanceof Error ? error.message : error);
   process.exit(1);
 });
