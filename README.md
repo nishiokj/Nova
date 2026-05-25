@@ -1,4 +1,4 @@
-# nova
+# Nova
 
 Model agnostic filesystem tool-usage agent with terminal UI. Built on Bun.
 
