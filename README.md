@@ -1,6 +1,8 @@
 # nova
 
-Config-driven multi-agent runtime. Runs AI agents against real tools (bash, file system, web search) with a terminal UI, a background daemon, and a code graph server. Built on Bun.
+Nova is the canonical name for this project, package, and CLI.
+
+Config-driven multi-agent runtime. Nova runs AI agents against real tools (bash, file system, web search) with a terminal UI, a background daemon, and a code graph server. Built on Bun.
 
 ## What it is
 
@@ -21,7 +23,7 @@ bun install
 bun run start
 ```
 
-`bun run start` launches the daemon and opens the TUI. Inside the TUI:
+`bun run start` launches Nova's daemon and opens the TUI. Inside the TUI:
 
 1. Run `/providers` — add your API key (Anthropic, OpenAI, Gemini, etc.)
 2. Run `/models` — pick a model
@@ -30,6 +32,8 @@ bun run start
 That's it.
 
 ## Commands
+
+From a workspace checkout:
 
 ```bash
 bun run start              # daemon + TUI (normal use)
@@ -43,6 +47,15 @@ bun run lint               # type + lint checks
 bun test                   # run tests (vitest)
 ```
 
+From an installed package, use the `nova` binary:
+
+```bash
+nova                       # daemon + TUI
+nova --daemon-only         # daemon only (foreground)
+nova --restart             # restart daemon, then open TUI
+nova run --help            # headless CLI usage
+```
+
 ## Headless / CI
 
 Run a single task without the TUI:
@@ -50,6 +63,16 @@ Run a single task without the TUI:
 ```bash
 export ANTHROPIC_API_KEY=your-key
 
+nova run \
+  --input "Summarize this repo in 5 bullets" \
+  --provider anthropic \
+  --model claude-sonnet-4-5 \
+  --provider-env anthropic=ANTHROPIC_API_KEY
+```
+
+From a checkout without installing the package binary, the same command is:
+
+```bash
 bun run packages/apps/launcher/index.ts run \
   --input "Summarize this repo in 5 bullets" \
   --provider anthropic \

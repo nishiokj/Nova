@@ -101,7 +101,7 @@ Options:
   --bindings-file <path> (legacy)
   --provider-env <provider=ENV_NAME> (repeatable)
 
-AgentLab container example:
+Nova container example:
   nova run \
     --provider z.ai-coder \
     --model glm-5 \

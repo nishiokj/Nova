@@ -74,6 +74,27 @@ const PROJECT_CONFIG_NAME = path.join('config', 'harness_config.json');
 const getConfigDir = () => path.join(homedir(), '.nova');
 const getUserConfigPath = () => path.join(getConfigDir(), 'config.json');
 
+function printUsage(): void {
+  console.log(`Usage: nova [options] [prompt]
+
+Commands:
+  nova                    Start interactive TUI with daemon
+  nova run [options]      Execute a headless Nova run
+  nova <input-file>       Run a headless task from a file
+
+Options:
+  --daemon-only           Run daemon in foreground without TUI
+  --restart               Restart daemon before opening the TUI
+  --dangerous             Enable dangerous mode for this TUI session
+  -v, --version           Print version
+  -h, --help              Show this help
+
+Configuration:
+  Config file: ~/.nova/config.json
+  Project config: config/harness_config.json
+`);
+}
+
 const ensureUserConfig = (): string => {
   const userConfigDir = getConfigDir();
   const userConfig = getUserConfigPath();
@@ -168,7 +189,7 @@ function isExistingFile(targetPath: string): boolean {
 async function runHarnessCli(rawArgs: string[]): Promise<number> {
   const harnessCliPath = getHarnessCliPath();
   if (!existsSync(harnessCliPath)) {
-    throw new Error(`harness CLI not found: ${harnessCliPath}`);
+    throw new Error(`Nova headless CLI not found: ${harnessCliPath}`);
   }
 
   const configPath = resolveHeadlessConfigPath();
@@ -299,9 +320,10 @@ async function startDaemon(): Promise<Subprocess> {
  */
 async function startTui(): Promise<void> {
   const tuiPath = getTuiPath();
+  const tuiArgs = process.argv.slice(2).filter((arg) => arg !== '--restart');
 
   const tui = spawn({
-    cmd: ['bun', 'run', tuiPath, ...process.argv.slice(2)],
+    cmd: ['bun', 'run', tuiPath, ...tuiArgs],
     cwd: getProjectRoot(),
     env: {
       ...process.env,
@@ -345,7 +367,19 @@ async function killExistingDaemon(): Promise<void> {
  * Main entry point
  */
 async function main(): Promise<void> {
-  if (await maybeRunHeadless(process.argv.slice(2))) {
+  const args = process.argv.slice(2);
+
+  if (args[0] === '--help' || args[0] === '-h') {
+    printUsage();
+    return;
+  }
+
+  if (args[0] === '--version' || args[0] === '-v') {
+    console.log(`nova ${process.env.NOVA_VERSION ?? 'dev'}`);
+    return;
+  }
+
+  if (await maybeRunHeadless(args)) {
     return;
   }
 

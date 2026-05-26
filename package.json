@@ -1,7 +1,7 @@
 {
   "name": "nova",
   "version": "0.1.0",
-  "description": "Config-driven, multi-tier agent system with composable agent primitives",
+  "description": "Nova: config-driven, multi-tier agent system with composable agent primitives",
   "type": "module",
   "workspaces": [
     "packages/core/*",

@@ -737,7 +737,7 @@ const CONNECTOR_CONFIG_FIELDS: Record<string, ConfigField[]> = {
     {
       key: 'sessionsPath',
       label: 'Sessions Path',
-      description: 'Path to Rex sessions directory',
+      description: 'Path to Nova sessions directory',
       required: true,
     },
   ],
