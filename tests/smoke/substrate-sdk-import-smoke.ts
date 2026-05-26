@@ -1,46 +1,47 @@
 import { mkdir, rm, rmdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { ExecutionerEnvironment } from '@executioner/sdk';
+import { Environment } from '@substrate/sdk';
 
-const executionerBin =
-  process.env.EXECUTIONER_BIN ??
-  '/Users/jevinnishioka/Desktop/executioner/target/release/executioner';
+const substrateBin =
+  process.env.SUBSTRATE_BIN ??
+  '/Users/jevinnishioka/Desktop/substrate/target/release/executioner';
 
 const workspace = process.cwd();
 const smokeDir = join(workspace, '.tmp');
 await mkdir(smokeDir, { recursive: true });
-const smokePath = `.tmp/executioner-agent-import-smoke-${randomUUID()}.txt`;
+const smokePath = `.tmp/substrate-agent-import-smoke-${randomUUID()}.txt`;
 
-const env = await ExecutionerEnvironment.create({
-  binaryPath: executionerBin,
+const env = await Environment.create({
+  binaryPath: substrateBin,
   workspace: { kind: 'existing', root: workspace },
-  worker: { kind: 'managed', id: 'agent-import-smoke-worker', idleSleepMs: 1 },
+  worker: { kind: 'managed', id: 'nova-substrate-import-smoke-worker', idleSleepMs: 1 },
 });
+const session = await env.createSession();
 
 try {
-  const write = await env.submit({
+  const write = await session.submit({
     toolName: 'Write',
     arguments: {
       path: smokePath,
-      content: 'hello from agent via executioner',
+      content: 'hello from nova via substrate',
     },
   });
 
-  const read = await env.submit({
+  const read = await session.submit({
     toolName: 'Read',
     arguments: {
       path: smokePath,
     },
   });
 
-  const edit = await env.edit({
+  const edit = await session.edit({
     path: smokePath,
-    oldString: 'hello from agent via executioner',
-    newString: 'hello from agent via executioner edit',
+    oldString: 'hello from nova via substrate',
+    newString: 'hello from nova via substrate edit',
   });
 
-  const editedRead = await env.submit({
+  const editedRead = await session.submit({
     toolName: 'Read',
     arguments: {
       path: smokePath,

@@ -1,7 +1,7 @@
 import { mkdir, rm, rmdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { ExecutionerEnvironment } from '@executioner/sdk';
+import { Environment } from '@substrate/sdk';
 import {
   DANGEROUS_PATTERNS,
   ToolRegistry,
@@ -10,20 +10,20 @@ import {
   withExecutionerToolExecutors,
 } from 'tools';
 
-const executionerBin =
-  process.env.EXECUTIONER_BIN ??
-  '/Users/jevinnishioka/Desktop/executioner/target/release/executioner';
+const substrateBin =
+  process.env.SUBSTRATE_BIN ??
+  '/Users/jevinnishioka/Desktop/substrate/target/release/executioner';
 
 const workspace = process.cwd();
 const smokeDir = join(workspace, '.tmp');
-const smokeFile = `.tmp/executioner-tool-registry-smoke-${randomUUID()}.txt`;
+const smokeFile = `.tmp/substrate-tool-registry-smoke-${randomUUID()}.txt`;
 
 await mkdir(smokeDir, { recursive: true });
 
-const env = await ExecutionerEnvironment.create({
-  binaryPath: executionerBin,
+const env = await Environment.create({
+  binaryPath: substrateBin,
   workspace: { kind: 'existing', root: workspace },
-  worker: { kind: 'managed', id: 'agent-tool-registry-smoke-worker', idleSleepMs: 1 },
+  worker: { kind: 'managed', id: 'nova-substrate-tool-registry-smoke-worker', idleSleepMs: 1 },
   policy: {
     process: {
       allowExec: true,
@@ -31,24 +31,25 @@ const env = await ExecutionerEnvironment.create({
     },
   },
 });
+const session = await env.createSession();
 
 try {
   const registry = new ToolRegistry({}, workspace);
   for (const option of withExecutionerToolExecutors(
     executionerToolOptions(builtinToolOptions),
-    env,
+    session,
     workspace
   )) {
     registry.register(option);
   }
 
   const definitions = registry.getDefinitions().map((tool) => tool.name).sort();
-  const bash = await registry.execute('Bash', { command: 'printf executioner-bash-smoke' }, { cwd: workspace });
+  const bash = await registry.execute('Bash', { command: 'printf substrate-bash-smoke' }, { cwd: workspace });
   const write = await registry.execute('Write', { path: smokeFile, content: 'alpha\nneedle\nomega\n' }, { cwd: workspace });
   const edit = await registry.execute('Edit', { path: smokeFile, oldString: 'needle', newString: 'pin' }, { cwd: workspace });
   const read = await registry.execute('Read', { path: smokeFile }, { cwd: workspace });
   const grep = await registry.execute('Grep', { pattern: 'pin', path: '.tmp' }, { cwd: workspace });
-  const glob = await registry.execute('Glob', { pattern: '.tmp/executioner-tool-registry-smoke-*.txt' }, { cwd: workspace });
+  const glob = await registry.execute('Glob', { pattern: '.tmp/substrate-tool-registry-smoke-*.txt' }, { cwd: workspace });
   const batchEdit = await registry.execute('BatchEdit', {
     edits: [{ path: smokeFile, oldString: 'pin', newString: 'needle' }],
   }, { cwd: workspace });

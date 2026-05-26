@@ -557,7 +557,7 @@ function parseBooleanEnv(name: string): boolean | undefined {
   return undefined;
 }
 
-function parseToolExecutionBackendEnv(name: string): 'native' | 'executioner' | undefined {
+function parseToolExecutionBackendEnv(name: string): 'native' | 'substrate' | 'executioner' | undefined {
   const raw = process.env[name];
   if (typeof raw !== 'string') return undefined;
 
@@ -663,11 +663,14 @@ export function createConfigFromFile(
   const envExecutionerWorkspace = parseExecutionerWorkspaceModeEnv('NOVA_EXECUTIONER_WORKSPACE');
   const entityGraphEnabled = envEntityGraphEnabled ?? (fileConfig.entity_graph?.enabled ?? DEFAULT_ENTITY_GRAPH_CONFIG.enabled);
   const entityGraphStartupScan = envEntityGraphStartupScan ?? (fileConfig.entity_graph?.startup_scan ?? DEFAULT_ENTITY_GRAPH_CONFIG.startup_scan ?? true);
-  const toolExecutionBackend =
+  const parsedToolExecutionBackend =
     envToolExecutionBackend ??
     fileConfig.tools?.execution_backend ??
     DEFAULT_TOOLS_CONFIG.execution_backend ??
     'native';
+  const toolExecutionBackend = parsedToolExecutionBackend === 'executioner'
+    ? 'substrate'
+    : parsedToolExecutionBackend;
   const executionerWorkspace =
     envExecutionerWorkspace ??
     fileConfig.tools?.executioner_workspace ??
@@ -681,7 +684,10 @@ export function createConfigFromFile(
     logger.info(`[config]   entity_graph.startup_scan overridden by NOVA_ENTITY_GRAPH_STARTUP_SCAN=${entityGraphStartupScan}`);
   }
   if (envToolExecutionBackend !== undefined) {
-    logger.info(`[config]   tools.execution_backend overridden by NOVA_TOOL_EXECUTION_BACKEND=${toolExecutionBackend}`);
+    logger.info(`[config]   tools.execution_backend overridden by NOVA_TOOL_EXECUTION_BACKEND=${parsedToolExecutionBackend}`);
+  }
+  if (parsedToolExecutionBackend === 'executioner') {
+    logger.warning('[config] tools.execution_backend=executioner is deprecated; use substrate');
   }
   if (envExecutionerWorkspace !== undefined) {
     logger.info(`[config]   tools.executioner_workspace overridden by NOVA_EXECUTIONER_WORKSPACE=${executionerWorkspace}`);

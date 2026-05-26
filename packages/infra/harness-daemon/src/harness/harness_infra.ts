@@ -221,9 +221,9 @@ function logExecutionerToolEvent(
   };
 
   if (event.phase === 'failed' || event.phase === 'blocked') {
-    logger.warning(`Executioner tool ${event.phase}`, metadata);
+    logger.warning(`Substrate tool ${event.phase}`, metadata);
     return;
   }
 
-  logger.info(`Executioner tool ${event.phase}`, metadata);
+  logger.info(`Substrate tool ${event.phase}`, metadata);
 }

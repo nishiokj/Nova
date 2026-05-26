@@ -10,7 +10,8 @@
 
 import { spawn, type Subprocess } from 'bun';
 import { createConnection } from 'net';
-import { mkdirSync, existsSync, writeFileSync, statSync } from 'fs';
+import { execFileSync } from 'child_process';
+import { mkdirSync, existsSync, writeFileSync, statSync, realpathSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
@@ -46,6 +47,14 @@ const getProjectRoot = () => {
     return path.resolve(__dirname, '..', '..', '..', '..');
   }
   return path.resolve(__dirname, '..', '..', '..');
+};
+
+const getRealProjectRoot = () => {
+  try {
+    return realpathSync(getProjectRoot());
+  } catch {
+    return getProjectRoot();
+  }
 };
 
 const getDaemonPath = () => {
@@ -107,10 +116,12 @@ const ensureUserConfig = (): string => {
       console.log(`[nova] Created config directory: ${userConfigDir}`);
     }
 
-    // Write minimal user config for preferences (API keys stored in GraphD)
-    writeFileSync(userConfig, JSON.stringify(MINIMAL_USER_CONFIG, null, 2) + '\n');
-    console.log(`[nova] Created user config: ${userConfig}`);
-    console.log('[nova] To add API keys, use: nova providers set <provider> <key>');
+    if (!existsSync(userConfig)) {
+      // Write minimal user config for preferences (API keys stored in GraphD)
+      writeFileSync(userConfig, JSON.stringify(MINIMAL_USER_CONFIG, null, 2) + '\n');
+      console.log(`[nova] Created user config: ${userConfig}`);
+      console.log('[nova] To add API keys, use: nova providers set <provider> <key>');
+    }
     return userConfig;
   } catch (err) {
     console.warn(`[nova] Could not create user config: ${err}`);
@@ -176,6 +187,85 @@ async function isPortRunning(host: string, port: number): Promise<boolean> {
 
 async function isDaemonRunning(): Promise<boolean> {
   return isPortRunning(DAEMON_HOST, DAEMON_PORT);
+}
+
+interface DaemonProcess {
+  pid: number;
+  command: string;
+}
+
+function listDaemonProcesses(): DaemonProcess[] {
+  let output = '';
+  try {
+    output = execFileSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf8' });
+  } catch {
+    return [];
+  }
+
+  const rows: DaemonProcess[] = [];
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const match = /^(\d+)\s+(.+)$/.exec(trimmed);
+    if (!match) continue;
+
+    const command = match[2] ?? '';
+    if (
+      command.includes('packages/infra/harness-daemon') ||
+      command.includes('harness-daemon/dist/index.js') ||
+      command.includes('harness-daemon/src/index.ts') ||
+      command.includes('nova-daemon')
+    ) {
+      rows.push({ pid: Number(match[1]), command });
+    }
+  }
+
+  return rows;
+}
+
+function isOldNamedDaemon(processInfo: DaemonProcess): boolean {
+  const command = processInfo.command;
+  const currentRoot = getProjectRoot();
+  const realRoot = getRealProjectRoot();
+
+  if (command.includes(currentRoot) || command.includes(realRoot)) {
+    return false;
+  }
+
+  return command.includes('/node_modules/rex/') ||
+    command.includes('/Desktop/rex/') ||
+    command.includes('/rex/packages/') ||
+    command.includes('\\node_modules\\rex\\') ||
+    command.includes('\\rex\\packages\\');
+}
+
+function terminateProcess(pid: number): void {
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    // Process may already be gone.
+  }
+}
+
+async function stopOldNamedDaemons(): Promise<boolean> {
+  const staleDaemons = listDaemonProcesses().filter(isOldNamedDaemon);
+  if (staleDaemons.length === 0) return false;
+
+  for (const daemon of staleDaemons) {
+    console.log(`[nova] Stopping daemon from old install path (pid ${daemon.pid})`);
+    terminateProcess(daemon.pid);
+  }
+
+  const startTime = Date.now();
+  while (Date.now() - startTime < DAEMON_RESTART_TIMEOUT) {
+    if (!(await isDaemonRunning())) {
+      return true;
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  console.warn('[nova] Old-path daemon did not shut down in time');
+  return true;
 }
 
 function isExistingFile(targetPath: string): boolean {
@@ -346,20 +436,21 @@ async function startTui(): Promise<void> {
  * Kill any running daemon gracefully
  */
 async function killExistingDaemon(): Promise<void> {
-  const { execSync } = await import('child_process');
-  try {
-    execSync('pkill -TERM -f harness-daemon', { stdio: 'ignore' });
-    // Wait for graceful shutdown
-    const startTime = Date.now();
-    while (Date.now() - startTime < DAEMON_RESTART_TIMEOUT) {
-      if (!(await isDaemonRunning())) {
-        return;
-      }
-      await new Promise(r => setTimeout(r, 100));
+  const daemons = listDaemonProcesses();
+  for (const daemon of daemons) {
+    terminateProcess(daemon.pid);
+  }
+
+  const startTime = Date.now();
+  while (Date.now() - startTime < DAEMON_RESTART_TIMEOUT) {
+    if (!(await isDaemonRunning())) {
+      return;
     }
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  if (daemons.length > 0) {
     console.warn('[nova] Services did not shut down in time');
-  } catch {
-    // No daemon running or pkill failed - that's fine
   }
 }
 
@@ -413,8 +504,10 @@ async function main(): Promise<void> {
     return;
   }
 
+  const stoppedOldDaemon = await stopOldNamedDaemons();
+
   // Check if daemon is already running
-  const daemonRunning = await isDaemonRunning();
+  let daemonRunning = await isDaemonRunning();
 
   // Note: --dangerous is now per-session, NOT global.
   // Starting a TUI with --dangerous enables dangerous mode for that session only.
@@ -426,9 +519,10 @@ async function main(): Promise<void> {
   if (daemonRunning && hasDaemonConfigEnvOverride()) {
     console.log('[nova] Restarting daemon to apply environment config overrides...');
     await killExistingDaemon();
+    daemonRunning = await isDaemonRunning();
   }
 
-  if (!daemonRunning || hasDaemonConfigEnvOverride()) {
+  if (!daemonRunning || hasDaemonConfigEnvOverride() || stoppedOldDaemon) {
     try {
       await startDaemon();
     } catch (error) {

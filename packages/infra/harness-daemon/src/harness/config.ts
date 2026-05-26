@@ -90,7 +90,7 @@ export const AgentConfigEntrySchema = z.object({
 });
 
 /** Tools configuration */
-export const ToolExecutionBackendSchema = z.enum(['native', 'executioner']);
+export const ToolExecutionBackendSchema = z.enum(['native', 'substrate', 'executioner']);
 export const ExecutionerWorkspaceModeSchema = z.enum(['existing', 'new']);
 
 export const ToolsConfigSchema = z.object({

@@ -22,7 +22,7 @@ import {
   type InternalHookContext,
   buildAgentConfig,
 } from 'agent';
-import { ExecutionerEnvironment } from '@executioner/sdk';
+import { Environment as SubstrateEnvironment, type Session as SubstrateSession } from '@substrate/sdk';
 import { Effect, Layer, ManagedRuntime } from 'effect';
 import os from 'os';
 import { execSync } from 'child_process';
@@ -425,7 +425,8 @@ export class AgentHarness {
   private entityGraph: EntityGraphInstance | null = null;
   private memoryInjector: MemoryInjector | null = null;
   private traceSubscriber: TraceSubscriber | null = null;
-  private executionerEnvironment: Promise<ExecutionerEnvironment> | null = null;
+  private substrateEnvironment: Promise<SubstrateEnvironment> | null = null;
+  private substrateSession: Promise<SubstrateSession> | null = null;
   private initializedModelSelections = new Set<string>();
   private readonly pendingSessionHookTasks = new Set<Promise<void>>();
   private readonly closingSessionHooks = new Set<string>();
@@ -478,12 +479,12 @@ export class AgentHarness {
 
     const workingDir = config.tools.workingDir;
 
-    if (config.tools.executionBackend === 'executioner') {
-      const executionerWorkspace = config.tools.executionerWorkspace === 'new'
+    if (config.tools.executionBackend === 'substrate') {
+      const substrateWorkspace = config.tools.executionerWorkspace === 'new'
         ? { kind: 'new' as const }
         : { kind: 'existing' as const, root: workingDir };
-      this.executionerEnvironment = ExecutionerEnvironment.create({
-        workspace: executionerWorkspace,
+      this.substrateEnvironment = SubstrateEnvironment.create({
+        workspace: substrateWorkspace,
         worker: { kind: 'managed', id: 'nova-tool-worker', idleSleepMs: 1 },
         lifecycle: {
           destroyOnClose: true,
@@ -497,15 +498,17 @@ export class AgentHarness {
           },
         },
       });
-      this.executionerEnvironment.catch((error) => {
-        this.logger.warning('Executioner environment failed to start', { error: String(error) });
+      const substrateEnvironment = this.substrateEnvironment;
+      substrateEnvironment.catch((error) => {
+        this.logger.warning('Substrate environment failed to start', { error: String(error) });
       });
-      this.executionerEnvironment.then((env) => {
-        this.logger.info('Executioner tool backend enabled', {
+      this.substrateSession = substrateEnvironment.then((env) => env.createSession());
+      this.substrateSession.then((session) => {
+        this.logger.info('Substrate tool backend enabled', {
           workspaceMode: config.tools.executionerWorkspace,
           sourceWorkingDir: workingDir,
-          sandboxRoot: env.session.workspace.root,
-          logicalRoot: env.session.workspace.logicalRoot,
+          sandboxRoot: session.session.workspace.root,
+          logicalRoot: session.session.workspace.logicalRoot,
         });
       }).catch(() => undefined);
     }
@@ -514,7 +517,7 @@ export class AgentHarness {
       config,
       workingDir,
       config.dangerousMode,
-      this.executionerEnvironment ?? undefined,
+      this.substrateSession ?? undefined,
       this.logger
     );
 
@@ -2590,15 +2593,16 @@ export class AgentHarness {
     }
     this.toolRegistry.clearCache();
 
-    if (this.executionerEnvironment) {
+    if (this.substrateEnvironment) {
       try {
-        const env = await this.executionerEnvironment;
+        const env = await this.substrateEnvironment;
         await env.close();
-        this.logger.info('Executioner environment closed');
+        this.logger.info('Substrate environment closed');
       } catch (error) {
-        this.logger.warning('Executioner environment close failed', { error: String(error) });
+        this.logger.warning('Substrate environment close failed', { error: String(error) });
       } finally {
-        this.executionerEnvironment = null;
+        this.substrateEnvironment = null;
+        this.substrateSession = null;
       }
     }
 

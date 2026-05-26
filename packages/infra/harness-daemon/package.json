@@ -16,7 +16,7 @@
     "build": "bun build src/index.ts --outdir dist --target node"
   },
   "dependencies": {
-    "@executioner/sdk": "file:../../../../executioner/packages/executioner-js",
+    "@substrate/sdk": "file:../../../../substrate/packages/executioner-js",
     "agent": "workspace:*",
     "comms-bus": "workspace:*",
     "context": "workspace:*",

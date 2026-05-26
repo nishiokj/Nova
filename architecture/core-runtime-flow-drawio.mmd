@@ -1,0 +1,95 @@
+flowchart TD
+  UserPrompt["User prompt"]
+  ClientCommand["Client sends run command"]
+  RunCoordinator["Run coordinator\nresolve session, config, cwd, model selection, permissions"]
+
+  subgraph CoreExecution["Core execution engine"]
+    StartRun["Start run\nseed initial work item from goal"]
+    WorkQueue["Work queue\nready work, dependencies, in progress work"]
+    ControlCheck["Runtime control check\nstop, pause, cancel, interruption"]
+    IterationTick["Iteration tick\nemit progress, update metrics, compact if needed"]
+    BoundsCheck["Termination policy\niteration, tool, duration, goal state"]
+    AgentFactory["Create agent instance\nagent config plus model and tools"]
+    RunAgents["Run ready agents\nsingle or parallel work items"]
+    MergeResult["Merge agent result\nupdate global context and completed work"]
+    DecideNext["Continue, enqueue follow-up work, or terminate"]
+    FinalResult["Final run result\nresponse, reason, metrics"]
+  end
+
+  subgraph AgentIteration["Agent reasoning step"]
+    BuildPrompt["Build request\nsystem prompt, task context, local context"]
+    InjectMemory["Optional memory injection\nrecent context and retrieved evidence"]
+    StreamModel["Stream model response\ntext, reasoning, tool calls, structured output"]
+    ResolveAction["Resolve action\ndone, continue, prompt user, realign"]
+    PlanTools["Plan tool calls\nallowed tools, agent tools, prompt gates"]
+    ToolHooks["Tool hooks\npre-use policy and post-use audit"]
+    ExecuteTools["Execute tools\nread, write, edit, bash, custom tools"]
+    RecordToolResults["Record tool results\ncontext updates, invalidations, events"]
+    AgentResult["Agent result\nresponse, goal state, metrics, context delta"]
+  end
+
+  subgraph CoreServices["Core state and service surfaces"]
+    ContextWindow["Context window\nmessages, files, summaries, token metrics"]
+    ToolRegistry["Tool registry\nvalidated executable capabilities"]
+    ModelAdapter["Model adapter\nprovider-neutral streaming API"]
+    EventEmitter["Event emitter\nagent, tool, llm, orchestration events"]
+    RuntimeHooks["Runtime hooks\nsession hooks and effect hooks"]
+  end
+
+  subgraph ObservabilityAndPersistence["Event consumers"]
+    ClientStream["Client stream\nlive text, progress, prompts, permissions"]
+    TracePersistence["Trace persistence\nrun events, tool calls, graph updates"]
+  end
+
+  subgraph ExternalEffects["External effects"]
+    LLMProvider["LLM provider"]
+    Workspace["Workspace filesystem and shell"]
+    MemoryStore["Memory or graph store"]
+  end
+
+  UserPrompt --> ClientCommand
+  ClientCommand --> RunCoordinator
+  RunCoordinator --> StartRun
+
+  StartRun --> WorkQueue
+  WorkQueue --> ControlCheck
+  ControlCheck --> IterationTick
+  IterationTick --> BoundsCheck
+  BoundsCheck --> AgentFactory
+  AgentFactory --> RunAgents
+  RunAgents --> BuildPrompt
+
+  BuildPrompt --> InjectMemory
+  InjectMemory --> ContextWindow
+  ContextWindow --> BuildPrompt
+  BuildPrompt --> ModelAdapter
+  ModelAdapter --> LLMProvider
+  LLMProvider --> StreamModel
+
+  StreamModel --> ResolveAction
+  ResolveAction --> PlanTools
+  ResolveAction --> AgentResult
+  PlanTools --> ToolHooks
+  ToolHooks --> ToolRegistry
+  ToolRegistry --> ExecuteTools
+  ExecuteTools --> Workspace
+  ExecuteTools --> RecordToolResults
+  RecordToolResults --> ContextWindow
+  RecordToolResults --> AgentResult
+
+  AgentResult --> MergeResult
+  MergeResult --> ContextWindow
+  MergeResult --> DecideNext
+  DecideNext --> WorkQueue
+  DecideNext --> FinalResult
+
+  RuntimeHooks --> ToolHooks
+  RuntimeHooks --> IterationTick
+  InjectMemory --> MemoryStore
+
+  EventEmitter --> ClientStream
+  EventEmitter --> TracePersistence
+  IterationTick --> EventEmitter
+  StreamModel --> EventEmitter
+  RecordToolResults --> EventEmitter
+  FinalResult --> EventEmitter

@@ -54,7 +54,7 @@ export interface ExecutionerToolLogEvent {
   phase: 'starting' | 'completed' | 'failed' | 'blocked';
   toolName: string;
   invocationId: string;
-  substrate: 'executioner';
+  substrate: 'substrate';
   logicalCwd: string;
   originalCwd?: string;
   workspaceRoot?: string;
@@ -119,7 +119,7 @@ function createExecutionerExecutor(
             phase: 'blocked',
             toolName,
             invocationId,
-            substrate: 'executioner',
+            substrate: 'substrate',
             logicalCwd: logical,
             originalCwd,
             workspaceRoot,
@@ -129,7 +129,7 @@ function createExecutionerExecutor(
             error: 'Command blocked for safety: contains dangerous pattern',
           });
           return errorResult('Bash', 'Command blocked for safety: contains dangerous pattern', 0, {
-            substrate: 'executioner',
+            substrate: 'substrate',
             invocationId,
           });
         }
@@ -142,7 +142,7 @@ function createExecutionerExecutor(
           phase: 'starting',
           toolName,
           invocationId,
-          substrate: 'executioner',
+          substrate: 'substrate',
           logicalCwd: logical,
           originalCwd,
           workspaceRoot,
@@ -172,7 +172,7 @@ function createExecutionerExecutor(
             phase: 'completed',
             toolName,
             invocationId: result.invocationId,
-            substrate: 'executioner',
+            substrate: 'substrate',
             logicalCwd: logical,
             originalCwd,
             workspaceRoot,
@@ -193,7 +193,7 @@ function createExecutionerExecutor(
             phase: 'failed',
             toolName,
             invocationId,
-            substrate: 'executioner',
+            substrate: 'substrate',
             logicalCwd: logical,
             originalCwd,
             workspaceRoot,
@@ -211,7 +211,7 @@ function createExecutionerExecutor(
       catch: (error) =>
         toToolExecutionError(error, 'execution_error', {
           toolName,
-          substrate: 'executioner',
+          substrate: 'substrate',
         }),
     });
 }
@@ -312,7 +312,7 @@ function toToolResult(result: ExecutionerSubmitResult): ToolResult {
     invocationId: result.invocationId,
     effects: result.effects ?? [],
     summary: result.summary ?? undefined,
-    substrate: 'executioner',
+    substrate: 'substrate',
   };
 
   if (result.status === 'success') {
