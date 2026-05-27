@@ -13,14 +13,17 @@
     "profile:cpu": "BUN_JSC_dumpSamplingProfilerData=1 bun run src/index.ts",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "build": "tsc"
+    "build": "bun build src/index.ts --outdir dist --target node --external ws"
   },
   "dependencies": {
+    "@nova/protocol": "workspace:*",
+    "@substrate/runtime-darwin-arm64": "file:../../../../substrate/packages/substrate-runtime-npm-darwin-arm64",
+    "@substrate/sdk": "file:../../../../substrate/packages/substrate-js",
     "agent": "workspace:*",
     "comms-bus": "workspace:*",
     "context": "workspace:*",
     "effect": "^3.19.18",
-    "harness-client": "workspace:*",
+    "@nova/client": "workspace:*",
     "graphd": "workspace:*",
     "llm": "workspace:*",
     "minimatch": "^10.1.1",

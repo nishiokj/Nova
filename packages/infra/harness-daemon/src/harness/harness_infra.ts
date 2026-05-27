@@ -1,7 +1,14 @@
 import fs from 'fs';
 import path from 'path';
 import { Effect } from 'effect';
-import { ToolRegistry, builtinToolOptions } from 'tools';
+import {
+  ToolRegistry,
+  builtinToolOptions,
+  executionerToolOptions,
+  withExecutionerToolExecutors,
+  type ExecutionerToolEnvironmentProvider,
+  type ExecutionerToolLogEvent,
+} from 'tools';
 import { errorResult, successResult } from 'types';
 import type { FullHarnessConfig } from './config.js';
 import { loadSkillDefinitions, getSkillDefinition } from './skills_loader.js';
@@ -88,7 +95,13 @@ export function createFileLogger(logDir = 'logs'): HarnessLogger & { close: () =
 /**
  * Create and register tools for the harness.
  */
-export function createToolRegistry(config: FullHarnessConfig, workingDir: string, dangerousMode = false): ToolRegistry {
+export function createToolRegistry(
+  config: FullHarnessConfig,
+  workingDir: string,
+  dangerousMode = false,
+  executionerEnvironment?: ExecutionerToolEnvironmentProvider,
+  logger?: HarnessLogger
+): ToolRegistry {
   const toolRegistry = new ToolRegistry(
     {
       bashTimeoutMs: config.tools.bashTimeoutMs,
@@ -98,11 +111,20 @@ export function createToolRegistry(config: FullHarnessConfig, workingDir: string
     workingDir
   );
 
-  for (const toolOptions of builtinToolOptions) {
+  const builtins = executionerEnvironment
+    ? withExecutionerToolExecutors(
+        executionerToolOptions(builtinToolOptions),
+        executionerEnvironment,
+        workingDir,
+        (event) => logExecutionerToolEvent(event, logger)
+      )
+    : builtinToolOptions;
+
+  for (const toolOptions of builtins) {
     toolRegistry.register(toolOptions);
   }
 
-  if (config.skills.enabled) {
+  if (!executionerEnvironment && config.skills.enabled) {
     const skillsDir = config.skills.directory
       ? path.resolve(workingDir, config.skills.directory)
       : path.resolve(workingDir, '.agent/skills');
@@ -170,4 +192,38 @@ export function createToolRegistry(config: FullHarnessConfig, workingDir: string
   }
 
   return toolRegistry;
+}
+
+function logExecutionerToolEvent(
+  event: ExecutionerToolLogEvent,
+  logger: HarnessLogger | undefined
+): void {
+  if (!logger) {
+    return;
+  }
+
+  const metadata: Record<string, unknown> = {
+    invocationId: event.invocationId,
+    toolName: event.toolName,
+    substrate: event.substrate,
+    logicalCwd: event.logicalCwd,
+    originalCwd: event.originalCwd,
+    workspaceRoot: event.workspaceRoot,
+    sandboxRoot: event.sandboxRoot,
+    sandboxMode: event.sandboxMode,
+    sandboxFresh: event.sandboxFresh,
+    sandboxManaged: event.sandboxManaged,
+    argumentSummary: event.argumentSummary,
+    status: event.status,
+    durationMs: event.durationMs,
+    effectsCount: event.effectsCount,
+    error: event.error,
+  };
+
+  if (event.phase === 'failed' || event.phase === 'blocked') {
+    logger.warning(`Substrate tool ${event.phase}`, metadata);
+    return;
+  }
+
+  logger.info(`Substrate tool ${event.phase}`, metadata);
 }

@@ -1,0 +1,40 @@
+{
+  "name": "@nova/protocol",
+  "version": "0.1.0",
+  "description": "Versioned Nova wire protocol types and validators",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/**",
+    "fixtures/**",
+    "package.json",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./bridge": {
+      "import": "./dist/bridge.js",
+      "types": "./dist/bridge.d.ts"
+    },
+    "./bus": {
+      "import": "./dist/bus.js",
+      "types": "./dist/bus.d.ts"
+    },
+    "./rpc": {
+      "import": "./dist/rpc.js",
+      "types": "./dist/rpc.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}

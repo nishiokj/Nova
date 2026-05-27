@@ -5,7 +5,7 @@
 import path from 'path';
 import { type BusServer, BRIDGE_COMMAND_CHANNEL, runChannel, sessionChannel } from 'comms-bus';
 import { profiler } from 'shared';
-import { isRpcRequest } from 'harness-client';
+import { isRpcRequest } from '@nova/protocol';
 import type { AgentRunHandle, AgentRunResult, BridgeEvent } from './types.js';
 import { createErrorEvent } from './event_translator.js';
 import type { FullHarnessConfig } from './config.js';
@@ -109,6 +109,11 @@ interface ConnectionState {
   asyncRun: AsyncRunInfo | null;
 }
 
+export interface BridgeGatewayOptions {
+  serviceAuthRequired?: boolean;
+  startedAt?: number;
+}
+
 const STREAMING_COMMANDS = new Set<string>([
   'init',
   'send_text',
@@ -127,6 +132,8 @@ export class BridgeGateway {
   private readonly workingDir: string;
   private readonly authService: AuthService | null;
   private readonly localProviders: LocalProviderManager | null;
+  private readonly serviceAuthRequired: boolean;
+  private readonly startedAt: number;
   private skillsDir: string;
   private hooksDir: string;
   private connections = new Map<string, ConnectionState>();
@@ -136,11 +143,19 @@ export class BridgeGateway {
   private readonly rpcMethods: RpcMethodHandlers;
   private readonly rpcQueue = new Map<string, Promise<void>>();
 
-  constructor(bus: BusServer, harness: HarnessLike, workingDir: string, authService?: AuthService | null) {
+  constructor(
+    bus: BusServer,
+    harness: HarnessLike,
+    workingDir: string,
+    authService?: AuthService | null,
+    options: BridgeGatewayOptions = {}
+  ) {
     this.bus = bus;
     this.harness = harness;
     this.workingDir = workingDir;
     this.authService = authService ?? null;
+    this.serviceAuthRequired = options.serviceAuthRequired ?? false;
+    this.startedAt = options.startedAt ?? Date.now();
 
     const config = harness.getConfig();
     this.skillsDir = config.skills.directory
@@ -163,6 +178,9 @@ export class BridgeGateway {
       skillsDir: this.skillsDir,
       hooksDir: this.hooksDir,
       sessionOwners: this.sessionOwners,
+      serviceAuthRequired: this.serviceAuthRequired,
+      startedAt: this.startedAt,
+      getConnectionCount: () => this.bus.getConnectionCount(),
       getOrCreateConnectionState: (id) => this.getOrCreateConnectionState(id),
       sendEvent: (id, event, channel) => this.sendEvent(id, event, channel),
       streamRunEvents: (requestId, handle, onComplete, sessionKey) =>
@@ -335,9 +353,12 @@ export class BridgeGateway {
     const readyEvent = this.harness.createReadyEvent(sessionKey);
     this.sendEvent(connectionId, readyEvent, sessionChannel(sessionKey));
 
-    // Emit model_changed for standard tabs + any additional persisted agent types.
+    // Emit model_changed for configured agents plus any additional persisted agent types.
     const selections = this.harness.getAllSessionSelectedModels?.(sessionKey) ?? new Map<string, ModelSelection>();
-    const agentTypes = new Set<string>(['standard', 'explorer', 'coding', ...selections.keys()]);
+    const agentTypes = new Set<string>([
+      ...Object.keys(this.harness.getConfig().agents),
+      ...selections.keys(),
+    ]);
     for (const agentType of agentTypes) {
       const selection = selections.get(agentType) ?? null;
       this.sendEvent(connectionId, {
@@ -501,8 +522,12 @@ export class BridgeGateway {
     // Set goal from first user message (no-op if goal already set)
     const graphd = this.harness.getGraphD?.();
     if (graphd) {
-      const goalPreview = text.trim().slice(0, 500);
-      graphd.sessionSetGoalIfEmpty(sessionKey, goalPreview);
+      try {
+        const goalPreview = text.trim().slice(0, 500);
+        graphd.sessionSetGoalIfEmpty(sessionKey, goalPreview);
+      } catch {
+        // GraphD goal persistence is best-effort; it must not block agent execution.
+      }
     }
 
     const candidateRequestId =

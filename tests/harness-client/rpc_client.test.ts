@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { RpcClient } from 'harness-client';
-import type { RpcRequest } from 'harness-client';
+import { RpcClient } from '@nova/client';
+import type { RpcRequest } from '@nova/client';
 
 describe('RpcClient', () => {
   it('correlates concurrent calls by rpc id', async () => {

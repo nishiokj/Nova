@@ -10,7 +10,9 @@ import { resolve, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import {
+  ExecutionerWorkspaceModeSchema,
   HarnessConfigFileSchema,
+  ToolExecutionBackendSchema,
   normalizeReasoningEffort,
   extractReasoningEffort,
   DEFAULT_TOOLS_CONFIG,
@@ -555,6 +557,30 @@ function parseBooleanEnv(name: string): boolean | undefined {
   return undefined;
 }
 
+function parseToolExecutionBackendEnv(name: string): 'native' | 'substrate' | 'executioner' | undefined {
+  const raw = process.env[name];
+  if (typeof raw !== 'string') return undefined;
+
+  const result = ToolExecutionBackendSchema.safeParse(raw.trim().toLowerCase());
+  return result.success ? result.data : undefined;
+}
+
+function parseExecutionerWorkspaceModeEnv(name: string): 'existing' | 'new' | undefined {
+  const raw = process.env[name];
+  if (typeof raw !== 'string') return undefined;
+
+  const result = ExecutionerWorkspaceModeSchema.safeParse(raw.trim().toLowerCase());
+  return result.success ? result.data : undefined;
+}
+
+function parseNonEmptyStringEnv(name: string): string | undefined {
+  const raw = process.env[name];
+  if (typeof raw !== 'string') return undefined;
+
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 /**
  * Resolve a path relative to a base directory.
  * - Paths starting with ~ are expanded to home directory
@@ -641,14 +667,52 @@ export function createConfigFromFile(
 
   const envEntityGraphEnabled = parseBooleanEnv('NOVA_ENTITY_GRAPH_ENABLED');
   const envEntityGraphStartupScan = parseBooleanEnv('NOVA_ENTITY_GRAPH_STARTUP_SCAN');
+  const envToolExecutionBackend = parseToolExecutionBackendEnv('NOVA_TOOL_EXECUTION_BACKEND');
+  const envExecutionerWorkspace = parseExecutionerWorkspaceModeEnv('NOVA_EXECUTIONER_WORKSPACE');
+  const envSubstrateHostBaseUrl = parseNonEmptyStringEnv('NOVA_SUBSTRATE_HOST_BASE_URL');
+  const envSubstrateEnvironmentId = parseNonEmptyStringEnv('NOVA_SUBSTRATE_ENVIRONMENT_ID');
   const entityGraphEnabled = envEntityGraphEnabled ?? (fileConfig.entity_graph?.enabled ?? DEFAULT_ENTITY_GRAPH_CONFIG.enabled);
   const entityGraphStartupScan = envEntityGraphStartupScan ?? (fileConfig.entity_graph?.startup_scan ?? DEFAULT_ENTITY_GRAPH_CONFIG.startup_scan ?? true);
+  const parsedToolExecutionBackend =
+    envToolExecutionBackend ??
+    fileConfig.tools?.execution_backend ??
+    DEFAULT_TOOLS_CONFIG.execution_backend ??
+    'native';
+  const toolExecutionBackend = parsedToolExecutionBackend === 'executioner'
+    ? 'substrate'
+    : parsedToolExecutionBackend;
+  const executionerWorkspace =
+    envExecutionerWorkspace ??
+    fileConfig.tools?.executioner_workspace ??
+    DEFAULT_TOOLS_CONFIG.executioner_workspace ??
+    'existing';
+  const substrateHostBaseUrl = envSubstrateHostBaseUrl ?? fileConfig.tools?.substrate_host_base_url;
+  const substrateEnvironmentId = envSubstrateEnvironmentId ?? fileConfig.tools?.substrate_environment_id;
+
+  if (substrateEnvironmentId && !substrateHostBaseUrl) {
+    throw new Error('[config] tools.substrate_environment_id requires tools.substrate_host_base_url');
+  }
 
   if (envEntityGraphEnabled !== undefined) {
     logger.info(`[config]   entity_graph.enabled overridden by NOVA_ENTITY_GRAPH_ENABLED=${entityGraphEnabled}`);
   }
   if (envEntityGraphStartupScan !== undefined) {
     logger.info(`[config]   entity_graph.startup_scan overridden by NOVA_ENTITY_GRAPH_STARTUP_SCAN=${entityGraphStartupScan}`);
+  }
+  if (envToolExecutionBackend !== undefined) {
+    logger.info(`[config]   tools.execution_backend overridden by NOVA_TOOL_EXECUTION_BACKEND=${parsedToolExecutionBackend}`);
+  }
+  if (parsedToolExecutionBackend === 'executioner') {
+    logger.warning('[config] tools.execution_backend=executioner is deprecated; use substrate');
+  }
+  if (envExecutionerWorkspace !== undefined) {
+    logger.info(`[config]   tools.executioner_workspace overridden by NOVA_EXECUTIONER_WORKSPACE=${executionerWorkspace}`);
+  }
+  if (envSubstrateHostBaseUrl !== undefined) {
+    logger.info('[config]   tools.substrate_host_base_url overridden by NOVA_SUBSTRATE_HOST_BASE_URL');
+  }
+  if (envSubstrateEnvironmentId !== undefined) {
+    logger.info('[config]   tools.substrate_environment_id overridden by NOVA_SUBSTRATE_ENVIRONMENT_ID');
   }
 
   return {
@@ -659,6 +723,10 @@ export function createConfigFromFile(
       repoRoot: configDir, // configDir IS the repo root (where config/ lives)
       bashTimeoutMs: fileConfig.tools?.bash_timeout_ms ?? DEFAULT_TOOLS_CONFIG.bash_timeout_ms,
       maxOutputLength: fileConfig.tools?.max_output_length ?? DEFAULT_TOOLS_CONFIG.max_output_length,
+      executionBackend: toolExecutionBackend,
+      executionerWorkspace,
+      ...(substrateHostBaseUrl ? { substrateHostBaseUrl } : {}),
+      ...(substrateEnvironmentId ? { substrateEnvironmentId } : {}),
     },
     graphd: {
       enabled: fileConfig.graphd?.enabled ?? DEFAULT_GRAPHD_CONFIG.enabled,

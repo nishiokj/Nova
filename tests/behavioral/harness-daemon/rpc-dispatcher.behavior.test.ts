@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { RpcDispatcher, RpcHandlerError } from 'harness-daemon/harness/rpc_dispatcher.js';
-import type { RpcRequest } from 'harness-client/rpc_types.js';
+import type { RpcRequest } from '@nova/client/rpc_types.js';
 
 // ---------------------------------------------------------------------------
 // Stub for BusServer — true system boundary, only sendTo is used

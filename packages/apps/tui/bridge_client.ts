@@ -5,7 +5,7 @@
  */
 
 import { EventEmitter } from 'events';
-import { HarnessClient, type ConnectionState, type RpcClient, type BridgeCommand as HarnessBridgeCommand } from 'harness-client';
+import { HarnessClient, type ConnectionState, type RpcClient, type BridgeCommand as HarnessBridgeCommand } from '@nova/client';
 import { profiler } from 'shared';
 import type { BridgeCommand, BridgeEvent, BridgeEventType } from './types.js';
 

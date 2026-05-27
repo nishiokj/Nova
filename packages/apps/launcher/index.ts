@@ -10,7 +10,8 @@
 
 import { spawn, type Subprocess } from 'bun';
 import { createConnection } from 'net';
-import { mkdirSync, existsSync, writeFileSync, statSync } from 'fs';
+import { execFileSync } from 'child_process';
+import { mkdirSync, existsSync, writeFileSync, statSync, realpathSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
@@ -36,6 +37,7 @@ const __dirname = path.dirname(__filename);
 const DAEMON_HOST = process.env.EVENT_BUS_HOST ?? '127.0.0.1';
 const DAEMON_PORT = Number(process.env.EVENT_BUS_PORT ?? '9555');
 const DAEMON_STARTUP_TIMEOUT = 5000; // 5 seconds to wait for daemon
+const DAEMON_RESTART_TIMEOUT = 3000;
 
 // Paths - resolve relative to launcher location
 const getProjectRoot = () => {
@@ -45,6 +47,14 @@ const getProjectRoot = () => {
     return path.resolve(__dirname, '..', '..', '..', '..');
   }
   return path.resolve(__dirname, '..', '..', '..');
+};
+
+const getRealProjectRoot = () => {
+  try {
+    return realpathSync(getProjectRoot());
+  } catch {
+    return getProjectRoot();
+  }
 };
 
 const getDaemonPath = () => {
@@ -73,6 +83,27 @@ const PROJECT_CONFIG_NAME = path.join('config', 'harness_config.json');
 const getConfigDir = () => path.join(homedir(), '.nova');
 const getUserConfigPath = () => path.join(getConfigDir(), 'config.json');
 
+function printUsage(): void {
+  console.log(`Usage: nova [options] [prompt]
+
+Commands:
+  nova                    Start interactive TUI with daemon
+  nova run [options]      Execute a headless Nova run
+  nova <input-file>       Run a headless task from a file
+
+Options:
+  --daemon-only           Run daemon in foreground without TUI
+  --restart               Restart daemon before opening the TUI
+  --dangerous             Enable dangerous mode for this TUI session
+  -v, --version           Print version
+  -h, --help              Show this help
+
+Configuration:
+  Config file: ~/.nova/config.json
+  Project config: config/harness_config.json
+`);
+}
+
 const ensureUserConfig = (): string => {
   const userConfigDir = getConfigDir();
   const userConfig = getUserConfigPath();
@@ -85,10 +116,12 @@ const ensureUserConfig = (): string => {
       console.log(`[nova] Created config directory: ${userConfigDir}`);
     }
 
-    // Write minimal user config for preferences (API keys stored in GraphD)
-    writeFileSync(userConfig, JSON.stringify(MINIMAL_USER_CONFIG, null, 2) + '\n');
-    console.log(`[nova] Created user config: ${userConfig}`);
-    console.log('[nova] To add API keys, use: nova providers set <provider> <key>');
+    if (!existsSync(userConfig)) {
+      // Write minimal user config for preferences (API keys stored in GraphD)
+      writeFileSync(userConfig, JSON.stringify(MINIMAL_USER_CONFIG, null, 2) + '\n');
+      console.log(`[nova] Created user config: ${userConfig}`);
+      console.log('[nova] To add API keys, use: nova providers set <provider> <key>');
+    }
     return userConfig;
   } catch (err) {
     console.warn(`[nova] Could not create user config: ${err}`);
@@ -156,6 +189,85 @@ async function isDaemonRunning(): Promise<boolean> {
   return isPortRunning(DAEMON_HOST, DAEMON_PORT);
 }
 
+interface DaemonProcess {
+  pid: number;
+  command: string;
+}
+
+function listDaemonProcesses(): DaemonProcess[] {
+  let output = '';
+  try {
+    output = execFileSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf8' });
+  } catch {
+    return [];
+  }
+
+  const rows: DaemonProcess[] = [];
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const match = /^(\d+)\s+(.+)$/.exec(trimmed);
+    if (!match) continue;
+
+    const command = match[2] ?? '';
+    if (
+      command.includes('packages/infra/harness-daemon') ||
+      command.includes('harness-daemon/dist/index.js') ||
+      command.includes('harness-daemon/src/index.ts') ||
+      command.includes('nova-daemon')
+    ) {
+      rows.push({ pid: Number(match[1]), command });
+    }
+  }
+
+  return rows;
+}
+
+function isOldNamedDaemon(processInfo: DaemonProcess): boolean {
+  const command = processInfo.command;
+  const currentRoot = getProjectRoot();
+  const realRoot = getRealProjectRoot();
+
+  if (command.includes(currentRoot) || command.includes(realRoot)) {
+    return false;
+  }
+
+  return command.includes('/node_modules/rex/') ||
+    command.includes('/Desktop/rex/') ||
+    command.includes('/rex/packages/') ||
+    command.includes('\\node_modules\\rex\\') ||
+    command.includes('\\rex\\packages\\');
+}
+
+function terminateProcess(pid: number): void {
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    // Process may already be gone.
+  }
+}
+
+async function stopOldNamedDaemons(): Promise<boolean> {
+  const staleDaemons = listDaemonProcesses().filter(isOldNamedDaemon);
+  if (staleDaemons.length === 0) return false;
+
+  for (const daemon of staleDaemons) {
+    console.log(`[nova] Stopping daemon from old install path (pid ${daemon.pid})`);
+    terminateProcess(daemon.pid);
+  }
+
+  const startTime = Date.now();
+  while (Date.now() - startTime < DAEMON_RESTART_TIMEOUT) {
+    if (!(await isDaemonRunning())) {
+      return true;
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  console.warn('[nova] Old-path daemon did not shut down in time');
+  return true;
+}
+
 function isExistingFile(targetPath: string): boolean {
   try {
     return statSync(targetPath).isFile();
@@ -167,7 +279,7 @@ function isExistingFile(targetPath: string): boolean {
 async function runHarnessCli(rawArgs: string[]): Promise<number> {
   const harnessCliPath = getHarnessCliPath();
   if (!existsSync(harnessCliPath)) {
-    throw new Error(`harness CLI not found: ${harnessCliPath}`);
+    throw new Error(`Nova headless CLI not found: ${harnessCliPath}`);
   }
 
   const configPath = resolveHeadlessConfigPath();
@@ -243,6 +355,12 @@ function buildDaemonArgs(): string[] {
   return daemonArgs;
 }
 
+function hasDaemonConfigEnvOverride(): boolean {
+  return process.env.NOVA_TOOL_EXECUTION_BACKEND !== undefined ||
+    process.env.NOVA_EXECUTIONER_WORKSPACE !== undefined ||
+    process.env.HARNESS_CONFIG_PATH !== undefined;
+}
+
 /**
  * Start the daemon in background
  */
@@ -292,9 +410,10 @@ async function startDaemon(): Promise<Subprocess> {
  */
 async function startTui(): Promise<void> {
   const tuiPath = getTuiPath();
+  const tuiArgs = process.argv.slice(2).filter((arg) => arg !== '--restart');
 
   const tui = spawn({
-    cmd: ['bun', 'run', tuiPath, ...process.argv.slice(2)],
+    cmd: ['bun', 'run', tuiPath, ...tuiArgs],
     cwd: getProjectRoot(),
     env: {
       ...process.env,
@@ -317,20 +436,21 @@ async function startTui(): Promise<void> {
  * Kill any running daemon gracefully
  */
 async function killExistingDaemon(): Promise<void> {
-  const { execSync } = await import('child_process');
-  try {
-    execSync('pkill -TERM -f harness-daemon', { stdio: 'ignore' });
-    // Wait for graceful shutdown
-    const startTime = Date.now();
-    while (Date.now() - startTime < 3000) {
-      if (!(await isDaemonRunning())) {
-        return;
-      }
-      await new Promise(r => setTimeout(r, 100));
+  const daemons = listDaemonProcesses();
+  for (const daemon of daemons) {
+    terminateProcess(daemon.pid);
+  }
+
+  const startTime = Date.now();
+  while (Date.now() - startTime < DAEMON_RESTART_TIMEOUT) {
+    if (!(await isDaemonRunning())) {
+      return;
     }
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  if (daemons.length > 0) {
     console.warn('[nova] Services did not shut down in time');
-  } catch {
-    // No daemon running or pkill failed - that's fine
   }
 }
 
@@ -338,7 +458,19 @@ async function killExistingDaemon(): Promise<void> {
  * Main entry point
  */
 async function main(): Promise<void> {
-  if (await maybeRunHeadless(process.argv.slice(2))) {
+  const args = process.argv.slice(2);
+
+  if (args[0] === '--help' || args[0] === '-h') {
+    printUsage();
+    return;
+  }
+
+  if (args[0] === '--version' || args[0] === '-v') {
+    console.log(`nova ${process.env.NOVA_VERSION ?? 'dev'}`);
+    return;
+  }
+
+  if (await maybeRunHeadless(args)) {
     return;
   }
 
@@ -372,8 +504,10 @@ async function main(): Promise<void> {
     return;
   }
 
+  const stoppedOldDaemon = await stopOldNamedDaemons();
+
   // Check if daemon is already running
-  const daemonRunning = await isDaemonRunning();
+  let daemonRunning = await isDaemonRunning();
 
   // Note: --dangerous is now per-session, NOT global.
   // Starting a TUI with --dangerous enables dangerous mode for that session only.
@@ -382,7 +516,13 @@ async function main(): Promise<void> {
     console.log('[nova] --dangerous mode: Will enable for this session only');
   }
 
-  if (!daemonRunning) {
+  if (daemonRunning && hasDaemonConfigEnvOverride()) {
+    console.log('[nova] Restarting daemon to apply environment config overrides...');
+    await killExistingDaemon();
+    daemonRunning = await isDaemonRunning();
+  }
+
+  if (!daemonRunning || hasDaemonConfigEnvOverride() || stoppedOldDaemon) {
     try {
       await startDaemon();
     } catch (error) {

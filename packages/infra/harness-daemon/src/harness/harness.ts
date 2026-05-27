@@ -22,12 +22,18 @@ import {
   type InternalHookContext,
   buildAgentConfig,
 } from 'agent';
+import {
+  Environment as SubstrateEnvironment,
+  type EnvironmentConfig as SubstrateEnvironmentConfig,
+  type Session as SubstrateSession,
+} from '@substrate/sdk';
+import { createRequire } from 'node:module';
 import { Effect, Layer, ManagedRuntime } from 'effect';
 import os from 'os';
 import { execSync } from 'child_process';
 import { createAdapter, hasCodexCredentials, type ProviderKeyService } from 'llm';
 import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
-import type { ToolRegistry } from 'tools';
+import { DANGEROUS_PATTERNS, type ToolRegistry } from 'tools';
 import { createEvent, getProviderEnvVar, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
 import type { ContextWindow } from 'context';
 import { profiler } from 'shared';
@@ -84,6 +90,57 @@ import {
   type RuntimeCancellationMetadata,
   type RuntimeControlQueue,
 } from 'runtime';
+
+const moduleRequire = createRequire(import.meta.url);
+
+const DEFAULT_SUBSTRATE_ALLOWED_COMMANDS = [
+  'awk',
+  'bun',
+  'cargo',
+  'cat',
+  'chmod',
+  'cp',
+  'diff',
+  'echo',
+  'find',
+  'git',
+  'go',
+  'grep',
+  'head',
+  'ls',
+  'make',
+  'mkdir',
+  'mv',
+  'node',
+  'npm',
+  'pnpm',
+  'printf',
+  'pwd',
+  'python',
+  'python3',
+  'rg',
+  'rm',
+  'sed',
+  'tail',
+  'touch',
+  'tree',
+  'uv',
+  'yarn',
+] as const;
+
+function resolveSubstrateRuntimeBinary(): string | undefined {
+  if (process.env.SUBSTRATE_RUNTIME_BIN) {
+    return process.env.SUBSTRATE_RUNTIME_BIN;
+  }
+
+  const runtimeBinaryName = process.platform === 'win32' ? 'substrate-runtime.exe' : 'substrate-runtime';
+  const runtimePackageName = `@substrate/runtime-${process.platform}-${process.arch}`;
+  try {
+    return moduleRequire.resolve(`${runtimePackageName}/bin/${runtimeBinaryName}`);
+  } catch {
+    return undefined;
+  }
+}
 
 /** Agent type for routing - maps to agent config */
 type AgentType = string;
@@ -237,6 +294,7 @@ function buildAgentRegistry(config: FullHarnessConfig, envContext?: EnvironmentC
     'WebSearch',
     'PromptUser',
     'ExpandConversation',
+    'apply_patch',
   ]);
   if (config.skills.enabled) {
     builtinTools.add('Skill');
@@ -424,6 +482,8 @@ export class AgentHarness {
   private entityGraph: EntityGraphInstance | null = null;
   private memoryInjector: MemoryInjector | null = null;
   private traceSubscriber: TraceSubscriber | null = null;
+  private substrateEnvironment: Promise<SubstrateEnvironment> | null = null;
+  private substrateSession: Promise<SubstrateSession> | null = null;
   private initializedModelSelections = new Set<string>();
   private readonly pendingSessionHookTasks = new Set<Promise<void>>();
   private readonly closingSessionHooks = new Set<string>();
@@ -476,7 +536,69 @@ export class AgentHarness {
 
     const workingDir = config.tools.workingDir;
 
-    this.toolRegistry = createToolRegistry(config, workingDir, config.dangerousMode);
+    if (config.tools.executionBackend === 'substrate') {
+      const substrateWorkspace = config.tools.executionerWorkspace === 'new'
+        ? { kind: 'new' as const }
+        : { kind: 'existing' as const, root: workingDir };
+      const substrateHostBaseUrl = config.tools.substrateHostBaseUrl;
+      if (config.tools.substrateEnvironmentId && substrateHostBaseUrl) {
+        this.logger.info('Attaching to Substrate environment over HTTP', {
+          baseUrl: substrateHostBaseUrl,
+          environmentId: config.tools.substrateEnvironmentId,
+        });
+        this.substrateEnvironment = SubstrateEnvironment.attach({
+          host: { kind: 'http', baseUrl: substrateHostBaseUrl },
+          environmentId: config.tools.substrateEnvironmentId,
+        });
+      } else {
+        const runtimeBinaryPath = resolveSubstrateRuntimeBinary();
+        const substrateConfig: SubstrateEnvironmentConfig = {
+          ...(runtimeBinaryPath ? { binaryPath: runtimeBinaryPath } : {}),
+          ...(substrateHostBaseUrl
+            ? { host: { kind: 'http' as const, baseUrl: substrateHostBaseUrl } }
+            : {}),
+          workspace: substrateWorkspace,
+          worker: { kind: 'managed', id: 'nova-tool-worker', idleSleepMs: 1 },
+          lifecycle: {
+            destroyOnClose: true,
+            cleanupQueueOnClose: true,
+            cleanupStateOnClose: true,
+          },
+          policy: {
+            process: {
+              allowExec: true,
+              allowedCommands: [...DEFAULT_SUBSTRATE_ALLOWED_COMMANDS],
+              deniedCommands: config.dangerousMode ? [] : [...DANGEROUS_PATTERNS],
+            },
+          },
+        };
+        this.substrateEnvironment = SubstrateEnvironment.create(substrateConfig);
+      }
+      const substrateEnvironment = this.substrateEnvironment;
+      substrateEnvironment.catch((error) => {
+        this.logger.warning('Substrate environment failed to start', { error: String(error) });
+      });
+      this.substrateSession = substrateEnvironment.then((env) => env.createSession());
+      this.substrateSession.then((session) => {
+        this.logger.info('Substrate tool backend enabled', {
+          mode: config.tools.substrateEnvironmentId ? 'attached' : 'created',
+          hostBaseUrl: config.tools.substrateHostBaseUrl,
+          environmentId: config.tools.substrateEnvironmentId,
+          workspaceMode: config.tools.executionerWorkspace,
+          sourceWorkingDir: workingDir,
+          sandboxRoot: session.session.workspace.root,
+          logicalRoot: session.session.workspace.logicalRoot,
+        });
+      }).catch(() => undefined);
+    }
+
+    this.toolRegistry = createToolRegistry(
+      config,
+      workingDir,
+      config.dangerousMode,
+      this.substrateSession ?? undefined,
+      this.logger
+    );
 
     // Initialize GraphD if enabled
     // Note: config.graphd.dbPath is already an absolute path (resolved in config_loader.ts)
@@ -1345,8 +1467,6 @@ export class AgentHarness {
     const seedAgentTypes = new Set<string>([
       ...Object.keys(this.config.agents),
       'standard',
-      'explorer',
-      'coding',
     ]);
     for (const agentType of seedAgentTypes) {
       if (store.getModelSelection(agentType)) {
@@ -2549,6 +2669,19 @@ export class AgentHarness {
       }
     }
     this.toolRegistry.clearCache();
+
+    if (this.substrateEnvironment) {
+      try {
+        const env = await this.substrateEnvironment;
+        await env.close();
+        this.logger.info('Substrate environment closed');
+      } catch (error) {
+        this.logger.warning('Substrate environment close failed', { error: String(error) });
+      } finally {
+        this.substrateEnvironment = null;
+        this.substrateSession = null;
+      }
+    }
 
     // Clean up entity graph
     if (this.entityGraph) {

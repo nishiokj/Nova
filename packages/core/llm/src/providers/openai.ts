@@ -85,9 +85,10 @@ export class OpenAIProvider implements LLMProviderAdapter {
 
   formatTools(tools: ToolDefinition[], model?: string): Record<string, unknown>[] {
     const effectiveModel = model ?? '';
+    const useApplyPatch = tools.some((tool) => tool.name === 'apply_patch');
     const formatted: Record<string, unknown>[] = [];
     for (const t of tools) {
-      const skinned = formatToolForOpenAI(t, effectiveModel);
+      const skinned = formatToolForOpenAI(t, effectiveModel, { useApplyPatch });
       if (skinned) formatted.push(skinned);
     }
     return formatted;

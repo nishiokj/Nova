@@ -30,6 +30,8 @@ export function registerRpcHandlers<State>(
 
   register('config.get');
   register('status.get');
+  register('service.health');
+  register('service.readiness');
   register('models.list');
   register('models.delete');
 

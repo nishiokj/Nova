@@ -6,7 +6,8 @@
  */
 
 import http from 'http';
-import { WebSocketServer, type WebSocket } from 'ws';
+import { timingSafeEqual } from 'crypto';
+import { WebSocketServer, type WebSocket, type RawData } from 'ws';
 import { profiler } from 'shared';
 import type { BusClientMessage, BusServerMessage } from './bus_types.js';
 import type { EventBusProtocol } from './event_bus.js';
@@ -36,6 +37,8 @@ export interface BusServerOptions {
   eventTranslator?: EventTranslator;
   /** Optional outbound pressure controls for WebSocket clients */
   backpressure?: BackpressureOptions;
+  /** Optional bearer token required during WebSocket upgrade. */
+  authToken?: string;
 }
 
 export interface BackpressureOptions {
@@ -95,6 +98,34 @@ interface ConnectionState {
 
 const GLOBAL_EVENTS_CHANNEL = 'events:all';
 
+function normalizeAuthToken(token: string | undefined): string | null {
+  const normalized = token?.trim();
+  return normalized ? normalized : null;
+}
+
+function secureTokenEquals(candidate: string, expected: string): boolean {
+  const candidateBuffer = Buffer.from(candidate);
+  const expectedBuffer = Buffer.from(expected);
+  return candidateBuffer.length === expectedBuffer.length
+    && timingSafeEqual(candidateBuffer, expectedBuffer);
+}
+
+function decodeRawData(data: RawData): string {
+  if (typeof data === 'string') {
+    return data;
+  }
+  if (Buffer.isBuffer(data)) {
+    return data.toString('utf8');
+  }
+  if (data instanceof ArrayBuffer) {
+    return Buffer.from(data).toString('utf8');
+  }
+  if (Array.isArray(data)) {
+    return Buffer.concat(data).toString('utf8');
+  }
+  return Buffer.from(data as unknown as Uint8Array).toString('utf8');
+}
+
 export class BusServer {
   private static readonly FLUSH_RETRY_MS = 10;
   private httpServer: http.Server | null = null;
@@ -108,6 +139,7 @@ export class BusServer {
   private readonly onDisconnect?: (connectionId: string) => void;
   private readonly eventBus: EventBusProtocol | null;
   private readonly eventTranslator: EventTranslator | null;
+  private readonly authToken: string | null;
   private readonly backpressure: Required<BackpressureOptions>;
   private readonly backpressureStats: BackpressureStats = {
     sentCount: 0,
@@ -133,6 +165,7 @@ export class BusServer {
     this.onDisconnect = options.onDisconnect;
     this.eventBus = options.eventBus ?? null;
     this.eventTranslator = options.eventTranslator ?? null;
+    this.authToken = normalizeAuthToken(options.authToken);
     this.backpressure = {
       ...DEFAULT_BACKPRESSURE,
       ...(options.backpressure ?? {}),
@@ -225,6 +258,12 @@ export class BusServer {
     this.wss = wss;
 
     httpServer.on('upgrade', (req, socket, head) => {
+      if (!this.isAuthorized(req)) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
       wss.handleUpgrade(req, socket, head, (ws) => {
         wss.emit('connection', ws);
       });
@@ -303,6 +342,25 @@ export class BusServer {
     return this.connections.size;
   }
 
+  isAuthRequired(): boolean {
+    return this.authToken !== null;
+  }
+
+  private isAuthorized(req: http.IncomingMessage): boolean {
+    if (!this.authToken) {
+      return true;
+    }
+
+    const header = req.headers.authorization;
+    const value = Array.isArray(header) ? header[0] : header;
+    const match = /^Bearer\s+(.+)$/i.exec(value ?? '');
+    if (!match) {
+      return false;
+    }
+
+    return secureTokenEquals(match[1], this.authToken);
+  }
+
   private handleConnection(ws: WebSocket): void {
     const connectionId = `conn_${this.nextId++}`;
     const connection: ConnectionState = {
@@ -320,7 +378,7 @@ export class BusServer {
       this.onConnect(connectionId);
     }
 
-    ws.on('message', (data: Buffer | string) => this.handleMessage(connection, String(data)));
+    ws.on('message', (data: RawData) => this.handleMessage(connection, decodeRawData(data)));
     ws.on('close', () => this.handleClose(connection));
     ws.on('error', () => {
       // Connection errors are handled via close event.

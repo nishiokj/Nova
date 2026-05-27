@@ -6,55 +6,31 @@
 
 import { EventEmitter } from 'events';
 import {
-  BusClient,
   BRIDGE_COMMAND_CHANNEL,
+  isBridgeEvent,
   runChannel,
   sessionChannel,
-} from 'comms-bus';
+} from '@nova/protocol';
 import type {
   BridgeCommand,
   BridgeEvent,
-  BridgeEventType,
   ConnectionState,
+  PermissionResponseCommandData,
+  ReadyData,
+  ResponseData,
+  SendMediaCommandData,
+  SendTextCommandData,
+  UserPromptResponseCommandData,
 } from './types.js';
 import { RpcClient } from './rpc_client.js';
 import type { ProcedureMethod } from './rpc_types.js';
+import { BusTransport } from './bus_transport.js';
+import type { ProcedureOutput, ServiceHealth, ServiceReadiness } from '@nova/protocol';
 
 export type * from './types.js'
 export * from './rpc_types.js';
 export { RpcClient, RpcCallError } from './rpc_client.js';
 export type { Attachment } from './types.js';
-
-// Valid bridge event types for runtime validation
-const VALID_EVENT_TYPES = new Set<BridgeEventType>([
-  'ready',
-  'status',
-  'progress',
-  'stream',
-  'response',
-  'transcription',
-  'user_prompt',
-  'error',
-  'provider_key_required',
-  'model_changed',
-  'permission_request',
-  'llm_call',
-]);
-
-function validateBridgeEvent(payload: unknown): BridgeEvent | null {
-  if (!payload || typeof payload !== 'object') return null;
-  const p = payload as Record<string, unknown>;
-
-  if (typeof p.type !== 'string' || !VALID_EVENT_TYPES.has(p.type as BridgeEventType)) {
-    return null;
-  }
-
-  if (p.data !== undefined && (typeof p.data !== 'object' || p.data === null)) {
-    return null;
-  }
-
-  return { type: p.type as BridgeEventType, data: p.data as Record<string, unknown> | undefined } as BridgeEvent;
-}
 
 export interface HarnessClientOptions {
   host: string;
@@ -65,6 +41,8 @@ export interface HarnessClientOptions {
   maxReconnectAttempts?: number;
   /** Request timeout in ms (default: 120000) */
   requestTimeout?: number;
+  /** Optional bearer token for private Nova service deployments. */
+  authToken?: string;
 }
 
 const DEFAULT_RECONNECT_DELAY = 1000;
@@ -72,12 +50,39 @@ const MAX_RECONNECT_DELAY = 30000;
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 5;
 const DEFAULT_REQUEST_TIMEOUT = 120000;
 
+export interface InitSessionOptions {
+  sessionKey?: string;
+  workingDir?: string;
+}
+
+export interface SendTextOptions {
+  text: string;
+  sessionKey?: string;
+  workingDir?: string;
+  tier?: string;
+  attachments?: SendTextCommandData['attachments'];
+  requestId?: string;
+}
+
+export interface SendMediaOptions {
+  text?: string;
+  sessionKey?: string;
+  workingDir?: string;
+  tier?: string;
+  attachments: SendMediaCommandData['attachments'];
+  requestId?: string;
+}
+
+export interface RunToCompletionOptions extends SendTextOptions {
+  timeoutMs?: number;
+}
+
 function generateRequestId(): string {
   return `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export class HarnessClient extends EventEmitter {
-  private readonly bus: BusClient;
+  private readonly bus: BusTransport;
   private readonly rpcClient: RpcClient;
   private sessionKey: string | null = null;
   private activeRuns = new Set<string>();
@@ -94,7 +99,7 @@ export class HarnessClient extends EventEmitter {
 
   constructor(options: HarnessClientOptions) {
     super();
-    this.bus = new BusClient({ host: options.host, port: options.port });
+    this.bus = new BusTransport({ host: options.host, port: options.port, authToken: options.authToken });
     this.maxReconnectAttempts = options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
     this.reconnectDelay = options.reconnectDelay ?? DEFAULT_RECONNECT_DELAY;
     this.requestTimeout = options.requestTimeout ?? DEFAULT_REQUEST_TIMEOUT;
@@ -241,20 +246,146 @@ export class HarnessClient extends EventEmitter {
     return this.rpc.call(method, data as never) as Promise<T>;
   }
 
+  async initSession(options: InitSessionOptions = {}): Promise<ReadyData> {
+    const ready = this.waitForBridgeEvent('ready', undefined, this.requestTimeout);
+    if (!this.send({
+      type: 'init',
+      data: {
+        ...(options.sessionKey ? { session_key: options.sessionKey } : {}),
+        ...(options.workingDir ? { working_dir: options.workingDir } : {}),
+      },
+    })) {
+      throw new Error('Not connected to bridge');
+    }
+    return ((await ready) as ReadyData | undefined) ?? {};
+  }
+
+  sendText(options: SendTextOptions): string {
+    if (options.sessionKey) {
+      this.subscribeSession(options.sessionKey);
+    }
+
+    const requestId = options.requestId ?? generateRequestId();
+    const ok = this.send({
+      type: 'send_text',
+      data: {
+        text: options.text,
+        client_request_id: requestId,
+        ...(options.tier ? { tier: options.tier } : {}),
+        ...(options.workingDir ? { working_dir: options.workingDir } : {}),
+        ...(options.attachments ? { attachments: options.attachments } : {}),
+      },
+    });
+    if (!ok) {
+      throw new Error('Not connected to bridge');
+    }
+    return requestId;
+  }
+
+  sendMedia(options: SendMediaOptions): string {
+    if (options.sessionKey) {
+      this.subscribeSession(options.sessionKey);
+    }
+
+    const requestId = options.requestId ?? generateRequestId();
+    const ok = this.send({
+      type: 'send_media',
+      data: {
+        attachments: options.attachments,
+        client_request_id: requestId,
+        ...(options.text ? { text: options.text } : {}),
+        ...(options.tier ? { tier: options.tier } : {}),
+        ...(options.workingDir ? { working_dir: options.workingDir } : {}),
+      },
+    });
+    if (!ok) {
+      throw new Error('Not connected to bridge');
+    }
+    return requestId;
+  }
+
+  async runToCompletion(options: RunToCompletionOptions): Promise<ResponseData> {
+    const requestId = options.requestId ?? generateRequestId();
+    const response = this.waitForBridgeEvent('response', requestId, options.timeoutMs ?? this.requestTimeout);
+    this.sendText({ ...options, requestId });
+    const data = await response as ResponseData | undefined;
+    if (!data) {
+      throw new Error(`Response ${requestId} did not include response data`);
+    }
+    return data;
+  }
+
+  respondToPrompt(data: UserPromptResponseCommandData): void {
+    if (!this.send({ type: 'user_prompt_response', data })) {
+      throw new Error('Not connected to bridge');
+    }
+  }
+
+  respondToPermission(data: PermissionResponseCommandData): void {
+    if (!this.send({ type: 'permission_response', data })) {
+      throw new Error('Not connected to bridge');
+    }
+  }
+
+  async health(): Promise<ServiceHealth> {
+    return this.rpc.call('service.health', {});
+  }
+
+  async readiness(): Promise<ServiceReadiness> {
+    return this.rpc.call('service.readiness', {});
+  }
+
+  async listSessions(
+    params: { workingDir?: string; status?: string | string[]; limit?: number } = {}
+  ): Promise<ProcedureOutput<'session.list'>> {
+    return this.rpc.call('session.list', params);
+  }
+
   // =========================================================================
   // Private Methods
   // =========================================================================
+
+  private waitForBridgeEvent(
+    type: BridgeEvent['type'],
+    requestId: string | undefined,
+    timeoutMs: number
+  ): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.off('event', onEvent);
+        reject(new Error(`Timed out waiting for ${type}`));
+      }, timeoutMs);
+
+      const onEvent = (event: BridgeEvent) => {
+        if (event.type !== type) {
+          return;
+        }
+        if (requestId) {
+          const data = event.data as { request_id?: unknown } | undefined;
+          if (data?.request_id !== requestId) {
+            return;
+          }
+        }
+
+        clearTimeout(timeout);
+        this.off('event', onEvent);
+        resolve(event.data);
+      };
+
+      this.on('event', onEvent);
+    });
+  }
 
   private handleBusEvent(payload: unknown, channel: string): void {
     if (this.rpc.handleResponse(payload)) {
       return;
     }
 
-    const event = validateBridgeEvent(payload);
-    if (!event) {
+    if (!isBridgeEvent(payload)) {
       this.emit('error', { message: 'Malformed event from bridge' });
       return;
     }
+    const event = payload as BridgeEvent;
 
     // Handle ready event - subscribe to session channel
     if (event.type === 'ready') {

@@ -6,7 +6,7 @@ import {
   type ErrorData,
   type StreamData,
   type UserPromptData,
-} from 'harness-client';
+} from '@nova/client';
 import { HarnessDaemon } from '../harness/daemon.js';
 
 interface RunOutput {
@@ -101,7 +101,7 @@ Options:
   --bindings-file <path> (legacy)
   --provider-env <provider=ENV_NAME> (repeatable)
 
-AgentLab container example:
+Nova container example:
   nova run \
     --provider z.ai-coder \
     --model glm-5 \

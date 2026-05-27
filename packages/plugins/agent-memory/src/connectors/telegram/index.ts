@@ -1,11 +1,11 @@
 /**
  * Telegram Connector
  *
- * Bridges Telegram webhooks to the harness-daemon via harness-client.
+ * Bridges Telegram webhooks to the harness-daemon via @nova/client.
  * Handles message routing, session management, and user prompts.
  */
 
-import { HarnessClient, type BridgeEvent, type Attachment, type ConnectionState } from 'harness-client'
+import { HarnessClient, type BridgeEvent, type Attachment, type ConnectionState } from '@nova/client'
 import type {
   TelegramConnectorConfig,
   TelegramUpdate,

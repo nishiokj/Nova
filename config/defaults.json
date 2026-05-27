@@ -1,13 +1,11 @@
 {
   "$schema": "./config-schema.json",
   "$comment": "Default configuration for the harness. User config at ~/.nova/config.json overrides these values. API keys are stored in GraphD - use 'nova providers set <provider> <key>' to configure.",
-
   "models": {
     "$comment": "Available models are defined in packages/core/types/src/providers.ts.",
     "available": [],
     "default": ""
   },
-
   "agents": {
     "explorer": {
       "$comment": "Code exploration and search. Read-only tools.",
@@ -21,10 +19,14 @@
         "max_tool_calls": 60,
         "max_duration_ms": 120000
       },
-      "tools": ["Read", "Glob", "Grep", "Bash"],
+      "tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash"
+      ],
       "output_schema": "explorer"
     },
-
     "standard": {
       "$comment": "Default agent for most tasks. Full tool access.",
       "llm": {
@@ -37,27 +39,20 @@
         "max_tool_calls": 0,
         "max_duration_ms": 1000000
       },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "coding", "explorer", "WebSearch"],
-  "output_schema": "goal_driven"
-    },
-
-    "coding": {
-      "$comment": "Deep coding tasks with high reasoning effort.",
-      "llm": {
-        "role": "reasoning",
-        "max_tokens": 128000,
-        "temperature": 0.7,
-        "reasoning": { "effort": "high" }
-      },
-      "budget": {
-        "max_iterations": 50,
-        "max_tool_calls": 250,
-        "max_duration_ms": 1000000
-      },
-      "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill", "explorer"],
+      "tools": [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Skill",
+        "explorer",
+        "WebSearch",
+        "apply_patch"
+      ],
       "output_schema": "goal_driven"
     },
-
     "context_compactor": {
       "$comment": "Summarizes conversation history to reduce context size.",
       "llm": {
@@ -72,25 +67,23 @@
       },
       "output_schema": "agent_action"
     }
-
   },
-
   "tools": {
     "bash_timeout_ms": 120000,
     "max_output_length": 10000,
+    "execution_backend": "substrate",
+    "executioner_workspace": "existing",
     "browser": {
       "default_screenshot_dir": "~/Desktop"
     }
   },
-
   "graphd": {
-    "$comment": "Runtime ownership: run GraphD as its own process. Harness-daemon and control-plane connect client-only and will not bootstrap GraphD.",
+    "$comment": "Runtime ownership: harness-daemon embeds and starts GraphD by default; external clients use the daemon/control-plane APIs rather than talking to GraphD directly.",
     "enabled": true,
     "host": "127.0.0.1",
     "port": 9444,
     "db_path": "~/.graphd/graphd.db"
   },
-
   "entity_graph": {
     "enabled": false,
     "database_url": "postgresql://postgres:postgres@localhost:5432/agent_memory",
@@ -98,29 +91,24 @@
     "lease_duration_sec": 30,
     "lease_wait_timeout_ms": 10000
   },
-
   "context": {
     "max_tokens": 200000,
     "session_ttl_ms": 7200000
   },
-
   "skills": {
     "enabled": true,
     "directory": ".agent/skills"
   },
-
   "hooks": {
     "enabled": true,
     "directory": "config/hooks"
   },
-
   "auth": {
     "enabled": false,
     "host": "127.0.0.1",
     "port": 9556,
     "session_expiry_days": null
   },
-
   "memory": {
     "enabled": false,
     "base_url": "http://localhost:3001",

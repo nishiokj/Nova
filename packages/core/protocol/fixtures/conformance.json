@@ -1,0 +1,140 @@
+{
+  "version": "0.1",
+  "channels": {
+    "bridgeCommand": "bridge_command",
+    "run": "run:req_abc123",
+    "session": "session:sess_abc123"
+  },
+  "busClientMessages": [
+    {
+      "type": "subscribe",
+      "channel": "session:sess_abc123"
+    },
+    {
+      "type": "unsubscribe",
+      "channel": "run:req_abc123"
+    },
+    {
+      "type": "publish",
+      "channel": "bridge_command",
+      "payload": {
+        "type": "init",
+        "data": {
+          "session_key": "sess_abc123",
+          "working_dir": "/workspace/app"
+        }
+      }
+    }
+  ],
+  "busServerMessages": [
+    {
+      "type": "event",
+      "channel": "direct",
+      "payload": {
+        "rpc": 1,
+        "id": "rpc_abc123",
+        "result": {
+          "success": true
+        }
+      }
+    },
+    {
+      "type": "error",
+      "message": "invalid_json",
+      "detail": "Unexpected token"
+    }
+  ],
+  "bridgeCommands": [
+    {
+      "type": "init",
+      "data": {
+        "session_key": "sess_abc123",
+        "working_dir": "/workspace/app"
+      }
+    },
+    {
+      "type": "send_text",
+      "data": {
+        "text": "Summarize the current project",
+        "client_request_id": "req_abc123",
+        "working_dir": "/workspace/app",
+        "tier": "default"
+      }
+    },
+    {
+      "type": "permission_response",
+      "data": {
+        "request_id": "req_abc123",
+        "decision": "allow"
+      }
+    }
+  ],
+  "bridgeEvents": [
+    {
+      "type": "ready",
+      "data": {
+        "session_key": "sess_abc123",
+        "capabilities": {
+          "streaming_supported": true
+        }
+      }
+    },
+    {
+      "type": "stream",
+      "data": {
+        "request_id": "req_abc123",
+        "chunk": "Hello",
+        "chunk_index": 0,
+        "is_final": false
+      }
+    },
+    {
+      "type": "response",
+      "data": {
+        "request_id": "req_abc123",
+        "success": true,
+        "content": "Done"
+      }
+    }
+  ],
+  "rpcRequests": [
+    {
+      "rpc": 1,
+      "id": "rpc_health",
+      "method": "service.health",
+      "params": {}
+    },
+    {
+      "rpc": 1,
+      "id": "rpc_sessions",
+      "method": "session.list",
+      "params": {
+        "workingDir": "/workspace/app",
+        "limit": 20
+      }
+    }
+  ],
+  "rpcResponses": [
+    {
+      "rpc": 1,
+      "id": "rpc_health",
+      "result": {
+        "success": true,
+        "status": "ok",
+        "protocolVersion": "0.1",
+        "uptimeMs": 1234,
+        "connections": 1,
+        "serviceAuthRequired": true,
+        "state": "idle"
+      }
+    },
+    {
+      "rpc": 1,
+      "id": "rpc_error",
+      "error": {
+        "code": 404,
+        "message": "Unknown RPC method: example.missing"
+      }
+    }
+  ]
+}
