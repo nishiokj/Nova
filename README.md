@@ -1,4 +1,4 @@
-# nova
+# Nova
 
 Nova is the canonical name for this project, package, and CLI.
 
@@ -15,13 +15,6 @@ Nova ships as separate surfaces:
 
 The root app package does not ship local `.agent` state, `.lab` artifacts, bundled skills, or the SDK package trees.
 
-## What it is
-
-- **Agent runtime** — orchestrates LLM calls + tool use (bash, read/write/edit files, grep, web search, skills)
-- **Terminal UI** — interactive chat interface built with Ink; real-time streaming, themes, session history
-- **Daemon** — background process managing sessions, the event bus, and agent lifecycle
-- **GraphD** — code-graph server tracking symbol definitions, module dependencies, and file traces
-- **Plugins** — optional memory + entity graph (requires external Postgres); semantic compiler workflows
 
 ## Quickstart
 
@@ -166,7 +159,6 @@ The distributed `nova` package ships core only. Plugins are opt-in:
 
 ```bash
 bun add memory           # memory + entity graph (requires Postgres)
-bun add semantic-compiler
 ```
 
 Enable in `config/defaults.json`:
