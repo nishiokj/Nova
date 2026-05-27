@@ -2,7 +2,7 @@
  * Harness daemon entrypoint for WebSocket bridge.
  *
  * Supports:
- * - WebSocket bus for client connections (TUI, external integrations via harness-client)
+ * - WebSocket bus for client connections (TUI, external integrations via @nova/client)
  */
 
 import path from 'path';
@@ -22,6 +22,8 @@ export interface HarnessDaemonOptions {
   idleTimeoutMs?: number;
   /** Dangerous mode - bypasses all permission checks. Use with extreme caution. */
   dangerousMode?: boolean;
+  /** Optional bearer token required by remote clients before WebSocket upgrade. */
+  serviceToken?: string;
   /** Receives daemon lifecycle/status messages. Defaults to stderr for CLI mode. */
   statusWriter?: (message: string) => void;
 }
@@ -51,6 +53,7 @@ export class HarnessDaemon {
   private readonly configPath?: string;
   private readonly idleTimeoutMs: number;
   private readonly dangerousMode: boolean;
+  private readonly serviceToken: string | null;
   private readonly statusWriter: (message: string) => void;
   private harness: AgentHarness | null = null;
   private bus: BusServer | null = null;
@@ -68,6 +71,7 @@ export class HarnessDaemon {
     this.configPath = options.configPath;
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
     this.dangerousMode = options.dangerousMode ?? false;
+    this.serviceToken = options.serviceToken?.trim() || process.env.NOVA_SERVICE_TOKEN?.trim() || null;
     this.statusWriter = options.statusWriter ?? ((message) => process.stderr.write(message));
   }
 
@@ -143,8 +147,12 @@ export class HarnessDaemon {
         // Direct EventBus subscription for run events - eliminates intermediate forwarding layers
         eventBus: this.harness.getEventBus(),
         eventTranslator: translateAgentEvent,
+        authToken: this.serviceToken ?? undefined,
       });
-      this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir, this.authService);
+      this.gateway = new BridgeGateway(this.bus, this.harness, this.workingDir, this.authService, {
+        serviceAuthRequired: this.serviceToken !== null,
+        startedAt: Date.now(),
+      });
     }
 
     return this.bus.start();
@@ -215,6 +223,8 @@ function parseDaemonArgs(): HarnessDaemonOptions {
       options.workingDir = args[++i];
     } else if (arg === '--idle-timeout' && i + 1 < args.length) {
       options.idleTimeoutMs = parseInt(args[++i], 10);
+    } else if (arg === '--service-token' && i + 1 < args.length) {
+      options.serviceToken = args[++i];
     }
   }
 

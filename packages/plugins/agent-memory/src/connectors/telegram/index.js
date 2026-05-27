@@ -2,7 +2,7 @@
 /**
  * Telegram Connector
  *
- * Bridges Telegram webhooks to the harness-daemon via harness-client.
+ * Bridges Telegram webhooks to the harness-daemon via @nova/client.
  * Handles message routing, session management, and user prompts.
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
@@ -58,7 +58,7 @@ var __generator = (this && this.__generator) || function (thisArg, body) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TelegramConnector = void 0;
 exports.createTelegramConnector = createTelegramConnector;
-var harness_client_1 = require("harness-client");
+var harness_client_1 = require("@nova/client");
 __exportStar(require("./types.js"), exports);
 // ============================================================================
 // TelegramConnector

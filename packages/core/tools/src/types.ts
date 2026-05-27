@@ -19,6 +19,47 @@ import type { Effect } from 'effect';
 // ============================================
 
 /**
+ * Minimal structural reference to the substrate executor.
+ *
+ * Tools that need to dispatch work through substrate (e.g. apply_patch, which
+ * needs to translate its parsed operations into substrate Write/Edit/Bash
+ * primitives so the effects are recorded) receive this on their
+ * `ToolExecutionContext`. Kept structural here to avoid an import cycle with
+ * `executioner_tools.ts`, which defines the canonical
+ * `ExecutionerToolEnvironment` interface.
+ */
+export interface ExecutionerEnvironmentRef {
+  session?: {
+    workspace: {
+      root: string;
+      logicalRoot: string;
+      mode?: string;
+      fresh?: boolean;
+      managed?: boolean;
+    };
+  };
+  submit(call: {
+    toolName: string;
+    arguments: Record<string, unknown>;
+    cwd?: string;
+    invocationId?: string;
+    timeoutMs?: number;
+    maxOutputBytes?: number;
+    metadata?: Record<string, unknown>;
+  }): Promise<{
+    invocationId: string;
+    toolName: string;
+    status: string;
+    output: string;
+    error?: string | null;
+    summary?: string | null;
+    effects?: unknown[];
+    durationMs: number;
+    metadata?: Record<string, unknown>;
+  }>;
+}
+
+/**
  * Execution context for tools with environment and working directory overrides.
  */
 export interface ToolExecutionContext {
@@ -38,6 +79,10 @@ export interface ToolExecutionContext {
   dangerousMode?: boolean;
   /** Additional execution metadata for diagnostics */
   metadata?: Record<string, unknown>;
+  /** Optional substrate executor. When present, tools that own their own
+   *  registration (e.g. apply_patch) should route file operations through
+   *  this so substrate records the effects rather than writing via raw fs. */
+  executionerEnvironment?: ExecutionerEnvironmentRef;
 }
 
 /**

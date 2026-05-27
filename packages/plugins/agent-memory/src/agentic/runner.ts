@@ -11,7 +11,7 @@
 import { readFile } from 'fs/promises'
 import type { AgenticTask, AgenticRun, AgenticRunVerdict, MutationObservation } from 'types'
 import type { VerdictReport } from 'semantic-compiler'
-import { HarnessClient, type BridgeEvent, type ResponseData } from 'harness-client'
+import { HarnessClient, type BridgeEvent, type ResponseData } from '@nova/client'
 
 // ── Configuration ──
 

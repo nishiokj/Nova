@@ -1,5 +1,5 @@
 import { BusClient, BusServer, BRIDGE_COMMAND_CHANNEL, runChannel } from 'comms-bus';
-import { isRpcResponse } from 'harness-client';
+import { isRpcResponse } from '@nova/client';
 import { BridgeGateway } from 'harness-daemon/harness/bridge_gateway.js';
 import { createReadyEvent } from 'harness-daemon/harness/event_translator.js';
 import type { AgentRunHandle, BridgeEvent } from 'harness-daemon/harness/types.js';

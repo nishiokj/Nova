@@ -110,6 +110,30 @@ const NOVA_ANIM_FRAMES = [
 ];
 const NOVA_ANIM_INTERVAL = 300;
 const NOVA_PIXEL_COLOR = "#ff5fd2";
+const DEFAULT_MODEL_AGENT_TABS = ["standard"];
+const MODEL_AGENT_TAB_LABELS: Record<string, string> = {
+  standard: "Standard",
+  explorer: "Explorer",
+};
+
+function modelAgentTabsFromKeys(keys: Iterable<string>): string[] {
+  const tabs = new Set<string>(DEFAULT_MODEL_AGENT_TABS);
+  for (const key of keys) {
+    if (key.trim().length > 0) {
+      tabs.add(key);
+    }
+  }
+  return [...tabs];
+}
+
+function formatModelAgentTabLabel(agentType: string): string {
+  return MODEL_AGENT_TAB_LABELS[agentType]
+    ?? agentType
+      .split(/[_-]/g)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ");
+}
 
 function resolveBusConfig(): { host: string; port: number } {
   const host = process.env.EVENT_BUS_HOST ?? DEFAULT_EVENT_BUS_HOST;
@@ -603,7 +627,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
     // Gracefully closes session before disconnecting
     const cleanup = () => {
       const snapshot = store.getSnapshot();
-      // Persist all model selections (standard, explorer, coding) on cleanup
+      // Persist all model selections on cleanup
       for (const [agentType, selection] of snapshot.modelSelections) {
         if (selection?.model && selection?.provider) {
           void client.rpc.call("model.set", {
@@ -1118,7 +1142,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
         const modelSelections = isRecord(payload.model_selections) ? payload.model_selections : null;
         if (modelSelections) {
           store.batch(() => {
-            const agentTypes = ["standard", "explorer", "coding"];
+            const agentTypes = modelAgentTabsFromKeys(Object.keys(modelSelections));
             for (const agentType of agentTypes) {
               const selection = isRecord(modelSelections[agentType]) ? modelSelections[agentType] : null;
               if (typeof selection?.model === "string" && typeof selection?.provider === "string") {
@@ -1759,7 +1783,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
       }
 
       // Tab switching with left/right arrows
-      const AGENT_TABS = ['standard', 'explorer', 'coding'];
+      const AGENT_TABS = modelAgentTabsFromKeys([
+        ...snapshot.modelSelections.keys(),
+        ...snapshot.stagedModelSelections.keys(),
+      ]);
       if (key.leftArrow) {
         const currentTab = store.getModelsActiveTab();
         const currentIdx = AGENT_TABS.indexOf(currentTab);
@@ -3078,12 +3105,10 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
   // Models selector rendering with tabbed UI for per-agent-type configuration
   const renderModelsSelector = () => {
     const colors = getColors();
-    const AGENT_TABS = ['standard', 'explorer', 'coding'];
-    const TAB_LABELS: Record<string, string> = {
-      standard: 'Standard',
-      explorer: 'Explorer',
-      coding: 'Coding',
-    };
+    const AGENT_TABS = modelAgentTabsFromKeys([
+      ...snapshot.modelSelections.keys(),
+      ...snapshot.stagedModelSelections.keys(),
+    ]);
     const activeTab = snapshot.modelsActiveTab;
     // Staged selection for active tab (what will be applied on Enter)
     const stagedSelection = snapshot.stagedModelSelections.get(activeTab);
@@ -3101,7 +3126,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           <Text color={colors.muted}>←/→ tab  Space select  Enter apply  </Text>
           {AGENT_TABS.map((tab, index) => {
             const isActive = tab === activeTab;
-            const label = TAB_LABELS[tab];
+            const label = formatModelAgentTabLabel(tab);
             const tabStaged = snapshot.stagedModelSelections.get(tab);
             const tabApplied = snapshot.modelSelections.get(tab);
             // Check if staged differs from applied (pending change)
@@ -3123,7 +3148,7 @@ export function App({ options, initialPrompt, onExit }: AppProps) {
           })}
         </Box>
         <Box>
-          <Text bold color={colors.accent}>Select Model for {TAB_LABELS[activeTab]}</Text>
+          <Text bold color={colors.accent}>Select Model for {formatModelAgentTabLabel(activeTab)}</Text>
           {deletePending ? (
             <Text color={colors.error}>  d to confirm delete</Text>
           ) : (

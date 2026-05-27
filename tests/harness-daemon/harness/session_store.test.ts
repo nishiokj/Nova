@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, rmSync } from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import type { GraphDManager } from 'graphd';
 import { ContextWindow } from 'context';
 import type { ContextWindowSnapshot, MessageItem, FunctionCallOutputItem, FileContentItem } from 'types';
@@ -12,7 +13,8 @@ const logger: HarnessLogger = {
   error: () => {},
 };
 
-const DISK_TEST_DIR = path.join(import.meta.dir, '__session_test_tmp__');
+const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
+const DISK_TEST_DIR = path.join(TEST_DIR, '__session_test_tmp__');
 
 describe('SessionStore model selections', () => {
   it('clears one model selection and persists metadata', () => {
@@ -117,6 +119,30 @@ describe('SessionStore disk-backed context', () => {
 
     // File should exist on disk
     expect(existsSync(ctx.filePath!)).toBe(true);
+  });
+
+  it('does not convert GraphD context read errors into context messages', () => {
+    const fakeGraphd = {
+      sessionGet: () => ({ metadata: {} }),
+      contextGet: () => ({ snapshot: null, error: 'GraphD context read failed' }),
+    } as unknown as GraphDManager;
+
+    const store = new SessionStore({
+      sessionKey: 'graphd-error-context',
+      maxTokens: 100_000,
+      graphd: fakeGraphd,
+      isGraphDReady: () => true,
+      logger,
+      workingDir: DISK_TEST_DIR,
+    });
+
+    const ctx = store.getContext();
+    expect(ctx.getMessageHistory()).toEqual([]);
+    expect(ctx.serialize().items.some((item) =>
+      item.type === 'message'
+      && typeof item.content === 'string'
+      && item.content.includes('GraphD context read failed')
+    )).toBe(false);
   });
 
   it('mutations write through to disk', () => {

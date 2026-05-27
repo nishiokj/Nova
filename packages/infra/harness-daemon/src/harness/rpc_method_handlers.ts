@@ -1,4 +1,5 @@
 import { sessionChannel } from 'comms-bus';
+import { NOVA_PROTOCOL_VERSION } from '@nova/protocol';
 import type { AgentRunHandle, AgentRunResult, BridgeEvent } from './types.js';
 import type { AuthService } from './auth_service.js';
 import type { LocalProviderManager } from './local_providers.js';
@@ -70,6 +71,9 @@ interface RpcMethodHandlerDeps {
   skillsDir: string;
   hooksDir: string;
   sessionOwners: Map<string, string>;
+  serviceAuthRequired: boolean;
+  startedAt: number;
+  getConnectionCount: () => number;
   getOrCreateConnectionState: (connectionId: string) => RpcConnectionState;
   sendEvent: (connectionId: string, event: BridgeEvent, channel?: string) => void;
   streamRunEvents: (
@@ -92,6 +96,9 @@ export class RpcMethodHandlers {
   private readonly skillsDir: string;
   private readonly hooksDir: string;
   private readonly sessionOwners: Map<string, string>;
+  private readonly serviceAuthRequired: boolean;
+  private readonly startedAt: number;
+  private readonly getConnectionCount: () => number;
   private readonly getOrCreateConnectionState: (connectionId: string) => RpcConnectionState;
   private readonly emitEvent: (connectionId: string, event: BridgeEvent, channel?: string) => void;
   private readonly streamEvents: (
@@ -109,6 +116,9 @@ export class RpcMethodHandlers {
     this.skillsDir = deps.skillsDir;
     this.hooksDir = deps.hooksDir;
     this.sessionOwners = deps.sessionOwners;
+    this.serviceAuthRequired = deps.serviceAuthRequired;
+    this.startedAt = deps.startedAt;
+    this.getConnectionCount = deps.getConnectionCount;
     this.getOrCreateConnectionState = deps.getOrCreateConnectionState;
     this.emitEvent = deps.sendEvent;
     this.streamEvents = deps.streamRunEvents;
@@ -135,6 +145,37 @@ export class RpcMethodHandlers {
       success: true,
       state: this.harness.isShuttingDown() ? 'error' : 'idle',
       message: 'Ready',
+    };
+  }
+
+  private handleServiceHealth(): Record<string, unknown> {
+    const state = this.harness.isShuttingDown() ? 'error' : 'idle';
+    return {
+      success: state !== 'error',
+      status: state === 'error' ? 'degraded' : 'ok',
+      protocolVersion: NOVA_PROTOCOL_VERSION,
+      uptimeMs: Math.max(0, Date.now() - this.startedAt),
+      connections: this.getConnectionCount(),
+      serviceAuthRequired: this.serviceAuthRequired,
+      state,
+    };
+  }
+
+  private handleServiceReadiness(): Record<string, unknown> {
+    const graphd = this.harness.getGraphD?.();
+    const checks = {
+      daemon: !this.harness.isShuttingDown(),
+      harness: Boolean(this.harness.getConfig()),
+      bus: true,
+      ...(graphd !== undefined ? { graphd: graphd !== null } : {}),
+    };
+    const ready = Object.values(checks).every(Boolean);
+
+    return {
+      success: ready,
+      ready,
+      checks,
+      ...(ready ? {} : { error: 'Service is not ready' }),
     };
   }
 
@@ -946,7 +987,12 @@ export class RpcMethodHandlers {
     selectedModel: PersistedModelSelection,
     previousStandard: PersistedModelSelection | null
   ): void {
-    const companionAgentTypes = ['explorer', 'coding'];
+    const config = this.harness.getConfig();
+    const companionAgentTypes = Object.keys(config.agents).filter((agentType) =>
+      agentType !== 'standard'
+      && agentType !== config.defaultAgent
+      && agentType !== 'context_compactor'
+    );
 
     for (const companionAgentType of companionAgentTypes) {
       const currentSelection = this.harness.getSessionSelectedModel?.(sessionKey, companionAgentType) as PersistedModelSelection | null | undefined;
@@ -1750,6 +1796,12 @@ export class RpcMethodHandlers {
     }
     if (method === 'status.get') {
       return this.handleGetStatus();
+    }
+    if (method === 'service.health') {
+      return this.handleServiceHealth();
+    }
+    if (method === 'service.readiness') {
+      return this.handleServiceReadiness();
     }
     if (method === 'models.list') {
       return this.handleGetModels();

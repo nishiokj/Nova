@@ -573,6 +573,14 @@ function parseExecutionerWorkspaceModeEnv(name: string): 'existing' | 'new' | un
   return result.success ? result.data : undefined;
 }
 
+function parseNonEmptyStringEnv(name: string): string | undefined {
+  const raw = process.env[name];
+  if (typeof raw !== 'string') return undefined;
+
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 /**
  * Resolve a path relative to a base directory.
  * - Paths starting with ~ are expanded to home directory
@@ -661,6 +669,8 @@ export function createConfigFromFile(
   const envEntityGraphStartupScan = parseBooleanEnv('NOVA_ENTITY_GRAPH_STARTUP_SCAN');
   const envToolExecutionBackend = parseToolExecutionBackendEnv('NOVA_TOOL_EXECUTION_BACKEND');
   const envExecutionerWorkspace = parseExecutionerWorkspaceModeEnv('NOVA_EXECUTIONER_WORKSPACE');
+  const envSubstrateHostBaseUrl = parseNonEmptyStringEnv('NOVA_SUBSTRATE_HOST_BASE_URL');
+  const envSubstrateEnvironmentId = parseNonEmptyStringEnv('NOVA_SUBSTRATE_ENVIRONMENT_ID');
   const entityGraphEnabled = envEntityGraphEnabled ?? (fileConfig.entity_graph?.enabled ?? DEFAULT_ENTITY_GRAPH_CONFIG.enabled);
   const entityGraphStartupScan = envEntityGraphStartupScan ?? (fileConfig.entity_graph?.startup_scan ?? DEFAULT_ENTITY_GRAPH_CONFIG.startup_scan ?? true);
   const parsedToolExecutionBackend =
@@ -676,6 +686,12 @@ export function createConfigFromFile(
     fileConfig.tools?.executioner_workspace ??
     DEFAULT_TOOLS_CONFIG.executioner_workspace ??
     'existing';
+  const substrateHostBaseUrl = envSubstrateHostBaseUrl ?? fileConfig.tools?.substrate_host_base_url;
+  const substrateEnvironmentId = envSubstrateEnvironmentId ?? fileConfig.tools?.substrate_environment_id;
+
+  if (substrateEnvironmentId && !substrateHostBaseUrl) {
+    throw new Error('[config] tools.substrate_environment_id requires tools.substrate_host_base_url');
+  }
 
   if (envEntityGraphEnabled !== undefined) {
     logger.info(`[config]   entity_graph.enabled overridden by NOVA_ENTITY_GRAPH_ENABLED=${entityGraphEnabled}`);
@@ -692,6 +708,12 @@ export function createConfigFromFile(
   if (envExecutionerWorkspace !== undefined) {
     logger.info(`[config]   tools.executioner_workspace overridden by NOVA_EXECUTIONER_WORKSPACE=${executionerWorkspace}`);
   }
+  if (envSubstrateHostBaseUrl !== undefined) {
+    logger.info('[config]   tools.substrate_host_base_url overridden by NOVA_SUBSTRATE_HOST_BASE_URL');
+  }
+  if (envSubstrateEnvironmentId !== undefined) {
+    logger.info('[config]   tools.substrate_environment_id overridden by NOVA_SUBSTRATE_ENVIRONMENT_ID');
+  }
 
   return {
     agents,
@@ -703,6 +725,8 @@ export function createConfigFromFile(
       maxOutputLength: fileConfig.tools?.max_output_length ?? DEFAULT_TOOLS_CONFIG.max_output_length,
       executionBackend: toolExecutionBackend,
       executionerWorkspace,
+      ...(substrateHostBaseUrl ? { substrateHostBaseUrl } : {}),
+      ...(substrateEnvironmentId ? { substrateEnvironmentId } : {}),
     },
     graphd: {
       enabled: fileConfig.graphd?.enabled ?? DEFAULT_GRAPHD_CONFIG.enabled,

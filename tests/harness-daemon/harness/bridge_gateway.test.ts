@@ -3,11 +3,12 @@
  */
 
 import { BusServer, BusClient, BRIDGE_COMMAND_CHANNEL, runChannel } from 'comms-bus';
-import { isRpcResponse } from 'harness-client';
+import { isRpcResponse } from '@nova/client';
 import { BridgeGateway } from 'harness-daemon/harness/bridge_gateway.js';
 import { createReadyEvent } from 'harness-daemon/harness/event_translator.js';
 import type { AgentRunHandle, BridgeEvent } from 'harness-daemon/harness/types.js';
 import type { FullHarnessConfig } from 'harness-daemon/harness/config.js';
+import type { GraphDManager } from 'graphd';
 import { readFileSync } from 'fs';
 import path from 'path';
 
@@ -32,6 +33,16 @@ function waitFor(predicate: () => boolean, timeoutMs = 300): Promise<void> {
 class FakeHarness {
   lastRunSessionKey: string | null = null;
   private readonly sessionAsyncRuns = new Map<string, { requestId: string; goal: string; cancelled: boolean; startedAt: number }>();
+  graphdEnabled = false;
+  graphdCalls: Array<{
+    method: 'sessionTouch' | 'sessionUpdateStatus' | 'sessionSetGoalIfEmpty';
+    sessionKey: string;
+    workingDir?: string;
+    status?: string;
+    goal?: string;
+  }> = [];
+  closedSessions: string[] = [];
+  graphdGoalWriteError: Error | null = null;
   controlCalls: Array<{
     sessionKey: string;
     action: 'pause' | 'resume' | 'cancel';
@@ -147,6 +158,37 @@ class FakeHarness {
     return this.config;
   }
 
+  getGraphD(): GraphDManager | null {
+    if (!this.graphdEnabled) {
+      return null;
+    }
+    return {
+      sessionTouch: (sessionKey: string, workingDir?: string) => {
+        this.graphdCalls.push({ method: 'sessionTouch', sessionKey, workingDir });
+        return { success: true };
+      },
+      sessionUpdateStatus: (sessionKey: string, status: string) => {
+        this.graphdCalls.push({ method: 'sessionUpdateStatus', sessionKey, status });
+        return { success: true };
+      },
+      sessionSetGoalIfEmpty: (sessionKey: string, goal: string) => {
+        if (this.graphdGoalWriteError) {
+          throw this.graphdGoalWriteError;
+        }
+        this.graphdCalls.push({ method: 'sessionSetGoalIfEmpty', sessionKey, goal });
+        return true;
+      },
+    } as unknown as GraphDManager;
+  }
+
+  closeSession(sessionKey: string): { success: boolean } {
+    this.closedSessions.push(sessionKey);
+    if (this.graphdEnabled) {
+      this.graphdCalls.push({ method: 'sessionUpdateStatus', sessionKey, status: 'inactive' });
+    }
+    return { success: true };
+  }
+
   isShuttingDown(): boolean {
     return false;
   }
@@ -235,6 +277,118 @@ describe('BridgeGateway', () => {
     );
 
     expect(harness.lastRunSessionKey).toBe(sessionKey);
+
+    client.close();
+    await server.stop();
+  });
+
+  it('writes GraphD session lifecycle state from bus init and close', async () => {
+    const harness = new FakeHarness();
+    harness.graphdEnabled = true;
+    let gateway: BridgeGateway;
+    const server = new BusServer({
+      host: '127.0.0.1',
+      port: 0,
+      onPublish: (connectionId, channel, payload) =>
+        gateway.handlePublish(connectionId, channel, payload),
+    });
+    gateway = new BridgeGateway(server, harness, process.cwd());
+    const address = await server.start();
+
+    const client = new BusClient({ host: address.host, port: address.port });
+    const events: BridgeEvent[] = [];
+    const rpcResponses: Array<Record<string, unknown>> = [];
+    client.on('event', (payload) => {
+      if (isRpcResponse(payload)) {
+        rpcResponses.push(payload as Record<string, unknown>);
+      }
+      if (isRecord(payload) && typeof payload.type === 'string') {
+        events.push(payload as BridgeEvent);
+      }
+    });
+    await client.connect();
+
+    const sessionKey = 'graphd-session-lifecycle';
+    const workingDir = '/workspace/project';
+    client.publish(BRIDGE_COMMAND_CHANNEL, {
+      type: 'init',
+      data: { session_key: sessionKey, working_dir: workingDir },
+    });
+    await waitFor(() => events.some((event) => event.type === 'ready'));
+
+    expect(harness.graphdCalls).toContainEqual({
+      method: 'sessionTouch',
+      sessionKey,
+      workingDir,
+    });
+    expect(harness.graphdCalls).toContainEqual({
+      method: 'sessionUpdateStatus',
+      sessionKey,
+      status: 'active',
+    });
+
+    client.publish(BRIDGE_COMMAND_CHANNEL, {
+      rpc: 1,
+      id: 'rpc_session_close',
+      method: 'session.close',
+      params: {},
+    });
+    await waitFor(() => rpcResponses.some((response) => response.id === 'rpc_session_close'));
+
+    expect(harness.closedSessions).toContain(sessionKey);
+    expect(harness.graphdCalls).toContainEqual({
+      method: 'sessionUpdateStatus',
+      sessionKey,
+      status: 'inactive',
+    });
+
+    client.close();
+    await server.stop();
+  });
+
+  it('does not let GraphD goal write failures block a user message', async () => {
+    const harness = new FakeHarness();
+    harness.graphdEnabled = true;
+    harness.graphdGoalWriteError = new Error('GraphD goal write failed');
+    let gateway: BridgeGateway;
+    const server = new BusServer({
+      host: '127.0.0.1',
+      port: 0,
+      onPublish: (connectionId, channel, payload) =>
+        gateway.handlePublish(connectionId, channel, payload),
+    });
+    gateway = new BridgeGateway(server, harness, process.cwd());
+    const address = await server.start();
+
+    const client = new BusClient({ host: address.host, port: address.port });
+    const events: BridgeEvent[] = [];
+    client.on('event', (payload) => {
+      if (isRecord(payload) && typeof payload.type === 'string') {
+        events.push(payload as BridgeEvent);
+      }
+    });
+    await client.connect();
+
+    const sessionKey = 'graphd-goal-failure';
+    const requestId = 'req_graphd_goal_failure';
+    client.subscribe(runChannel(requestId));
+    client.publish(BRIDGE_COMMAND_CHANNEL, { type: 'init', data: { session_key: sessionKey } });
+    await waitFor(() => events.some((event) => event.type === 'ready'));
+
+    client.publish(BRIDGE_COMMAND_CHANNEL, {
+      type: 'send_text',
+      data: { text: 'hello despite graphd', client_request_id: requestId },
+    });
+    await waitFor(
+      () => events.some((event) => event.type === 'response' && event.data?.request_id === requestId),
+      500
+    );
+
+    expect(harness.lastRunSessionKey).toBe(sessionKey);
+    expect(events.some((event) =>
+      event.type === 'error'
+      && String(event.data?.message ?? '').includes('GraphD goal write failed')
+    )).toBe(false);
 
     client.close();
     await server.stop();

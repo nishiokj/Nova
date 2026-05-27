@@ -6,7 +6,7 @@ import {
   type ErrorData,
   type StreamData,
   type UserPromptData,
-} from 'harness-client';
+} from '@nova/client';
 import { HarnessDaemon } from '../harness/daemon.js';
 
 interface RunOutput {

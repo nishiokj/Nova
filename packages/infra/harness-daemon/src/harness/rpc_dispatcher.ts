@@ -1,6 +1,6 @@
 import type { BusServer } from 'comms-bus';
 import type { BridgeEvent } from './types.js';
-import type { RpcRequest } from 'harness-client';
+import type { RpcRequest } from '@nova/protocol';
 
 export class RpcHandlerError extends Error {
   code: number;

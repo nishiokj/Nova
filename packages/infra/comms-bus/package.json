@@ -21,6 +21,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@nova/protocol": "workspace:*",
     "shared": "workspace:*",
     "types": "workspace:*",
     "ws": "^8.18.0"

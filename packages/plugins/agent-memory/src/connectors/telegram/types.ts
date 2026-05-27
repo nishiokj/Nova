@@ -8,7 +8,7 @@
 // Telegram API Types
 // ============================================================================
 
-import type { Attachment } from 'harness-client'
+import type { Attachment } from '@nova/client'
 
 export interface TelegramUser {
   id: number

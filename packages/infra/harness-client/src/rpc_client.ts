@@ -1,5 +1,5 @@
-import type { RpcRequest, RpcResponse, ProcedureInput, ProcedureMethod, ProcedureOutput } from './rpc_types.js';
-import { isRpcResponse } from './rpc_types.js';
+import type { RpcRequest, RpcResponse, ProcedureInput, ProcedureMethod, ProcedureOutput } from '@nova/protocol';
+import { isRpcResponse } from '@nova/protocol';
 
 interface PendingRequest {
   resolve: (value: unknown) => void;

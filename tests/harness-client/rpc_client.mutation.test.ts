@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { RpcCallError, RpcClient } from 'harness-client';
-import type { RpcRequest } from 'harness-client';
+import { RpcCallError, RpcClient } from '@nova/client';
+import type { RpcRequest } from '@nova/client';
 
 function pendingSize(client: RpcClient): number {
   return ((client as unknown as { pending: Map<string, unknown> }).pending).size;

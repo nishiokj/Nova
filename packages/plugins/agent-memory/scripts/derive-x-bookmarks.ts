@@ -11,14 +11,14 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { HarnessClient } from 'harness-client'
+import { HarnessClient } from '@nova/client'
 import type {
   BridgeEvent,
   ResponseData,
   PermissionRequestData,
   UserPromptData,
   ProgressData,
-} from 'harness-client'
+} from '@nova/client'
 import type { DerivedRunContext, DerivedRunResult, DerivedMetadataSchema } from '../src/derived/runner.js'
 
 // ─── Metadata Schema ─────────────────────────────────────────────────────────

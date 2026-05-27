@@ -11,8 +11,8 @@ import {
 } from 'tools';
 
 const substrateBin =
-  process.env.SUBSTRATE_BIN ??
-  '/Users/jevinnishioka/Desktop/substrate/target/release/executioner';
+  process.env.SUBSTRATE_RUNTIME_BIN ??
+  '/Users/jevinnishioka/Desktop/substrate/target/release/substrate-runtime';
 
 const workspace = process.cwd();
 const smokeDir = join(workspace, '.tmp');
@@ -27,6 +27,7 @@ const env = await Environment.create({
   policy: {
     process: {
       allowExec: true,
+      allowedCommands: ['printf'],
       deniedCommands: [...DANGEROUS_PATTERNS],
     },
   },
@@ -54,6 +55,21 @@ try {
     edits: [{ path: smokeFile, oldString: 'pin', newString: 'needle' }],
   }, { cwd: workspace });
   const blocked = await registry.execute('Bash', { command: 'mkfs /tmp/nope' }, { cwd: workspace });
+
+  if (
+    bash.status !== 'success' ||
+    bash.output !== 'substrate-bash-smoke' ||
+    write.status !== 'success' ||
+    edit.status !== 'success' ||
+    read.status !== 'success' ||
+    read.output !== 'alpha\npin\nomega\n' ||
+    grep.status !== 'success' ||
+    glob.status !== 'success' ||
+    batchEdit.status !== 'error' ||
+    blocked.status !== 'error'
+  ) {
+    throw new Error('Substrate tool registry smoke failed');
+  }
 
   console.log(JSON.stringify({
     definitions,

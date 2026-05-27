@@ -459,24 +459,59 @@ async function validateAndPrepare(
 
 /**
  * Apply all prepared operations to the filesystem.
+ *
+ * `originalOps` is the parsed-but-unresolved operation list, used to recover
+ * workspace-relative paths when dispatching to substrate (which expects
+ * `/workspace`-relative paths, not absolute host paths). It must be the same
+ * length and order as `prepared`.
  */
-async function applyPrepared(prepared: PreparedOp[]): Promise<string[]> {
+async function applyPrepared(
+  prepared: PreparedOp[],
+  originalOps?: PatchOperation[],
+  context?: ToolExecutionContext
+): Promise<string[]> {
   const changedPaths: string[] = [];
+  const env = context?.executionerEnvironment;
 
-  for (const op of prepared) {
+  for (let i = 0; i < prepared.length; i++) {
+    const op = prepared[i];
+    const original = originalOps?.[i];
+
     switch (op.type) {
       case 'add': {
-        await mkdir(dirname(op.resolvedPath), { recursive: true });
-        await atomicWrite(op.resolvedPath, op.content);
-        changedPaths.push(op.resolvedPath);
+        // When substrate is available, dispatch through its Write tool so the
+        // effect is recorded in the substrate ledger. The path passed must be
+        // workspace-relative (substrate resolves it under /workspace), so use
+        // the original op.path rather than the absolute resolvedPath.
+        if (env && original && original.type === 'add') {
+          const submitResult = await env.submit({
+            toolName: 'Write',
+            arguments: { path: original.path, content: op.content },
+            metadata: { source: 'apply_patch' },
+          });
+          if (submitResult.status !== 'success') {
+            throw new PatchApplyError(
+              `substrate Write failed for ${original.path}: ${submitResult.error ?? submitResult.status}`
+            );
+          }
+          changedPaths.push(original.path);
+        } else {
+          await mkdir(dirname(op.resolvedPath), { recursive: true });
+          await atomicWrite(op.resolvedPath, op.content);
+          changedPaths.push(op.resolvedPath);
+        }
         break;
       }
       case 'delete': {
+        // TODO: route through substrate when a delete primitive is exposed.
         await unlink(op.resolvedPath);
         changedPaths.push(op.resolvedPath);
         break;
       }
       case 'update': {
+        // TODO: route through substrate via Read+Edit (or Write-overwrite once
+        // substrate's Write supports replace). For now, native fs since
+        // substrate `existing`-mode binds the same host directory.
         await mkdir(dirname(op.resolvedPath), { recursive: true });
         await atomicWrite(op.resolvedPath, op.newContent);
         changedPaths.push(op.resolvedPath);
@@ -495,15 +530,23 @@ async function applyPrepared(prepared: PreparedOp[]): Promise<string[]> {
 /**
  * Parse and apply a patch atomically.
  * Validates all operations before applying any.
+ *
+ * When a substrate `executionerEnvironment` is provided, file-creating Add
+ * operations are dispatched through substrate's Write tool so the effects
+ * land in the substrate ledger. Update/Delete still fall through to native
+ * fs operations because they need substrate Read/Edit/Bash plumbing that
+ * isn't wired yet (TODO). Since substrate's `existing`-mode workspace binds
+ * the host directory directly, both paths produce the same on-disk result.
  */
 export async function applyPatchOperations(
   operations: PatchOperation[],
-  basePath: string
+  basePath: string,
+  context?: ToolExecutionContext
 ): Promise<string[]> {
   // Phase 1: validate all operations and prepare results
   const prepared = await validateAndPrepare(operations, basePath);
   // Phase 2: apply all operations
-  return applyPrepared(prepared);
+  return applyPrepared(prepared, operations, context);
 }
 
 /**
@@ -534,7 +577,7 @@ export async function executeApplyPatch(
 
   try {
     const operations = parsePatch(patchText);
-    const changedPaths = await applyPatchOperations(operations, cwd);
+    const changedPaths = await applyPatchOperations(operations, cwd, context);
 
     const summary = operations.map((op) => {
       switch (op.type) {

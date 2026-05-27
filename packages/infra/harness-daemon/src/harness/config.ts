@@ -98,6 +98,8 @@ export const ToolsConfigSchema = z.object({
   max_output_length: z.number().positive(),
   execution_backend: ToolExecutionBackendSchema.optional(),
   executioner_workspace: ExecutionerWorkspaceModeSchema.optional(),
+  substrate_host_base_url: z.string().min(1).optional(),
+  substrate_environment_id: z.string().min(1).optional(),
 });
 
 /** GraphD configuration */
@@ -291,6 +293,8 @@ export interface FullHarnessConfig {
     maxOutputLength: number;
     executionBackend: ToolExecutionBackend;
     executionerWorkspace: ExecutionerWorkspaceMode;
+    substrateHostBaseUrl?: string;
+    substrateEnvironmentId?: string;
   };
   graphd: {
     enabled: boolean;
@@ -354,7 +358,7 @@ export interface FullHarnessConfig {
 export const DEFAULT_TOOLS_CONFIG: ToolsConfigSection = {
   bash_timeout_ms: 120000,
   max_output_length: 10000,
-  execution_backend: 'native',
+  execution_backend: 'substrate',
   executioner_workspace: 'existing',
 };
 

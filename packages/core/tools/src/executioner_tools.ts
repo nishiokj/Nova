@@ -73,12 +73,23 @@ export type ExecutionerToolLogger = (event: ExecutionerToolLogEvent) => void;
 
 const EXECUTIONER_TOOL_NAMES = new Set(['Bash', 'Read', 'Write', 'Edit', 'Grep', 'Glob']);
 
+// Tools that own their own native executor but need a reference to substrate
+// so they can dispatch lower-level primitives through it. The wrapper keeps
+// the original executor and only injects `executionerEnvironment` into the
+// ToolExecutionContext.
+const SUBSTRATE_AWARE_TOOL_NAMES = new Set(['apply_patch']);
+
 export function isExecutionerToolName(name: string): boolean {
   return EXECUTIONER_TOOL_NAMES.has(name);
 }
 
 export function executionerToolOptions(options: ToolRegistrationOptions[]): ToolRegistrationOptions[] {
-  return options.filter((option) => isExecutionerToolName(option.name));
+  // Keep the substrate-routed primitives AND tools that need substrate-aware
+  // wrapping (e.g. apply_patch) so the wrapper can inject the env into their
+  // context.
+  return options.filter(
+    (option) => isExecutionerToolName(option.name) || SUBSTRATE_AWARE_TOOL_NAMES.has(option.name)
+  );
 }
 
 export function withExecutionerToolExecutors(
@@ -88,14 +99,35 @@ export function withExecutionerToolExecutors(
   logger?: ExecutionerToolLogger
 ): ToolRegistrationOptions[] {
   return options.map((option) => {
-    if (!EXECUTIONER_TOOL_NAMES.has(option.name)) {
-      return option;
+    if (EXECUTIONER_TOOL_NAMES.has(option.name)) {
+      return {
+        ...option,
+        executor: createExecutionerExecutor(option.name, environment, workspaceRoot, logger),
+      };
     }
-
-    return {
-      ...option,
-      executor: createExecutionerExecutor(option.name, environment, workspaceRoot, logger),
-    };
+    if (SUBSTRATE_AWARE_TOOL_NAMES.has(option.name) && option.executor) {
+      const original = option.executor;
+      return {
+        ...option,
+        executor: (
+          args: Record<string, unknown>,
+          context?: ToolExecutionContext
+        ): Effect.Effect<ToolResult, ToolExecutionError> =>
+          Effect.tryPromise({
+            try: async () => {
+              const env = await resolveEnvironment(environment);
+              const merged: ToolExecutionContext = {
+                ...(context ?? {}),
+                executionerEnvironment: env,
+              };
+              return Effect.runPromise(original(args, merged));
+            },
+            catch: (error) =>
+              toToolExecutionError(error, 'execution_error', { toolName: option.name }),
+          }),
+      };
+    }
+    return option;
   });
 }
 
@@ -135,7 +167,10 @@ function createExecutionerExecutor(
         }
 
         const env = await resolveEnvironment(environment);
-        const normalizedArgs = normalizePathArguments(args, context?.workdirOverride);
+        const normalizedArgs = normalizePathArguments(
+          normalizeToolArguments(toolName, args),
+          context?.workdirOverride
+        );
         const workspace = env.session?.workspace;
         const started = Date.now();
         emitExecutionerToolLog(logger, {
@@ -280,6 +315,47 @@ function truncateSummary(value: string | undefined, maxLength: number): string |
     return value;
   }
   return `${value.slice(0, maxLength)}...[truncated]`;
+}
+
+function normalizeToolArguments(toolName: string, args: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...args };
+  delete next.cwd;
+
+  switch (toolName) {
+    case 'Bash':
+      delete next.env;
+      break;
+    case 'Read':
+      delete next.encoding;
+      delete next.offset;
+      delete next.limit;
+      break;
+    case 'Write':
+      delete next.encoding;
+      delete next.mode;
+      break;
+    case 'Glob':
+      delete next.path;
+      delete next.ignore;
+      break;
+    case 'Grep':
+      if (next.caseSensitive === undefined && (next.caseInsensitive === true || next['-i'] === true)) {
+        next.caseSensitive = false;
+      }
+      delete next.caseInsensitive;
+      delete next.output_mode;
+      delete next['-A'];
+      delete next['-B'];
+      delete next['-C'];
+      delete next['-i'];
+      delete next['-n'];
+      delete next.head_limit;
+      delete next.offset;
+      delete next.multiline;
+      break;
+  }
+
+  return next;
 }
 
 function logicalCwd(cwd: string | undefined, workspaceRoot: string | undefined): string {

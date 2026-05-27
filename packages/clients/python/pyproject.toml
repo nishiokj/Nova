@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nova-client"
+version = "0.1.0"
+description = "Python client for Nova private services"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "websocket-client>=1.8.0",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Typing :: Typed",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+nova_client = ["py.typed"]

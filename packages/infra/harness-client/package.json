@@ -1,13 +1,27 @@
 {
-  "name": "harness-client",
+  "name": "@nova/client",
   "version": "0.1.0",
-  "private": true,
+  "description": "TypeScript client for the Nova service protocol",
   "type": "module",
   "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/**",
+    "package.json",
+    "README.md"
+  ],
   "exports": {
     ".": {
-      "import": "./src/index.ts",
-      "default": "./dist/index.js"
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./types.js": {
+      "import": "./dist/types.js",
+      "types": "./dist/types.d.ts"
+    },
+    "./rpc_types.js": {
+      "import": "./dist/rpc_types.js",
+      "types": "./dist/rpc_types.d.ts"
     }
   },
   "scripts": {
@@ -16,10 +30,12 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "comms-bus": "workspace:*"
+    "@nova/protocol": "0.1.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
+    "@types/ws": "^8.5.13",
     "typescript": "^5.3.3"
   }
 }

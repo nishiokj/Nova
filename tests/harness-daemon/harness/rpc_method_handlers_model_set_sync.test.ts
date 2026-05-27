@@ -23,7 +23,8 @@ function normalizeSelection(selection: ModelSelection): ModelSelection {
 
 function buildHandlers(
   initialSelections: Record<string, ModelSelection>,
-  hasApiKey = true
+  hasApiKey = true,
+  agentTypes = ['standard', 'explorer']
 ): {
   handlers: RpcMethodHandlers;
   state: RpcConnectionState;
@@ -43,9 +44,9 @@ function buildHandlers(
       createReadyEvent: () => ({ type: 'ready', data: {} }),
       getConfig: () => ({
         defaultAgent: 'standard',
-        agents: {
-          standard: { llm: { provider: 'openai', model: 'gpt-5-mini' } },
-        },
+        agents: Object.fromEntries(
+          agentTypes.map((agentType) => [agentType, { llm: { provider: 'openai', model: 'gpt-5-mini' } }])
+        ),
         models: { default: 'gpt-5-mini' },
         graphd: { enabled: false },
         skills: { enabled: false, directory: '.skills' },
@@ -97,12 +98,11 @@ function buildHandlers(
 }
 
 describe('RpcMethodHandlers model.set companion sync', () => {
-  it('syncs explorer/coding when they still match previous standard selection', async () => {
+  it('syncs configured companion agents when they still match previous standard selection', async () => {
     const oldSelection: ModelSelection = { provider: 'lmstudio', model: 'qwen3-coder-next', contextWindow: 32_768 };
     const { handlers, state, selections, events } = buildHandlers({
       standard: oldSelection,
       explorer: oldSelection,
-      coding: oldSelection,
     });
 
     const result = await handlers.invoke('conn_sync_1', state, 'model.set', {
@@ -114,24 +114,23 @@ describe('RpcMethodHandlers model.set companion sync', () => {
     expect(result.success).toBe(true);
     expect(selections.get('standard')).toEqual({ provider: 'codex', model: 'gpt-5.3-codex', contextWindow: 64_000 });
     expect(selections.get('explorer')).toEqual({ provider: 'codex', model: 'gpt-5.3-codex', contextWindow: 64_000 });
-    expect(selections.get('coding')).toEqual({ provider: 'codex', model: 'gpt-5.3-codex', contextWindow: 64_000 });
 
     const modelChangedAgents = new Set(
       events
         .filter((event) => event.type === 'model_changed')
         .map((event) => String(event.data?.agentType ?? ''))
     );
-    expect(modelChangedAgents).toEqual(new Set(['standard', 'explorer', 'coding']));
+    expect(modelChangedAgents).toEqual(new Set(['standard', 'explorer']));
   });
 
-  it('preserves companion selections that intentionally diverged from standard', async () => {
+  it('preserves diverged companions and supports explicitly configured coding agents', async () => {
     const oldStandard: ModelSelection = { provider: 'lmstudio', model: 'qwen3-coder-next', contextWindow: 32_768 };
     const customExplorer: ModelSelection = { provider: 'openai', model: 'gpt-5-mini', contextWindow: 200_000 };
     const { handlers, state, selections, events } = buildHandlers({
       standard: oldStandard,
       explorer: customExplorer,
       coding: oldStandard,
-    });
+    }, true, ['standard', 'explorer', 'coding']);
 
     const result = await handlers.invoke('conn_sync_2', state, 'model.set', {
       agent_type: 'standard',

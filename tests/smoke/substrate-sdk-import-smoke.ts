@@ -4,8 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { Environment } from '@substrate/sdk';
 
 const substrateBin =
-  process.env.SUBSTRATE_BIN ??
-  '/Users/jevinnishioka/Desktop/substrate/target/release/executioner';
+  process.env.SUBSTRATE_RUNTIME_BIN ??
+  '/Users/jevinnishioka/Desktop/substrate/target/release/substrate-runtime';
 
 const workspace = process.cwd();
 const smokeDir = join(workspace, '.tmp');
@@ -47,6 +47,15 @@ try {
       path: smokePath,
     },
   });
+
+  if (
+    write.status !== 'success' ||
+    read.output !== 'hello from nova via substrate' ||
+    edit.status !== 'success' ||
+    editedRead.output !== 'hello from nova via substrate edit'
+  ) {
+    throw new Error('Substrate SDK smoke failed');
+  }
 
   console.log(JSON.stringify({
     imported: true,

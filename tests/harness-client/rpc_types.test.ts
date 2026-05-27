@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isRpcRequest, isRpcResponse } from 'harness-client';
+import { isRpcRequest, isRpcResponse } from '@nova/client';
 
 describe('rpc_types guards', () => {
   it('validates rpc requests', () => {

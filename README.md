@@ -4,6 +4,17 @@ Nova is the canonical name for this project, package, and CLI.
 
 Config-driven multi-agent runtime. Nova runs AI agents against real tools (bash, file system, web search) with a terminal UI, a background daemon, and a code graph server. Built on Bun.
 
+## Distribution surfaces
+
+Nova ships as separate surfaces:
+
+- `nova` — the app/runtime package: CLI, daemon, TUI, built runtime packages, and default config
+- `@nova/protocol` — the language-neutral wire contract: bus messages, bridge commands/events, RPC types, validators, and conformance fixtures
+- `@nova/client` — the TypeScript client for private Nova services
+- `nova-client` — the Python client for private Nova services
+
+The root app package does not ship local `.agent` state, `.lab` artifacts, bundled skills, or the SDK package trees.
+
 ## What it is
 
 - **Agent runtime** — orchestrates LLM calls + tool use (bash, read/write/edit files, grep, web search, skills)
@@ -80,6 +91,75 @@ bun run packages/apps/launcher/index.ts run \
   --provider-env anthropic=ANTHROPIC_API_KEY
 ```
 
+## Private service usage
+
+Run the daemon as a private service:
+
+```bash
+NOVA_SERVICE_TOKEN=replace-me \
+bun run packages/infra/harness-daemon/src/index.ts \
+  --host 0.0.0.0 \
+  --port 9555 \
+  --idle-timeout 0
+```
+
+Connect from another TypeScript project:
+
+```ts
+import { HarnessClient } from '@nova/client';
+
+const nova = new HarnessClient({
+  host: '127.0.0.1',
+  port: 9555,
+  authToken: process.env.NOVA_SERVICE_TOKEN,
+});
+
+await nova.connect();
+console.log(await nova.health());
+console.log(await nova.readiness());
+
+await nova.initSession({ workingDir: process.cwd() });
+const response = await nova.runToCompletion({
+  text: 'Summarize this repository in 5 bullets.',
+  workingDir: process.cwd(),
+});
+console.log(response.content);
+
+nova.close();
+```
+
+Connect from Python:
+
+```python
+from nova_client import NovaClient
+
+nova = NovaClient("127.0.0.1", 9555, auth_token="replace-me")
+nova.connect()
+print(nova.health())
+print(nova.readiness())
+
+nova.init_session(working_dir="/workspace/app")
+response = nova.run_to_completion(
+    "Summarize this repository in 5 bullets.",
+    working_dir="/workspace/app",
+)
+print(response.get("content"))
+
+nova.close()
+```
+
+Build and run the service image:
+
+```bash
+bun run --cwd packages/infra/harness-daemon build
+docker build -f Dockerfile.nova-service -t nova-service:local .
+docker run --rm -p 9555:9555 \
+  -e NOVA_SERVICE_TOKEN=replace-me \
+  nova-service:local
+```
+
+The service image runs the built daemon artifact. It does not install the whole monorepo inside the container.
+
 ## Plugins (optional)
 
 The distributed `nova` package ships core only. Plugins are opt-in:
@@ -99,7 +179,8 @@ Enable in `config/defaults.json`:
 
 ```
 packages/core/      — runtime primitives, orchestrator, tools, agent core
-packages/infra/     — daemon, GraphD, event bus, harness client
+packages/infra/     — daemon, GraphD, event bus, TypeScript client
+packages/clients/   — language-specific service clients
 packages/apps/      — launcher (headless), TUI, dashboard
 packages/plugins/   — optional: memory bundle, semantic compiler
 config/             — default runtime/app config
@@ -113,6 +194,7 @@ tests/              — integration and unit tests
 - `memory.enabled` and `entity_graph.enabled` are `false` by default. Enabling them without the `memory` plugin is a no-op (non-fatal).
 - Entity graph requires `entity_graph.database_url` (or `ENTITY_GRAPH_DATABASE_URL`) when enabled.
 - Daemon event bus binds to `127.0.0.1:9555` by default; override with `EVENT_BUS_HOST` / `EVENT_BUS_PORT`.
+- Set `NOVA_SERVICE_TOKEN` for private service deployments; clients pass it as `authToken`.
 
 ## License
 
