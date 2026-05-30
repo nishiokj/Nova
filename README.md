@@ -19,7 +19,6 @@ bun run start
 2. Run `/models` — pick a model
 3. Type a prompt and press Enter
 
-That's it.
 
 ## Commands
 
