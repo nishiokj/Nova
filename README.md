@@ -1,20 +1,6 @@
 # Nova
 
-Nova is the canonical name for this project, package, and CLI.
-
-Config-driven multi-agent runtime. Nova runs AI agents against real tools (bash, file system, web search) with a terminal UI, a background daemon, and a code graph server. Built on Bun.
-
-## Distribution surfaces
-
-Nova ships as separate surfaces:
-
-- `nova` — the app/runtime package: CLI, daemon, TUI, built runtime packages, and default config
-- `@nova/protocol` — the language-neutral wire contract: bus messages, bridge commands/events, RPC types, validators, and conformance fixtures
-- `@nova/client` — the TypeScript client for private Nova services
-- `nova-client` — the Python client for private Nova services
-
-The root app package does not ship local `.agent` state, `.lab` artifacts, bundled skills, or the SDK package trees.
-
+Nova is a model-agnostic agent runtime that manages long context, provides tracing, tools and event streaming. Has RAG-based memory system, a trace viewer and cron job scheduler as additional plugins. Built on Bun.
 
 ## Quickstart
 
@@ -166,6 +152,17 @@ Enable in `config/defaults.json`:
 ```json
 { "memory": { "enabled": true }, "entity_graph": { "enabled": true } }
 ```
+
+## Distribution surfaces
+
+Nova ships as separate surfaces:
+
+- `nova` — the app/runtime package: CLI, daemon, TUI, built runtime packages, and default config
+- `@nova/protocol` — the language-neutral wire contract: bus messages, bridge commands/events, RPC types, validators, and conformance fixtures
+- `@nova/client` — the TypeScript client for private Nova services
+- `nova-client` — the Python client for private Nova services
+
+The root app package does not ship local `.agent` state, `.lab` artifacts, bundled skills, or the SDK package trees.
 
 ## Repo layout
 
