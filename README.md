@@ -1,6 +1,6 @@
 # Nova
 
-Nova is a model-agnostic agent runtime that manages long context, provides tracing, tools and event streaming. Has RAG-based memory system, a trace viewer and cron job scheduler as additional plugins. Built on Bun.
+Nova is a model-agnostic agent runtime that manages long context, provides tracing, tools and event streaming. Has RAG-based memory system, a trace viewer and cron job scheduler as additional plugins. Nova allows you to host the stateful server separately, which allows you to build clients that do not need to manage context windows over long-running sessions. They can just connect via API or CLI with the HarnessClient. 
 
 ## Quickstart
 
