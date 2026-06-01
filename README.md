@@ -69,9 +69,9 @@ bun run packages/apps/launcher/index.ts run \
   --provider-env anthropic=ANTHROPIC_API_KEY
 ```
 
-## Private service usage
+## Run the Daemon as a server
 
-Run the daemon as a private service:
+Run the daemon as a private server:
 
 ```bash
 NOVA_SERVICE_TOKEN=replace-me \
@@ -138,19 +138,6 @@ docker run --rm -p 9555:9555 \
 
 The service image runs the built daemon artifact. It does not install the whole monorepo inside the container.
 
-## Plugins (optional)
-
-The distributed `nova` package ships core only. Plugins are opt-in:
-
-```bash
-bun add memory           # memory + entity graph (requires Postgres)
-```
-
-Enable in `config/defaults.json`:
-
-```json
-{ "memory": { "enabled": true }, "entity_graph": { "enabled": true } }
-```
 
 ## Distribution surfaces
 
@@ -161,7 +148,6 @@ Nova ships as separate surfaces:
 - `@nova/client` — the TypeScript client for private Nova services
 - `nova-client` — the Python client for private Nova services
 
-The root app package does not ship local `.agent` state, `.lab` artifacts, bundled skills, or the SDK package trees.
 
 ## Repo layout
 
