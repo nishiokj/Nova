@@ -15,7 +15,11 @@ import type {
   EventEmitCallback,
   UserPromptInfo,
   AgentHooks,
-  AgentResult,
+  AgentResultBase,
+  AgentTerminationReason,
+  AgentTerminalResult,
+  AgentToolExecutionRequest,
+  AgentTurnResult,
   InternalHookEvent,
   InternalHookContext,
   InternalHookQueue,
@@ -232,7 +236,7 @@ interface TerminationCheckResult {
 interface WorkExecutionResult {
   workId: string;
   item: WorkItem;
-  result: AgentResult;
+  result: AgentTurnResult;
 }
 
 type StopHookDecisionEventType =
@@ -250,7 +254,7 @@ interface CallStopHookParams {
   agentType: string;
   runtime?: OrchestratorRuntime;
   userPrompt?: UserPromptInfo;
-  agentResult?: AgentResult;
+  agentResult?: AgentTerminalResult;
   workId?: string;
   objective?: string;
   totalLlmCalls?: number;
@@ -280,7 +284,7 @@ interface WorkQueueAdapter {
 }
 
 interface CheckTerminationParams {
-  result: AgentResult;
+  result: AgentTurnResult;
   workId: string;
   item: WorkItem;
   iteration: number;
@@ -296,6 +300,10 @@ interface CheckTerminationParams {
   runtime?: OrchestratorRuntime;
 }
 
+type TerminalCheckTerminationParams = Omit<CheckTerminationParams, 'result'> & {
+  result: AgentTerminalResult;
+};
+
 interface TerminationPolicy {
   checkIterationBounds(params: {
     state: ExecutionState;
@@ -306,7 +314,7 @@ interface TerminationPolicy {
     now: number;
   }): Effect.Effect<{ terminal: OrchestratorResult | null; shouldContinue: boolean }>;
   checkResult(params: {
-    result: AgentResult;
+    result: AgentTurnResult;
     workId: string;
     item: WorkItem;
     state: ExecutionState;
@@ -345,11 +353,12 @@ export class Orchestrator {
   private hookQueue: InternalHookQueue;
   private activeSessionKey?: string;
 
-  // Work queue state for DAG-based execution
+  // Work queue state for parallel work-item execution
   private workQueue: WorkItem[] = [];
-  private completedWork = new Map<string, AgentResult>();
+  private completedWork = new Map<string, AgentTerminalResult>();
   private initialWorkId = '';
-  private workItemContexts = new Map<string, ContextWindow>();
+  private activeRuntime?: OrchestratorRuntime;
+  private delegationPath = new Set<string>();
 
   // Realign counter to prevent infinite loops when bounds are exceeded
   // After config.maxRealigns, we force termination instead of continuing
@@ -586,6 +595,7 @@ export class Orchestrator {
   ): Effect.Effect<OrchestratorResult> {
     return Effect.gen(this, function* () {
       this.effectHookExecutor = runtime?.executeEffectHook;
+      this.activeRuntime = runtime;
       this.resetExecutionState(context);
       this.runtimeRunControl = this.cloneRunControlMetadata(runtime?.getRunControl?.());
 
@@ -613,6 +623,7 @@ export class Orchestrator {
         });
       } finally {
         this.activeInProgress = null;
+        this.activeRuntime = undefined;
       }
     });
   }
@@ -620,7 +631,6 @@ export class Orchestrator {
   private resetExecutionState(context: ContextWindow): void {
     this.workQueue = [];
     this.completedWork.clear();
-    this.workItemContexts.clear();
     this.initialWorkId = '';
     this.realignCount = 0;
     this.hookMetadata = new Map();
@@ -659,40 +669,58 @@ export class Orchestrator {
     return {
       checkIterationBounds: ({ state, context, agentType, runtime, goal, now }) =>
         Effect.gen(this, function* () {
-          if (state.iteration > this.config.maxIterations) {
-            this.log('warning', 'Max iterations exceeded', { iteration: state.iteration, completedWork: this.completedWork.size });
-            const stopResult = yield* this.callStopHook({
-              context,
-              terminationReason: 'max_iterations_exceeded',
-              response: '',
-              iteration: state.iteration,
-              agentType,
-              runtime,
-              objective: goal,
-              totalLlmCalls: state.totalLlmCalls,
-              totalToolCalls: state.totalToolCalls,
-            });
-            if (this.handleStopHookBlock(stopResult, context, agentType, state.iteration, 'max_iterations_exceeded')) {
-              return { terminal: null, shouldContinue: true };
-            }
-            this.emitGoalNotAchieved(goal, 'max_iterations_exceeded');
-            const harvestedResponse = this.harvestCompletedWork(state.inProgress, 'max_iterations_exceeded');
-            return {
-              terminal: this.createResult({
-                success: false,
-                response: harvestedResponse,
-                terminationReason: 'max_iterations_exceeded',
-                metrics: {
-                  iterations: state.iteration - 1,
-                  totalLlmCalls: state.totalLlmCalls,
-                  totalToolCalls: state.totalToolCalls,
-                  durationMs: now - state.startTime,
-                },
-              }),
-              shouldContinue: false,
-            };
+          const durationExceeded = now - state.startTime >= this.config.maxDurationMs;
+          const iterationsExceeded = state.iteration >= this.config.maxIterations;
+          const toolCallsExceeded = state.totalToolCalls >= this.config.maxToolCalls;
+          if (!durationExceeded && !iterationsExceeded && !toolCallsExceeded) {
+            return { terminal: null, shouldContinue: false };
           }
-          return { terminal: null, shouldContinue: false };
+
+          const reason: Extract<TerminationReason, 'max_iterations_exceeded' | 'max_tool_calls_exceeded' | 'max_duration_exceeded'> =
+            durationExceeded
+              ? 'max_duration_exceeded'
+              : toolCallsExceeded
+                ? 'max_tool_calls_exceeded'
+                : 'max_iterations_exceeded';
+          const logMessage = reason === 'max_duration_exceeded'
+            ? 'Max duration exceeded'
+            : reason === 'max_tool_calls_exceeded'
+              ? 'Max tool calls exceeded'
+              : 'Max iterations exceeded';
+          this.log('warning', logMessage, {
+            iteration: state.iteration,
+            completedWork: this.completedWork.size,
+          });
+          const response = this.harvestCompletedWork(state.inProgress, reason);
+          const stopResult = yield* this.callStopHook({
+            context,
+            terminationReason: reason,
+            response,
+            iteration: state.iteration,
+            agentType,
+            runtime,
+            objective: goal,
+            totalLlmCalls: state.totalLlmCalls,
+            totalToolCalls: state.totalToolCalls,
+          });
+          if (this.handleStopHookBlock(stopResult, context, agentType, state.iteration, reason)) {
+            return { terminal: null, shouldContinue: true };
+          }
+          this.emitGoalNotAchieved(goal, reason);
+          return {
+            terminal: this.createResult({
+              success: false,
+              response,
+              terminationReason: reason,
+              metrics: {
+                iterations: state.iteration,
+                totalLlmCalls: state.totalLlmCalls,
+                totalToolCalls: state.totalToolCalls,
+                durationMs: now - state.startTime,
+              },
+            }),
+            shouldContinue: false,
+          };
         }),
       checkResult: ({ result, workId, item, state, context, agentType, runtime, goal, cwd, now }) =>
         this.checkTerminationConditions({
@@ -880,9 +908,10 @@ export class Orchestrator {
     success: boolean;
     response?: string;
     error?: string;
-  }): AgentResult {
+  }): AgentTerminalResult {
     const { context, terminationReason, success, response = '', error } = params;
     return {
+      status: 'terminal',
       success,
       response,
       error,
@@ -897,7 +926,7 @@ export class Orchestrator {
     };
   }
 
-  private createInternalHookResult(context: ContextWindow): AgentResult {
+  private createInternalHookResult(context: ContextWindow): AgentTerminalResult {
     return this.createSyntheticAgentResult({
       context,
       terminationReason: 'goal_state_reached',
@@ -911,9 +940,10 @@ export class Orchestrator {
     context: ContextWindow;
     cwd: string;
     iteration: number;
+    toolCallLimit: number;
   }): Effect.Effect<WorkExecutionResult> {
     return Effect.gen(this, function* () {
-      const { workId, inProgress, context, cwd, iteration } = params;
+      const { workId, inProgress, context, cwd, iteration, toolCallLimit } = params;
       const { item, agent, abortController } = inProgress;
 
       const hookParams = item.params as {
@@ -941,11 +971,16 @@ export class Orchestrator {
         return { workId, item, result: this.createErrorResult(`Missing agent for work item: ${workId}`, context) };
       }
       const agentAsyncId = profiler.asyncBegin(`agent:${item.agent}`, 'agent');
-      const workContext = this.resolveWorkItemContext(workId, context);
-      const result = yield* agent.run({
-        globalContext: workContext,
+      const result = yield* agent.executeTurn({
+        globalContext: context,
         workItem: item,
         cwd,
+        turnPolicy: {
+          iteration,
+          maxIterations: this.config.maxIterations,
+          allowToolCalls: iteration < this.config.maxIterations && toolCallLimit > 0,
+          toolCallLimit: iteration < this.config.maxIterations ? toolCallLimit : 0,
+        },
         signal: abortController?.signal,
         runControl: this.buildAgentRunControl(workId, iteration),
       });
@@ -972,15 +1007,34 @@ export class Orchestrator {
     context: ContextWindow;
     cwd: string;
     iteration: number;
+    totalToolCalls: number;
   }): Effect.Effect<WorkExecutionResult[]> {
-    const { entries, context, cwd, iteration } = params;
+    const { entries, context, cwd, iteration, totalToolCalls } = params;
     if (entries.length === 0) {
       return Effect.succeed([]);
     }
 
+    const executable = entries.filter(([, work]) => work.agent !== null);
+    const remainingToolCalls = Math.max(0, this.config.maxToolCalls - totalToolCalls);
+    const baseAllocation = executable.length > 0 ? Math.floor(remainingToolCalls / executable.length) : 0;
+    let remainder = executable.length > 0 ? remainingToolCalls % executable.length : 0;
+    const allocations = new Map<string, number>();
+    for (const [workId] of executable) {
+      const allocation = baseAllocation + (remainder > 0 ? 1 : 0);
+      allocations.set(workId, allocation);
+      remainder = Math.max(0, remainder - 1);
+    }
+
     return Effect.forEach(
       entries,
-      ([workId, inProgress]) => this.executeSingleWorkItem({ workId, inProgress, context, cwd, iteration }),
+      ([workId, inProgress]) => this.executeSingleWorkItem({
+        workId,
+        inProgress,
+        context,
+        cwd,
+        iteration,
+        toolCallLimit: allocations.get(workId) ?? 0,
+      }),
       { concurrency: 'unbounded' }
     );
   }
@@ -997,13 +1051,25 @@ export class Orchestrator {
 
     return Effect.gen(this, function* () {
       if (!runtime?.controlQueue) {
-        return yield* this.executeInProgressWorkItems({ entries, context, cwd, iteration });
+        return yield* this.executeInProgressWorkItems({
+          entries,
+          context,
+          cwd,
+          iteration,
+          totalToolCalls: state.totalToolCalls,
+        });
       }
 
       const monitorFiber = yield* Effect.fork(this.monitorControlQueue(runtime, state));
-      const results = yield* this.executeInProgressWorkItems({ entries, context, cwd, iteration });
-      yield* Fiber.interrupt(monitorFiber);
-      return results;
+      return yield* this.executeInProgressWorkItems({
+        entries,
+        context,
+        cwd,
+        iteration,
+        totalToolCalls: state.totalToolCalls,
+      }).pipe(
+        Effect.ensuring(Fiber.interrupt(monitorFiber))
+      );
     });
   }
 
@@ -1013,7 +1079,9 @@ export class Orchestrator {
         yield* this.syncRuntimeControlState(runtime);
         if (this.isRunScopedCancellation(this.runtimeRunControl)) {
           const reason = this.runtimeRunControl.cancellation?.reason ?? 'Execution cancelled by runtime control';
-          this.quiesceInProgressWork(state, reason);
+          for (const workId of state.inProgress.keys()) {
+            this.cancelInProgressWork(workId, reason);
+          }
         }
         yield* Effect.sleep('20 millis');
       }
@@ -1131,28 +1199,7 @@ export class Orchestrator {
         break;
       }
 
-      const iteration = nextIteration(state);
-      profiler.instant(`orch.iteration:${iteration}`, 'orchestrator', 'p', {
-        workItems: Array.from(state.inProgress.keys()),
-        totalToolCalls: state.totalToolCalls,
-        totalLlmCalls: state.totalLlmCalls,
-      });
       const now = Date.now();
-      const elapsed = getElapsedMs(state);
-
-      if (runtime?.onIteration) {
-        const onIteration = runtime.onIteration;
-        yield* Effect.promise(() => Promise.resolve(onIteration({
-          iteration,
-          context,
-          totalToolCalls: state.totalToolCalls,
-          totalLlmCalls: state.totalLlmCalls,
-          elapsedMs: elapsed,
-        })));
-      }
-
-      this.maybeAutoCompact(context, agentType, state);
-
       const iterationCheck = yield* terminationPolicy.checkIterationBounds({
         state,
         context,
@@ -1167,6 +1214,27 @@ export class Orchestrator {
       if (iterationCheck.terminal) {
         return iterationCheck.terminal;
       }
+
+      const iteration = nextIteration(state);
+      profiler.instant(`orch.iteration:${iteration}`, 'orchestrator', 'p', {
+        workItems: Array.from(state.inProgress.keys()),
+        totalToolCalls: state.totalToolCalls,
+        totalLlmCalls: state.totalLlmCalls,
+      });
+      const elapsed = getElapsedMs(state);
+
+      if (runtime?.onIteration) {
+        const onIteration = runtime.onIteration;
+        yield* Effect.promise(() => Promise.resolve(onIteration({
+          iteration,
+          context,
+          totalToolCalls: state.totalToolCalls,
+          totalLlmCalls: state.totalLlmCalls,
+          elapsedMs: elapsed,
+        })));
+      }
+
+      this.maybeAutoCompact(context, agentType, state);
 
       const itemIds = Array.from(state.inProgress.keys());
       const isParallel = state.inProgress.size > 1;
@@ -1199,24 +1267,20 @@ export class Orchestrator {
       for (const { workId, item, result } of results) {
         const hookParams = item.params as { isInternalHook?: boolean } | undefined;
         if (hookParams?.isInternalHook) {
-          this.completedWork.set(workId, result);
-          state.inProgress.delete(workId);
-          continue;
-        }
-
-        if (this.isRunScopedCancellation(this.runtimeRunControl)) {
-          this.completedWork.set(workId, result);
+          if (result.status === 'terminal') {
+            this.completedWork.set(workId, result);
+          }
           state.inProgress.delete(workId);
           continue;
         }
 
         updateMetrics(state, result);
-
-        const localMetrics = result.localContext.metrics;
-        context.updateMetrics(localMetrics.inputTokens, localMetrics.totalOutputTokens, localMetrics.cachedTokens);
-        const workContext = this.workItemContexts.get(workId);
-        if (workContext) {
-          workContext.updateMetrics(localMetrics.inputTokens, localMetrics.totalOutputTokens, localMetrics.cachedTokens);
+        this.mergeAgentResultContext(context, result);
+        const activeWork = state.inProgress.get(workId);
+        if (activeWork) {
+          if (result.response) {
+            activeWork.partialResponse = result.response;
+          }
         }
 
         const responsePreview = result.response && result.response.length > 200
@@ -1245,7 +1309,7 @@ export class Orchestrator {
             runtime,
             goal,
             cwd,
-            now,
+            now: Date.now(),
           });
 
           if (checkResult.terminal) {
@@ -1271,13 +1335,16 @@ export class Orchestrator {
           }
         }
 
+        if (result.status === 'continue') {
+          continue;
+        }
+
         const structured = result.structuredOutput;
         const goalStateReached = structured?.goalStateReached === true || result.terminationReason === 'goal_state_reached';
 
         if (goalStateReached) {
           this.log('info', 'Goal state reached', { workId, response: result.response.slice(0, 100) });
           this.completedWork.set(workId, result);
-          this.mergeAgentResultContext(context, workId, result);
           state.inProgress.delete(workId);
           let workItemHookBlocked = false;
 
@@ -1323,9 +1390,12 @@ export class Orchestrator {
             state.initialWorkResponse = result.response;
             state.initialWorkResult = result;
           }
-        } else {
-          this.mergeAgentResultContext(context, workId, result);
         }
+      }
+
+      const controlResultAfterTurns = this.maybeCreateRuntimeControlResult({ state, goal });
+      if (controlResultAfterTurns) {
+        return controlResultAfterTurns;
       }
 
       if (state.initialWorkCompleted && !workQueue.hasPending() && state.inProgress.size === 0) {
@@ -1404,7 +1474,7 @@ export class Orchestrator {
             iterations: iteration,
             totalLlmCalls: state.totalLlmCalls,
             totalToolCalls: state.totalToolCalls,
-            durationMs: now - state.startTime,
+            durationMs: Date.now() - state.startTime,
           },
         });
       }
@@ -1552,9 +1622,157 @@ export class Orchestrator {
       llmConfig,
       hooks: this.hooks,
       internalHookQueue: this.hookQueue,
-      getModelSelection: this.getModelSelection,
+      executeAgentTool: (request) => this.executeDelegatedAgent(request),
       memoryInjector: this.config.memoryInjector,
     });
+  }
+
+  private executeDelegatedAgent(request: AgentToolExecutionRequest): Effect.Effect<AgentTerminalResult, Error> {
+    return Effect.gen(this, function* () {
+      if (request.agentType === request.parentAgentType || this.delegationPath.has(request.agentType)) {
+        return yield* Effect.fail(new Error(
+          `Cyclic agent delegation is not allowed: ${[...this.delegationPath, request.parentAgentType, request.agentType].join(' -> ')}`
+        ));
+      }
+
+      if (!this.agentRegistry?.has(request.agentType)) {
+        return yield* Effect.fail(new Error(`Unknown delegated agent type: ${request.agentType}`));
+      }
+
+      const budget = this.agentRegistry.getConfig(request.agentType).budget;
+      const nested = new Orchestrator(
+        {
+          ...this.config,
+          maxIterations: budget.maxIterations,
+          maxToolCalls: budget.maxToolCalls,
+          maxDurationMs: budget.maxDurationMs,
+        },
+        this.toolRegistry,
+        this.llm,
+        this.emit,
+        this.requestId,
+        this.logger,
+        this.agentRegistry,
+        this.hooks,
+        this.getModelSelection
+      );
+      nested.delegationPath = new Set([...this.delegationPath, request.parentAgentType, request.agentType]);
+
+      const parentRuntime = this.activeRuntime;
+      const delegatedRuntime: OrchestratorRuntime = {
+        getRunControl: () => {
+          if (request.signal?.aborted) {
+            return {
+              state: 'cancelling',
+              cancellation: {
+                requestedAt: Date.now(),
+                requestedBy: 'system',
+                reason: 'Delegated agent execution aborted by parent',
+                scope: 'run',
+              },
+            };
+          }
+          return parentRuntime?.getRunControl?.() ?? request.runControl?.control;
+        },
+        checkInterruption: parentRuntime?.checkInterruption,
+        onIteration: parentRuntime?.onIteration,
+        hookRegistry: parentRuntime?.hookRegistry,
+        executeEffectHook: parentRuntime?.executeEffectHook,
+      };
+
+      const result = yield* nested.execute(
+        request.globalContext,
+        request.workItem.objective,
+        request.agentType,
+        request.cwd,
+        delegatedRuntime
+      );
+      return this.toAgentTerminalResult(result, request.globalContext, request.agentType);
+    });
+  }
+
+  private toAgentTerminalResult(
+    result: OrchestratorResult,
+    localContext: ContextWindow,
+    agentType: string
+  ): AgentTerminalResult {
+    const base: AgentResultBase = {
+      success: result.success,
+      response: result.response,
+      error: result.error,
+      metrics: {
+        llmCallsMade: result.metrics.totalLlmCalls,
+        toolCallsMade: result.metrics.totalToolCalls,
+        toolCallsSucceeded: 0,
+        toolCallsFailed: 0,
+        durationMs: result.metrics.durationMs,
+      },
+      filesRead: localContext.getReadFilesArray(),
+      invalidatedPaths: [],
+      toolErrors: [],
+      localContext,
+      artifacts: localContext.getArtifacts(),
+    };
+
+    if (result.terminationReason === 'user_input_required') {
+      if (result.userPrompt) {
+        return {
+          ...base,
+          status: 'terminal',
+          terminationReason: 'user_input_required',
+          needsUserInput: true,
+          userPrompt: result.userPrompt,
+          isRefusal: false,
+        };
+      }
+      return {
+        ...base,
+        status: 'terminal',
+        terminationReason: 'agent_error',
+        needsUserInput: false,
+        isRefusal: false,
+        error: result.error ?? 'Delegated agent requested user input without a prompt',
+      };
+    }
+    if (result.terminationReason === 'refusal') {
+      return {
+        ...base,
+        status: 'terminal',
+        terminationReason: 'refusal',
+        needsUserInput: false,
+        isRefusal: true,
+      };
+    }
+    if (result.terminationReason === 'rate_limit') {
+      const selection = this.getModelSelection?.(agentType);
+      return {
+        ...base,
+        status: 'terminal',
+        terminationReason: 'rate_limit',
+        needsUserInput: false,
+        isRefusal: false,
+        rateLimitInfo: {
+          provider: selection?.provider ?? 'unknown',
+          model: selection?.model ?? 'unknown',
+          type: 'delegated_agent_rate_limit',
+          message: result.error ?? 'Delegated agent was rate limited',
+        },
+      };
+    }
+    const terminationReason: Exclude<AgentTerminationReason, 'user_input_required' | 'refusal' | 'rate_limit'> =
+      BOUNDS_TERMINATION_REASONS.has(result.terminationReason)
+        ? 'agent_error'
+        : result.terminationReason as Exclude<AgentTerminationReason, 'user_input_required' | 'refusal' | 'rate_limit'>;
+    return {
+      ...base,
+      status: 'terminal',
+      terminationReason,
+      needsUserInput: false,
+      isRefusal: false,
+      ...(terminationReason === 'agent_error' && !base.error
+        ? { error: `Delegated agent stopped at Orchestrator bound: ${result.terminationReason}` }
+        : {}),
+    };
   }
 
   private resolveAgentBounds(agentType: string): { maxToolCalls: number; maxDurationMs: number; maxLlmCalls: number } {
@@ -1582,16 +1800,14 @@ export class Orchestrator {
     });
   }
 
-  private resolveWorkItemContext(workId: string, fallback: ContextWindow): ContextWindow {
-    return this.workItemContexts.get(workId) ?? fallback;
-  }
-
-  private mergeAgentResultContext(context: ContextWindow, workId: string, result: AgentResult): void {
-    const workContext = this.workItemContexts.get(workId);
-    if (workContext) {
-      workContext.addAgentResultContext(result);
-    }
+  private mergeAgentResultContext(context: ContextWindow, result: AgentTurnResult): void {
     context.addAgentResultContext(result);
+    const localMetrics = result.localContext.metrics;
+    context.updateMetrics(
+      localMetrics.inputTokens,
+      localMetrics.totalOutputTokens,
+      localMetrics.cachedTokens
+    );
   }
 
   private createResult(
@@ -1685,7 +1901,7 @@ export class Orchestrator {
   /**
    * Create a synthetic error result when agent fails to execute.
    */
-  private createErrorResult(error: string, context: ContextWindow): AgentResult {
+  private createErrorResult(error: string, context: ContextWindow): AgentTerminalResult {
     return this.createSyntheticAgentResult({
       context,
       terminationReason: 'agent_error',
@@ -1694,7 +1910,7 @@ export class Orchestrator {
     });
   }
 
-  private createCancelledWorkItemResult(reason: string, context: ContextWindow): AgentResult {
+  private createCancelledWorkItemResult(reason: string, context: ContextWindow): AgentTerminalResult {
     return this.createSyntheticAgentResult({
       context,
       terminationReason: 'user_stopped',
@@ -1761,7 +1977,7 @@ export class Orchestrator {
   }
 
   private buildExecutionMetrics(params: {
-    result?: AgentResult;
+    result?: AgentTerminalResult;
     context: ContextWindow;
     iteration: number;
     totalLlmCalls: number;
@@ -1866,7 +2082,7 @@ export class Orchestrator {
     response: string;
     metrics: ExecutionMetrics;
     userPrompt?: UserPromptInfo;
-    agentResult?: AgentResult;
+    agentResult?: AgentTerminalResult;
     controlEventType?: 'goal_state_reached' | 'work_item_completed';
   }): StopHookControlEvent | null {
     const { terminationReason, context, workId, response, metrics, userPrompt, agentResult, controlEventType } = params;
@@ -2291,8 +2507,14 @@ export class Orchestrator {
     // Note any work still in progress
     if (inProgress.size > 0) {
       parts.push(`\n## Work In Progress (${inProgress.size} items)`);
-      for (const [workId, { item }] of inProgress) {
+      for (const [workId, { item, partialResponse }] of inProgress) {
         parts.push(`- ${workId}: ${item.objective.slice(0, 100)}${item.objective.length > 100 ? '...' : ''}`);
+        if (partialResponse) {
+          const preview = partialResponse.length > 2000
+            ? `${partialResponse.slice(0, 2000)}... [truncated]`
+            : partialResponse;
+          parts.push(preview);
+        }
       }
     }
 
@@ -2317,12 +2539,21 @@ export class Orchestrator {
   /**
    * Check all termination conditions for a single agent result.
    *
-   * This method encapsulates the state machine logic for determining whether
+   * This method encapsulates the termination logic for determining whether
    * execution should stop or continue based on the agent's result.
    */
   private checkTerminationConditions(params: CheckTerminationParams): Effect.Effect<TerminationCheckResult> {
     return Effect.gen(this, function* () {
       const { result, workId } = params;
+
+      if (result.status === 'continue') {
+        if (params.totalToolCalls >= this.config.maxToolCalls) {
+          return yield* this.handleOrchestratorToolCallBounds(params);
+        }
+        return { terminal: null, shouldContinue: false };
+      }
+
+      const terminalParams: TerminalCheckTerminationParams = { ...params, result };
 
       // Extract structured output early for use in multiple checks
       const structured = result.structuredOutput as { action?: string; goalStateReached?: boolean } | undefined;
@@ -2330,12 +2561,12 @@ export class Orchestrator {
 
       // --- User input needed (via PromptUser tool) ---
       if (result.needsUserInput) {
-        return yield* this.handleUserInputRequired(params);
+        return yield* this.handleUserInputRequired(terminalParams);
       }
 
       // --- Refusal ---
       if (result.isRefusal) {
-        return yield* this.handleStandardTermination(params, 'refusal', {
+        return yield* this.handleStandardTermination(terminalParams, 'refusal', {
           logLevel: 'warning',
           logMessage: 'Agent refused',
           logMeta: { workId, response: result.response },
@@ -2346,7 +2577,7 @@ export class Orchestrator {
 
       // --- User stopped ---
       if (result.terminationReason === 'user_stopped') {
-        return yield* this.handleStandardTermination(params, 'user_stopped', {
+        return yield* this.handleStandardTermination(terminalParams, 'user_stopped', {
           logMessage: 'User stopped execution',
           logMeta: { workId },
           fallbackResponse: 'Execution stopped by user.',
@@ -2356,25 +2587,12 @@ export class Orchestrator {
       // --- Continuable errors: no_action, invalid_action ---
       if (result.terminationReason === 'no_action' ||
           result.terminationReason === 'invalid_action') {
-        return yield* this.handleContinuableError(params, result.terminationReason);
-      }
-
-      // --- Agent bounds exceeded ---
-      if (result.terminationReason === 'max_iterations_exceeded' ||
-          result.terminationReason === 'max_tool_calls_exceeded' ||
-          result.terminationReason === 'max_duration_exceeded') {
-        return yield* this.handleStandardTermination(params, result.terminationReason, {
-          logLevel: 'warning',
-          logMessage: `Agent bounds exceeded: ${result.terminationReason}`,
-          logMeta: { workId },
-          success: !!result.response,
-          fallbackResponse: `Agent terminated: ${result.terminationReason}`,
-        });
+        return yield* this.handleContinuableError(terminalParams, result.terminationReason);
       }
 
       // --- Transient errors: rate_limit, circuit_open ---
       if (result.terminationReason === 'rate_limit' || result.terminationReason === 'circuit_open') {
-        return yield* this.handleStandardTermination(params, result.terminationReason as TerminationReason, {
+        return yield* this.handleStandardTermination(terminalParams, result.terminationReason as TerminationReason, {
           logLevel: 'warning',
           logMessage: `Agent ${result.terminationReason}`,
           logMeta: { workId },
@@ -2385,7 +2603,7 @@ export class Orchestrator {
 
       // --- Timeout ---
       if (result.terminationReason === 'timeout') {
-        return yield* this.handleStandardTermination(params, 'timeout', {
+        return yield* this.handleStandardTermination(terminalParams, 'timeout', {
           logLevel: 'warning',
           logMessage: 'Agent timeout',
           logMeta: { workId, error: result.error },
@@ -2396,7 +2614,7 @@ export class Orchestrator {
 
       // --- Agent error ---
       if (result.terminationReason === 'agent_error') {
-        return yield* this.handleStandardTermination(params, 'agent_error', {
+        return yield* this.handleStandardTermination(terminalParams, 'agent_error', {
           logLevel: 'error',
           logMessage: 'Agent error',
           logMeta: { workId, error: result.error },
@@ -2407,7 +2625,7 @@ export class Orchestrator {
 
       // --- Hard error catch-all ---
       if (result.error && !result.success && !actionIsContinue) {
-        return yield* this.handleStandardTermination(params, 'agent_error', {
+        return yield* this.handleStandardTermination(terminalParams, 'agent_error', {
           logLevel: 'error',
           logMessage: 'Agent error',
           logMeta: { workId, error: result.error, terminationReason: result.terminationReason },
@@ -2431,7 +2649,7 @@ export class Orchestrator {
    * log → merge context → callStopHook → handleStopHookBlock → maybe emitGoalNotAchieved → return terminal result
    */
   private handleStandardTermination(
-    params: CheckTerminationParams,
+    params: TerminalCheckTerminationParams,
     reason: TerminationReason,
     opts: {
       logLevel?: 'info' | 'warning' | 'error';
@@ -2447,7 +2665,6 @@ export class Orchestrator {
       const { result, workId, item, iteration, totalLlmCalls, totalToolCalls, now, startTime, context, agentType, goal, runtime } = params;
 
       this.log(opts.logLevel ?? 'info', opts.logMessage, opts.logMeta);
-      this.mergeAgentResultContext(context, workId, result);
 
       const stopResult = yield* this.callStopHook({
         context,
@@ -2486,13 +2703,12 @@ export class Orchestrator {
   /**
    * Handle user_input_required termination - unique: interruption check.
    */
-  private handleUserInputRequired(params: CheckTerminationParams): Effect.Effect<TerminationCheckResult> {
+  private handleUserInputRequired(params: TerminalCheckTerminationParams): Effect.Effect<TerminationCheckResult> {
     return Effect.gen(this, function* () {
       const { result, workId, item, iteration, totalLlmCalls, totalToolCalls, now, startTime, context, agentType, runtime } = params;
 
       if (runtime?.checkInterruption?.()) {
         this.log('info', 'Interruption preempts user prompt request', { iteration, workId });
-        this.mergeAgentResultContext(context, workId, result);
         return this.createInterruptionResult(agentType);
       }
 
@@ -2502,7 +2718,6 @@ export class Orchestrator {
         question: firstPromptQuestion?.question,
         questionType: firstPromptQuestion?.questionType,
       });
-      this.mergeAgentResultContext(context, workId, result);
 
       const stopResult = yield* this.callStopHook({
         context,
@@ -2539,14 +2754,13 @@ export class Orchestrator {
    * Handle continuable errors (no_action, invalid_action) - unique: inline deferred work check.
    */
   private handleContinuableError(
-    params: CheckTerminationParams,
+    params: TerminalCheckTerminationParams,
     reason: TerminationReason,
   ): Effect.Effect<TerminationCheckResult> {
     return Effect.gen(this, function* () {
       const { result, workId, item, iteration, totalLlmCalls, totalToolCalls, now, startTime, context, agentType, goal, runtime } = params;
 
       this.log('warning', `Agent ${reason}`, { workId, error: result.error });
-      this.mergeAgentResultContext(context, workId, result);
 
       if (runtime?.hookRegistry) {
         const stopResult = yield* this.callStopHook({
@@ -2623,7 +2837,6 @@ export class Orchestrator {
       const { result, workId, item, iteration, totalLlmCalls, totalToolCalls, now, startTime, context, agentType, goal, runtime } = params;
 
       this.log('warning', 'Max tool calls exceeded', { totalToolCalls, completedWork: this.completedWork.size });
-      this.mergeAgentResultContext(context, workId, result);
 
       const stopResult = yield* this.callStopHook({
         context,
@@ -2632,7 +2845,6 @@ export class Orchestrator {
         iteration,
         agentType,
         runtime,
-        agentResult: result,
         workId,
         objective: item.objective,
         totalLlmCalls,

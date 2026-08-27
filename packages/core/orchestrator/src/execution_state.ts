@@ -6,7 +6,7 @@
  */
 
 import type { WorkItem } from 'types';
-import type { Agent, AgentResult } from 'agent';
+import type { Agent, AgentTerminalResult, AgentTurnResult } from 'agent';
 import type { RunControlMetadata } from 'types';
 
 export interface InProgressWork {
@@ -14,6 +14,8 @@ export interface InProgressWork {
   agent: Agent | null;
   abortController?: AbortController;
   cancelReason?: string;
+  /** Latest non-empty response produced by a continuation turn. */
+  partialResponse?: string;
 }
 
 /**
@@ -35,7 +37,7 @@ export interface ExecutionState {
   /** Response from initial work */
   initialWorkResponse: string;
   /** Full result from initial work */
-  initialWorkResult?: AgentResult;
+  initialWorkResult?: AgentTerminalResult;
   /** Whether context was compacted recently (hysteresis gate) */
   compactedRecently: boolean;
   /** In-progress work items with their agents */
@@ -86,7 +88,7 @@ export function nextIteration(state: ExecutionState): number {
  */
 export function updateMetrics(
   state: ExecutionState,
-  result: AgentResult
+  result: Pick<AgentTurnResult, 'metrics'>
 ): void {
   state.totalLlmCalls += result.metrics.llmCallsMade;
   state.totalToolCalls += result.metrics.toolCallsMade;

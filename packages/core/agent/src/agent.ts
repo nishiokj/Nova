@@ -2,7 +2,7 @@
  * Agent - Pure execution primitive.
  *
  * Receives ContextWindow by value and mutates it locally during execution.
- * Returns AgentResult with all outputs.
+ * Returns AgentTerminalResult with all outputs.
  */
 
 import path from 'node:path';
@@ -20,19 +20,20 @@ import {
 } from 'llm';
 import { getAgentPrompt } from './prompts.js';
 import { MemoryBridge } from './memory-bridge.js';
-import type { MemoryInjector } from './memory-bridge.js';
 import type { ToolRegistry } from 'tools';
 import type { ToolDefinition, ToolResult, FileContentItem, ArtifactKind, StructuredOutputSchema, ContextItem, ArtifactItem, LLMItem, ContentBlock } from 'types';
 import { isLLMMessageItem, isLLMFunctionCallItem, isLLMFunctionCallOutputItem } from 'types';
 import { createEvent, errorResult, successResult } from 'types';
-import { buildLLMRequestConfig, coerceStructuredOutput, extractPreJsonText, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS, unwrapStructuredOutput } from 'shared';
+import { coerceStructuredOutput, extractPreJsonText, profiler, StreamingJsonExtractor, getOutputSchema, OUTPUT_SCHEMAS, unwrapStructuredOutput } from 'shared';
 import { ContextWindow, buildSystemMessage } from 'context';
 import type { WorkItem } from 'types';
 import { createWorkItem } from 'types';
 import type {
   AgentConfig,
-  AgentRunParams,
-  AgentResult,
+  AgentTurnParams,
+  AgentTurnPolicy,
+  AgentTurnResult,
+  AgentTerminalResult,
   AgentMetrics,
   EventEmitCallback,
   UserPromptInfo,
@@ -42,13 +43,12 @@ import type {
   InternalHookContext,
   MutableAgentResult,
   AgentControlDirective,
+  AgentToolExecutor,
+  AgentRuntimeConfig,
+  AgentRegistry as AgentRegistryContract,
 } from './types.js';
 import { noopEmit, noopHookQueue } from './types.js';
-import type { AgentRegistry } from './agent-registry.js';
 import { truncateToolOutput, isRefusal } from './constants.js';
-import { DEFAULT_AGENT_BUDGET } from './types.js';
-
-const MAX_SCHEMA_REMINDER_RETRIES = 3;
 
 type AgentAction = 'done' | 'continue';
 
@@ -142,29 +142,18 @@ export interface ModelSelection {
  * Pure execution agent.
  */
 export class Agent {
-  private config: AgentConfig;
-  private llm: LLMAdapter;
-  private toolRegistry: ToolRegistry;
-  private emit: EventEmitCallback;
-  private requestId: string;
-  private agentRegistry?: AgentRegistry;
-  private llmConfig: LLMRequestConfig;
-  private hooks?: AgentHooks;
-  private internalHookQueue: InternalHookQueue;
-  private getModelSelection?: (agentType: string) => ModelSelection | null;
-  private memoryBridge?: MemoryBridge;
-  private sessionKey: string;
-
-  private sanitizeContextPathSegment(value: string): string {
-    return value.replace(/[^A-Za-z0-9._-]/g, '_');
-  }
-
-  private resolveLocalContextFilePath(globalContext: ContextWindow, workItemId: string): string | undefined {
-    if (!globalContext.filePath) return undefined;
-    const sessionDir = path.dirname(globalContext.filePath);
-    const safe = (v: string) => this.sanitizeContextPathSegment(v);
-    return path.join(sessionDir, 'work-contexts', `${safe(this.requestId || 'request')}__${safe(this.config.type || 'agent')}__${safe(workItemId || 'work')}.md`);
-  }
+  private readonly config: AgentConfig;
+  private readonly llm: LLMAdapter;
+  private readonly toolRegistry: ToolRegistry;
+  private readonly emit: EventEmitCallback;
+  private readonly requestId: string;
+  private readonly agentRegistry?: AgentRegistryContract;
+  private readonly llmConfig: LLMRequestConfig;
+  private readonly hooks?: AgentHooks;
+  private readonly internalHookQueue: InternalHookQueue;
+  private readonly executeAgentTool?: AgentToolExecutor;
+  private readonly memoryBridge?: MemoryBridge;
+  private readonly sessionKey: string;
 
   private resolveLocalContextMaxTokens(): number {
     const contextWindow = Math.trunc(this.llmConfig.contextWindow);
@@ -174,19 +163,7 @@ export class Agent {
     return contextWindow;
   }
 
-  constructor(config: AgentConfig, runtime: {
-    llm: LLMAdapter;
-    toolRegistry: ToolRegistry;
-    emit?: EventEmitCallback;
-    requestId?: string;
-    sessionKey?: string;
-    agentRegistry?: AgentRegistry;
-    llmConfig: LLMRequestConfig;
-    hooks?: AgentHooks;
-    internalHookQueue?: InternalHookQueue;
-    getModelSelection?: (agentType: string) => ModelSelection | null;
-    memoryInjector?: MemoryInjector;
-  }) {
+  constructor(config: AgentConfig, runtime: AgentRuntimeConfig) {
     this.config = config;
     this.llm = runtime.llm;
     this.toolRegistry = runtime.toolRegistry;
@@ -197,7 +174,7 @@ export class Agent {
     this.llmConfig = runtime.llmConfig;
     this.hooks = runtime.hooks;
     this.internalHookQueue = runtime.internalHookQueue ?? noopHookQueue;
-    this.getModelSelection = runtime.getModelSelection;
+    this.executeAgentTool = runtime.executeAgentTool;
     if (runtime.memoryInjector) {
       this.memoryBridge = new MemoryBridge(runtime.memoryInjector, {
         sessionKey: this.sessionKey,
@@ -231,11 +208,11 @@ export class Agent {
   }
 
   /**
-   * Resolve runtime control into a typed directive for loop/tool phases.
+   * Resolve runtime control into a typed directive for turn/tool phases.
    */
   private resolveControlDirective(
     signal?: AbortSignal,
-    runControl?: AgentRunParams['runControl']
+    runControl?: AgentTurnParams['runControl']
   ): AgentControlDirective {
     if (signal?.aborted) {
       return {
@@ -261,7 +238,7 @@ export class Agent {
 
   /**
    * Apply an out-of-band control directive to the mutable result.
-   * Returns true when loop/tool execution should stop immediately.
+   * Returns true when turn/tool execution should stop immediately.
    */
   private applyControlDirective(
     result: MutableAgentResult,
@@ -299,89 +276,15 @@ export class Agent {
   }
 
   /**
-   * Check if agent has hit tool call or duration bounds.
-   * Emits agent_bounds_hit event if a bound is hit.
-   * @returns termination reason if bound hit, null otherwise
-   */
-  private checkBounds(
-    workItem: WorkItem,
-    elapsedMs: number
-  ): 'max_duration_exceeded' | null {
-    if (elapsedMs >= workItem.bounds.maxDurationMs) {
-      this.emit(createEvent('agent_bounds_hit', {
-        agentType: this.config.type,
-        boundType: 'duration',
-        current: elapsedMs,
-        max: workItem.bounds.maxDurationMs,
-      }, workItem.workId));
-      return 'max_duration_exceeded';
-    }
-
-    return null;
-  }
-
-  /** Tracks whether the last agent-level compaction was a no-op */
-  private _lastAgentCompactWasNoop = false;
-
-  /**
-   * Deep-compact context when critically full.
-   * The ContextWindow's internal _maybeAutoCompact handles routine compaction
-   * at 50% with generous limits. This is the emergency tier at 80% with tighter
-   * limits, and includes a no-op guard to prevent compaction storms.
-   */
-  private compactIfNeeded(
-    localContext: ContextWindow,
-    localReadFiles: Set<string>,
-    workItem: WorkItem
-  ): Effect.Effect<void> {
-    return Effect.sync(() => {
-      if (!localContext.isNearFull(0.80)) {
-        this._lastAgentCompactWasNoop = false;
-        return;
-      }
-
-      // If last compaction recovered nothing, don't burn cycles scanning again
-      if (this._lastAgentCompactWasNoop) return;
-
-      const result = localContext.compact({
-        deduplicateByPath: true,
-        truncateOutputsTo: 2000,
-        maxFileContentCount: 15,
-        maxFunctionCallCount: 60,
-        maxFunctionCallOutputCount: 60,
-      });
-
-      if (result.itemsRemoved === 0 && result.outputsTruncated === 0) {
-        this._lastAgentCompactWasNoop = true;
-        return;
-      }
-
-      // Rebuild localReadFiles from compacted context
-      localReadFiles.clear();
-      for (const path of localContext.getReadFilesArray()) {
-        localReadFiles.add(path);
-      }
-
-      this.internalHookQueue.enqueue({
-        type: 'context_threshold',
-        usagePercent: localContext.metrics.percentageUsed,
-        tokenCount: localContext.metrics.inputTokens + localContext.metrics.outputTokens,
-        itemCount: localContext.items.length,
-      }, this.buildHookContext(workItem));
-    });
-  }
-
-  /**
-   * Build the LLM request parameters for an iteration.
-   * Consolidates system prompt, tools, messages, and last-iteration handling.
+   * Build the LLM request parameters for a turn.
+   * Consolidates system prompt, tools, messages, and final-turn handling.
    */
   private buildIterationRequest(
     workItem: WorkItem,
     globalContext: ContextWindow,
     localContext: ContextWindow,
     cwd: string,
-    iteration: number,
-    maxIterations: number
+    turnPolicy: AgentTurnPolicy
   ): Effect.Effect<{
     messages: LLMItem[];
     tools: ToolDefinition[] | undefined;
@@ -396,45 +299,46 @@ export class Agent {
       ];
       const allowedTools = this.filterAllowedTools(allTools);
 
-      const isLastIteration = iteration === maxIterations - 1;
-      const isPenultimateIteration = iteration === maxIterations - 2 && maxIterations > 2;
+      const isFinalTurn = !turnPolicy.allowToolCalls;
+      const isPenultimateTurn = turnPolicy.iteration === turnPolicy.maxIterations - 1;
       const isExplorer = this.config.type === 'explorer';
 
-      let lastIterationInstruction = '';
-      if (isLastIteration) {
-        lastIterationInstruction = '\n\nIMPORTANT: This is your final iteration. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.';
+      let turnInstruction = '';
+      if (isFinalTurn) {
+        turnInstruction = '\n\nIMPORTANT: The Orchestrator has designated this as a final turn. You must NOT make any tool calls. Synthesize your response and provide a comprehensive answer using the information you have gathered. Use action: "done" when finished.';
         if (isExplorer) {
-          lastIterationInstruction += ' You MUST include artifacts in your structured output for every file you have read. Each file MUST produce at least one artifact with sourcePath, kind, and name. Failure to include artifacts is a hard validation failure.';
+          turnInstruction += ' You MUST include artifacts in your structured output for every file you have read. Each file MUST produce at least one artifact with sourcePath, kind, and name. Failure to include artifacts is a hard validation failure.';
         }
-      } else if (isPenultimateIteration && isExplorer) {
-        lastIterationInstruction = '\n\nWARNING: You have ONE iteration remaining after this one. On your final iteration you will NOT be able to make tool calls. You MUST produce artifacts for all files you have read in your next response. If you have not yet extracted artifacts, include them NOW. Every file read without a corresponding artifact is a validation failure.';
+      } else if (isPenultimateTurn && isExplorer) {
+        turnInstruction = '\n\nWARNING: The Orchestrator policy indicates one scheduled turn remains. Produce artifacts for all files you have read as soon as possible.';
       }
 
-      // Memory injection (recent conversations + evidence retrieval)
       const memoryContent = this.memoryBridge
-        ? yield* this.memoryBridge.inject(workItem, globalContext, taskContext, cwd, iteration)
+        ? yield* this.memoryBridge.inject(workItem, globalContext, taskContext, cwd, turnPolicy.iteration)
         : null;
       const contextWithMemory = memoryContent ? `${taskContext}\n\n${memoryContent}` : taskContext;
 
       const messages = this.buildMessages(
         system,
-        contextWithMemory + lastIterationInstruction,
+        contextWithMemory + turnInstruction,
         workItem,
         globalContext,
         localContext
       );
 
-      const tools = allowedTools.length > 0 ? allowedTools : undefined;
-      const toolChoice = isLastIteration && tools ? 'none' as const : undefined;
+      const tools = turnPolicy.allowToolCalls && turnPolicy.toolCallLimit > 0 && allowedTools.length > 0
+        ? allowedTools
+        : undefined;
+      const toolChoice = tools ? undefined : 'none' as const;
 
       return { messages, tools, toolChoice };
     });
   }
 
   /**
-   * Resolve the action from structured output into a loop control directive.
+   * Resolve the action from structured output into a turn control directive.
    * Sets result fields as side effects (terminationReason, success, response, etc.)
-   * @returns loop control: 'done' | 'user_input' | 'continue' | 'no_action'
+   * @returns turn control: 'done' | 'user_input' | 'continue' | 'no_action'
    */
   private resolveAction(
     action: AgentAction | null,
@@ -687,11 +591,8 @@ export class Agent {
     }, workItemId));
   }
 
-  /**
-   * Stream LLM response with resilience (retry + circuit breaker).
-   * Returns final response on success, throws on unrecoverable error.
-   */
-  private streamWithResilience(
+  /** Execute one resilient logical LLM operation for this turn. */
+  private streamTurn(
     params: {
       messages: LLMItem[];
       tools?: ToolDefinition[];
@@ -702,16 +603,10 @@ export class Agent {
     }
   ): Effect.Effect<{ response: LLMResponse }, Error | RateLimitError | CircuitOpenError | TimeoutError | RetriesExhaustedError> {
     const provider = this.llmConfig.provider ?? 'unknown';
-    const circuitState = getProviderCircuitState(provider);
-    const circuitKey = `${provider}:${this.llmConfig.model}`;
-
-    // Wrap the streaming operation in resilientCall with timeout.
-    // We wrap full stream consumption so retry/timeout covers the full LLM operation.
     return resilientCall(
       Effect.gen(this, function* () {
         let response: LLMResponse | undefined;
         let buffer = '';
-
         const stream = this.llm.stream({
           messages: params.messages,
           tools: params.tools,
@@ -724,33 +619,25 @@ export class Agent {
           },
         });
 
-        yield* Stream.runForEach(stream, (chunk) =>
-          Effect.sync(() => {
-            buffer += chunk;
-            params.onChunk?.(chunk);
-          })
-        );
+        yield* Stream.runForEach(stream, (chunk) => Effect.sync(() => {
+          buffer += chunk;
+          params.onChunk?.(chunk);
+        }));
 
         if (!response) {
           return yield* Effect.fail(new Error('LLM stream completed without a final response'));
         }
-
-        // If content is empty but we have buffered data, use the buffer
         if (!response.content || response.content.length === 0) {
           response = { ...response, content: buffer };
         }
-
         return { response };
       }),
       {
-        circuitState,
-        circuitKey,
-        timeoutMs: this.config.budget.llmStreamTimeoutMs ?? DEFAULT_AGENT_BUDGET.llmStreamTimeoutMs ?? 240_000,
+        circuitState: getProviderCircuitState(provider),
+        circuitKey: `${provider}:${this.llmConfig.model}`,
+        timeoutMs: this.config.budget.llmStreamTimeoutMs ?? 240_000,
         operationName: `LLM stream (${this.config.type})`,
-        config: {
-          ...DEFAULT_RESILIENCE_CONFIG,
-          maxRetries: 2, // Retry up to 2 times for transient errors
-        },
+        config: { ...DEFAULT_RESILIENCE_CONFIG, maxRetries: 2 },
         onRetry: (attempt, error, delayMs) => {
           this.emitAgentDiagnostic(`Retrying LLM call (attempt ${attempt}): ${error.message}, waiting ${delayMs}ms`);
         },
@@ -763,17 +650,15 @@ export class Agent {
    * Agent reads from globalContext, writes to its own localContext.
    * GlobalContext is never mutated.
    */
-  run(params: AgentRunParams): Effect.Effect<AgentResult> {
+  executeTurn(params: AgentTurnParams): Effect.Effect<AgentTurnResult> {
     return Effect.gen(this, function* () {
-      const { globalContext, workItem, cwd, signal, runControl } = params;
-      const runAsyncId = profiler.asyncBegin(`agent.run:${this.config.type}`, 'agent');
+      const { globalContext, workItem, cwd, turnPolicy, signal, runControl } = params;
+      const runAsyncId = profiler.asyncBegin(`agent.turn:${this.config.type}`, 'agent');
 
       // Create fresh local context for this agent's work
-      const localContextFilePath = this.resolveLocalContextFilePath(globalContext, workItem.workId);
       const localContext = new ContextWindow(
-        `${globalContext.sessionKey}:${this.config.type}:${workItem.workId}`,
-        this.resolveLocalContextMaxTokens(),
-        localContextFilePath
+        `${globalContext.sessionKey}:${this.config.type}:${workItem.workId}:turn-${turnPolicy.iteration}`,
+        this.resolveLocalContextMaxTokens()
       );
 
       const startTime = Date.now();
@@ -799,14 +684,14 @@ export class Agent {
         localContext,
       };
 
-      yield* this.executeLoop(
+      yield* this.executeSingleTurn(
         globalContext,
         localContext,
         workItem,
         result,
         metrics,
-        startTime,
         cwd,
+        turnPolicy,
         signal,
         runControl
       ).pipe(
@@ -818,6 +703,14 @@ export class Agent {
       );
 
       metrics.durationMs = Date.now() - startTime;
+      this.finalizeIteration(
+        new Set(localContext.getReadFilesArray()),
+        workItem,
+        result,
+        metrics,
+        turnPolicy.iteration,
+        result.response.length > 0
+      );
 
       this.synthesizeExplorerArtifactsFromReadFiles(new Set(result.filesRead), localContext, workItem.workId);
 
@@ -858,23 +751,24 @@ export class Agent {
         }, this.buildHookContext(workItem));
       }
 
-      this.internalHookQueue.enqueue({
-        type: 'agent_completed',
-        workId: workItem.workId,
-        success: result.success,
-        terminationReason: result.terminationReason ?? 'agent_error',
-        filesRead: result.filesRead,
-        invalidatedPaths: result.invalidatedPaths,
-        // Include response and metrics for workitem log tracking
-        response: result.response,
-        metrics: {
-          toolCallsMade: metrics.toolCallsMade,
-          llmCallsMade: metrics.llmCallsMade,
-        },
-        contextPercentUsed: result.localContext.metrics.percentageUsed,
-      }, this.buildHookContext(workItem));
+      if (result.terminationReason) {
+        this.internalHookQueue.enqueue({
+          type: 'agent_completed',
+          workId: workItem.workId,
+          success: result.success,
+          terminationReason: result.terminationReason,
+          filesRead: result.filesRead,
+          invalidatedPaths: result.invalidatedPaths,
+          response: result.response,
+          metrics: {
+            toolCallsMade: metrics.toolCallsMade,
+            llmCallsMade: metrics.llmCallsMade,
+          },
+          contextPercentUsed: result.localContext.metrics.percentageUsed,
+        }, this.buildHookContext(workItem));
+      }
 
-      profiler.asyncEnd(`agent.run:${this.config.type}`, runAsyncId, 'agent', {
+      profiler.asyncEnd(`agent.turn:${this.config.type}`, runAsyncId, 'agent', {
         success: result.success,
         terminationReason: result.terminationReason,
         llmCalls: metrics.llmCallsMade,
@@ -885,84 +779,38 @@ export class Agent {
     });
   }
 
-  /**
-   * Main execution loop.
-   */
-  private executeLoop(
+  /** Execute one LLM request and, when allowed, its one resulting tool batch. */
+  private executeSingleTurn(
     globalContext: ContextWindow,
     localContext: ContextWindow,
     workItem: WorkItem,
     result: MutableAgentResult,
     metrics: AgentMetrics,
-    startTime: number,
     cwd: string,
+    turnPolicy: AgentTurnPolicy,
     signal?: AbortSignal,
-    runControl?: AgentRunParams['runControl']
-  ): Effect.Effect<void, Error | RateLimitError | CircuitOpenError | TimeoutError | RetriesExhaustedError> {
+    runControl?: AgentTurnParams['runControl']
+  ): Effect.Effect<void, unknown> {
     return Effect.gen(this, function* () {
-      const maxIterations = Math.min(
-        this.config.budget.maxIterations,
-        workItem.bounds.maxLlmCalls
-      );
+      const localReadFiles = new Set<string>();
+      const iteration = turnPolicy.iteration;
+      profiler.instant(`agent.turn:${iteration}`, 'agent', 'p', { agentType: this.config.type });
 
-      const localReadFiles = new Set(globalContext.getReadFilesArray());
-      let consecutiveNoActionNoToolResponses = 0;
-      let forceRequiredToolChoice = false;
-      this._lastAgentCompactWasNoop = false; // Reset for new execution
-
-      // Auto-read target files
-      if (workItem.targetPaths.length > 0) {
-        yield* this.autoReadTargetFiles(
-          workItem.targetPaths,
-          localContext,
-          localReadFiles,
-          metrics,
-          cwd,
-          workItem.workId,
-          signal,
-          runControl
-        );
+      const initialDirective = this.resolveControlDirective(signal, runControl);
+      if (this.applyControlDirective(result, initialDirective)) return;
+      if (this.hooks?.shouldStop?.()) {
+        result.terminationReason = 'user_stopped';
+        result.error = 'Execution stopped before turn';
+        return;
       }
 
-      for (let iteration = 0; iteration < maxIterations; iteration++) {
-        profiler.instant(`agent.iteration:${iteration}`, 'agent', 'p', { agentType: this.config.type });
-
-        const loopDirective = this.resolveControlDirective(signal, runControl);
-        if (this.applyControlDirective(result, loopDirective)) {
-          break;
-        }
-
-        // Check for user stop request at the start of each iteration
-        if (this.hooks?.shouldStop?.()) {
-          result.terminationReason = 'user_stopped';
-          break;
-        }
-
-        // 1. Pre-checks: bounds and context management
-        const elapsedMs = Date.now() - startTime;
-        const boundHit = this.checkBounds(workItem, elapsedMs);
-        if (boundHit) {
-          result.terminationReason = boundHit;
-          break;
-        }
-
-      yield* this.compactIfNeeded(localContext, localReadFiles, workItem);
-
-      // 2. Build LLM request (async for memory injection)
-      const { messages, tools: toolsForThisCall, toolChoice: toolChoiceForThisCall } = yield* this.buildIterationRequest(
+      const { messages, tools: toolsForThisCall, toolChoice: effectiveToolChoice } = yield* this.buildIterationRequest(
         workItem,
         globalContext,
         localContext,
         cwd,
-        iteration,
-        maxIterations
+        turnPolicy
       );
-
-
-      const effectiveToolChoice =
-        forceRequiredToolChoice && toolChoiceForThisCall !== 'none' && !!toolsForThisCall?.length
-          ? 'required' as const
-          : toolChoiceForThisCall;
 
       const llmStartTime = Date.now();
       const hasStructuredOutput = !!this.config.outputSchema;
@@ -974,9 +822,8 @@ export class Agent {
       // Track streamed reasoning content (some providers only stream reasoning)
       let streamedReasoningContent = '';
 
-      // Use resilient streaming with retry + circuit breaker
       const llmAsyncId = profiler.asyncBegin(`agent.llmCall:${this.config.type}`, 'llm');
-      const { response } = yield* this.streamWithResilience({
+      const { response } = yield* this.streamTurn({
         messages,
         tools: toolsForThisCall,
         toolChoice: effectiveToolChoice,
@@ -1026,16 +873,16 @@ export class Agent {
         response.usage.cachedTokens
       );
 
+      const postLlmDirective = this.resolveControlDirective(signal, runControl);
+      if (this.applyControlDirective(result, postLlmDirective)) return;
+
       const content = response.content;
-      const toolCalls = response.toolCalls ?? [];
-      if (toolCalls.length > 0) {
-        consecutiveNoActionNoToolResponses = 0;
-        forceRequiredToolChoice = false;
-      }
+      const requestedToolCalls = response.toolCalls ?? [];
+      const toolCalls = requestedToolCalls.slice(0, Math.max(0, turnPolicy.toolCallLimit));
 
       const reasoningContent = response.reasoningContent ?? (streamedReasoningContent ? streamedReasoningContent : undefined);
 
-      // Add reasoning content to context for multi-turn salience
+      // Add reasoning content to context for downstream turn salience
       if (reasoningContent) {
         localContext.addReasoning(reasoningContent, workItem.workId);
         this.emit(createEvent('agent_reasoning', {
@@ -1080,16 +927,20 @@ export class Agent {
 
       // Hard stop on invalid structured output
       if (result.terminationReason === 'invalid_action') {
-        this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
         return;
       }
 
-      // 4. Process tools (if any)
+      if (requestedToolCalls.length > 0 && !turnPolicy.allowToolCalls) {
+        result.terminationReason = 'invalid_action';
+        result.error = 'Tool calls were returned on a turn where Orchestrator policy disallows tools.';
+        return;
+      }
+
+      // Process at most the single tool batch returned by this turn's LLM request.
       if (toolCalls.length > 0) {
         const preToolDirective = this.resolveControlDirective(signal, runControl);
         if (this.applyControlDirective(result, preToolDirective)) {
-          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-          return;
+            return;
         }
 
         const toolCallsSucceededBefore = metrics.toolCallsSucceeded;
@@ -1118,153 +969,46 @@ export class Agent {
           failCount,
         }, this.buildHookContext(workItem));
 
-        // Early exit if tool processing set a termination reason
-        if (result.terminationReason) {
-          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-          return;
-        }
+        if (result.terminationReason) return;
+        const postToolDirective = this.resolveControlDirective(signal, runControl);
+        if (this.applyControlDirective(result, postToolDirective)) return;
       }
 
-      // 4. Resolve action (single code path)
+      // Resolve this turn's action without scheduling another request. (single code path)
       const resolved = this.resolveAction(action, structuredOutput, responseText, content, result);
 
       switch (resolved) {
         case 'done':
         case 'user_input':
-          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-          return;
-
         case 'continue':
-          consecutiveNoActionNoToolResponses = 0;
-          forceRequiredToolChoice = false;
-          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-          continue;
-
+          return;
         case 'no_action': {
-          // Handle missing action field
           const safeContent = this.config.outputSchema && (structuredOutput || coerceStructuredOutput(content))
             ? ''
             : content;
           const responseCandidate = responseText ?? safeContent;
-          if (responseCandidate.trim().length > 0) {
-            result.response = responseCandidate;
-          }
+          if (responseCandidate.trim().length > 0) result.response = responseCandidate;
 
-          // If structured output was produced but action is missing, hard fail.
-          if (this.config.outputSchema && structuredOutput) {
-            result.terminationReason = 'invalid_action';
-            result.error = 'Structured output missing required "action" field.';
-            this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
+          if (toolCalls.length > 0) {
+            // A completed tool batch is explicit progress and requires another Orchestrator turn.
             return;
           }
 
-          // Tool calls made = progress, allow implicit continue
-          if (toolCalls.length > 0) {
-            consecutiveNoActionNoToolResponses = 0;
-            forceRequiredToolChoice = false;
-            this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
-            continue;
-          }
-
-          // No tool calls AND no action = inject schema reminder for structured output agents
-          if (this.config.outputSchema) {
-            consecutiveNoActionNoToolResponses++;
-            const isFinalIteration = iteration === maxIterations - 1;
-            const preview = responseCandidate.trim().slice(0, 1000);
-
-            if (isFinalIteration || consecutiveNoActionNoToolResponses >= MAX_SCHEMA_REMINDER_RETRIES) {
-              result.terminationReason = 'no_action';
-              result.error = preview
-                ? `LLM produced no tool calls or valid action after ${consecutiveNoActionNoToolResponses} retries. Last response preview: ${preview}`
-                : `LLM produced empty output with no tool calls or valid action after ${consecutiveNoActionNoToolResponses} retries.`;
-              this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-              return;
-            }
-
-            if (toolChoiceForThisCall !== 'none' && toolsForThisCall && toolsForThisCall.length > 0) {
-              forceRequiredToolChoice = true;
-              localContext.addMessage('user', this.buildRequiredToolCallReminder(toolsForThisCall), workItem.workId);
-            }
-
-            const schemaReminder = this.buildSchemaReminder();
-            localContext.addMessage('user', schemaReminder, workItem.workId);
-            this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, false);
-            continue;
-          }
-
-          // Non-structured agent with no action and no tools - terminate
-          result.terminationReason = 'no_action';
+          result.terminationReason = this.config.outputSchema && structuredOutput
+            ? 'invalid_action'
+            : 'no_action';
           const preview = responseCandidate.trim().slice(0, 1000);
           result.error = preview
-            ? `LLM response has no tools and no action directive. Response preview: ${preview}`
-            : 'LLM response has no tools and no action directive';
-          this.finalizeIteration(localReadFiles, workItem, result, metrics, iteration, !!responseText);
-          break;
+            ? `LLM response has no valid action. Response preview: ${preview}`
+            : 'LLM response has no tool calls or valid action';
+          return;
         }
       }
-    }
-
-    // Always capture all assistant responses even without a terminal action.
-    if (!result.response) {
-      const messages = localContext.getItemsByType('message') as { role: string; content: string | unknown[] }[];
-      const assistantContents = messages
-        .filter(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.length > 0)
-        .map(m => m.content as string);
-
-      // Try to extract structured response from assistant content
-      for (const content of assistantContents) {
-        const parsed = coerceStructuredOutput(content);
-        if (parsed && typeof parsed.response === 'string' && parsed.response.trim().length > 0) {
-          result.response = parsed.response;
-          break;
-        }
-      }
-
-      // If still no response, use raw content
-      if (!result.response && assistantContents.length > 0) {
-        result.response = assistantContents.join('\n\n');
-      }
-
-      // Last resort: summarize tool calls made if we have any
-      if (!result.response) {
-        const toolCalls = localContext.getItemsByType('function_call') as { name: string }[];
-        const toolOutputs = localContext.getItemsByType('function_call_output') as { output: string; isError?: boolean }[];
-        if (toolCalls.length > 0) {
-          const toolNames = toolCalls.map(t => t.name);
-          const successfulOutputs = toolOutputs.filter(o => !o.isError && o.output);
-          const summary = `Tool exploration produced partial results. Tools called: ${toolNames.join(', ')}. ` +
-            `${successfulOutputs.length} successful results were captured without a final synthesis step.`;
-          result.response = summary;
-        }
-      }
-    }
-
-    // Handle exhausted resources - treat as partial success if we have content
-    // If terminationReason is unset, we exhausted iterations without a specific termination
-    result.terminationReason ??= 'max_iterations_exceeded';
-
-    // For any bounds-related termination, mark as partial success if we have content
-    const isBoundsTermination =
-      result.terminationReason === 'max_iterations_exceeded' ||
-      result.terminationReason === 'max_tool_calls_exceeded' ||
-      result.terminationReason === 'max_duration_exceeded';
-
-    if (isBoundsTermination) {
-      if (result.response) {
-        // We have content, mark as partial success rather than failure
-        result.success = true;
-        result.isIncomplete = true;
-      } else {
-        result.error = `${result.terminationReason}: no output captured`;
-      }
-    }
-
-    result.filesRead = Array.from(localReadFiles);
     });
   }
 
   /**
-   * Normalize and classify loop/runtime errors to preserve partial progress.
+   * Normalize and classify turn/runtime errors to preserve partial progress.
    */
   private handleLoopError(
     error: unknown,
@@ -1343,8 +1087,8 @@ export class Agent {
     }
   }
 
-  private finalizeResult(result: MutableAgentResult): AgentResult {
-    const terminationReason = result.terminationReason ?? 'agent_error';
+  private finalizeResult(result: MutableAgentResult): AgentTurnResult {
+    const terminationReason = result.terminationReason;
     const base = {
       success: result.success,
       response: result.response,
@@ -1360,20 +1104,30 @@ export class Agent {
       observerStop: result.observerStop,
     };
 
+    if (!terminationReason) {
+      return {
+        ...base,
+        status: 'continue',
+        needsUserInput: false,
+        isRefusal: false,
+      };
+    }
+
     if (terminationReason !== 'user_input_required' && result.needsUserInput) {
-      throw new Error(`AgentResult invariant violation: needsUserInput=true with terminationReason=${terminationReason}`);
+      throw new Error(`AgentTerminalResult invariant violation: needsUserInput=true with terminationReason=${terminationReason}`);
     }
     if (terminationReason !== 'refusal' && result.isRefusal) {
-      throw new Error(`AgentResult invariant violation: isRefusal=true with terminationReason=${terminationReason}`);
+      throw new Error(`AgentTerminalResult invariant violation: isRefusal=true with terminationReason=${terminationReason}`);
     }
 
     switch (terminationReason) {
       case 'user_input_required': {
         if (!result.userPrompt) {
-          throw new Error('AgentResult invariant violation: user_input_required without userPrompt');
+          throw new Error('AgentTerminalResult invariant violation: user_input_required without userPrompt');
         }
         return {
           ...base,
+          status: 'terminal',
           terminationReason,
           needsUserInput: true,
           userPrompt: result.userPrompt,
@@ -1383,6 +1137,7 @@ export class Agent {
       case 'refusal': {
         return {
           ...base,
+          status: 'terminal',
           terminationReason,
           needsUserInput: false,
           isRefusal: true,
@@ -1390,10 +1145,11 @@ export class Agent {
       }
       case 'rate_limit': {
         if (!result.rateLimitInfo) {
-          throw new Error('AgentResult invariant violation: rate_limit without rateLimitInfo');
+          throw new Error('AgentTerminalResult invariant violation: rate_limit without rateLimitInfo');
         }
         return {
           ...base,
+          status: 'terminal',
           terminationReason,
           needsUserInput: false,
           isRefusal: false,
@@ -1402,9 +1158,6 @@ export class Agent {
       }
       case 'goal_state_reached':
       case 'user_stopped':
-      case 'max_iterations_exceeded':
-      case 'max_tool_calls_exceeded':
-      case 'max_duration_exceeded':
       case 'circuit_open':
       case 'timeout':
       case 'agent_error':
@@ -1414,6 +1167,7 @@ export class Agent {
       case 'observer_work_item_stopped': {
         return {
           ...base,
+          status: 'terminal',
           terminationReason,
           needsUserInput: false,
           isRefusal: false,
@@ -1722,7 +1476,7 @@ export class Agent {
     cwd: string,
     workItemId?: string,
     signal?: AbortSignal,
-    runControl?: AgentRunParams['runControl']
+    runControl?: AgentTurnParams['runControl']
   ): Effect.Effect<{
     call: { id: string; name: string; arguments: Record<string, unknown> };
     isAgentTool: boolean;
@@ -1805,7 +1559,7 @@ export class Agent {
     cwd: string,
     workItemId?: string,
     signal?: AbortSignal,
-    runControl?: AgentRunParams['runControl']
+    runControl?: AgentTurnParams['runControl']
   ): Effect.Effect<void, Error> {
     interface ToolCall { id: string; name: string; arguments: Record<string, unknown> }
     interface PreparedCall {
@@ -2059,7 +1813,7 @@ export class Agent {
     return merged;
   }
 
-  private mergeSubAgentResults(parentLocalContext: ContextWindow, subResult: AgentResult): void {
+  private mergeSubAgentResults(parentLocalContext: ContextWindow, subResult: AgentTerminalResult): void {
     for (const p of subResult.filesRead) {
       if (typeof p === 'string' && p.length > 0) parentLocalContext.markFileRead(p);
     }
@@ -2087,7 +1841,7 @@ export class Agent {
     parentLocalContext: ContextWindow,
     cwd: string,
     signal?: AbortSignal,
-    runControl?: AgentRunParams['runControl']
+    runControl?: AgentTurnParams['runControl']
   ): Effect.Effect<ToolResult> {
     return Effect.gen(this, function* () {
       if (!this.agentRegistry) {
@@ -2099,20 +1853,13 @@ export class Agent {
         return errorResult(call.name, `Agent '${this.config.type}' cannot call itself`, 0);
       }
 
+      if (!this.executeAgentTool) {
+        return errorResult(call.name, 'Owning Orchestrator did not provide executeAgentTool delegation', 0);
+      }
+
       let agentConfig: AgentConfig;
-      let llmConfig: LLMRequestConfig;
       try {
         agentConfig = this.agentRegistry.getConfig(call.name);
-
-        const modelSelection = this.getModelSelection?.(agentConfig.type);
-        if (!modelSelection) {
-          return errorResult(
-            call.name,
-            `No model configured for agent type '${agentConfig.type}'. Please select a model using /models before using this agent.`,
-            0
-          );
-        }
-        llmConfig = buildLLMRequestConfig(modelSelection, agentConfig.llmParams);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return errorResult(call.name, message, 0);
@@ -2149,24 +1896,6 @@ export class Agent {
         targetPaths: targetPaths && targetPaths.length > 0 ? targetPaths : undefined,
         params,
         agent: agentConfig.type,
-        bounds: {
-          maxToolCalls: agentConfig.budget.maxToolCalls,
-          maxDurationMs: agentConfig.budget.maxDurationMs,
-          maxLlmCalls: agentConfig.budget.maxIterations,
-        },
-      });
-
-      const agent = new Agent(agentConfig, {
-        llm: this.llm,
-        toolRegistry: this.toolRegistry,
-        emit: this.emit,
-        requestId: this.requestId,
-        sessionKey: this.sessionKey,
-        agentRegistry: this.agentRegistry,
-        llmConfig,
-        hooks: this.hooks,
-        internalHookQueue: this.internalHookQueue,
-        getModelSelection: this.getModelSelection,
       });
 
       const mergedContextForSubAgent = this.createMergedContext(
@@ -2175,15 +1904,23 @@ export class Agent {
         { includeArtifacts: true, includeFileContent: true }
       );
 
-      const subResult = yield* agent.run({
-        globalContext: mergedContextForSubAgent,
+      const delegated = yield* this.executeAgentTool({
+        agentType: agentConfig.type,
         workItem: subWorkItem,
+        globalContext: mergedContextForSubAgent,
         cwd,
         signal,
         runControl,
-      });
+        parentAgentType: this.config.type,
+      }).pipe(
+        Effect.map((subResult) => ({ subResult })),
+        Effect.catchAll((error) => Effect.succeed({ error }))
+      );
+      if ('error' in delegated) {
+        return errorResult(call.name, delegated.error.message, 0);
+      }
 
-      return this.buildSubAgentToolResult(call, subWorkItem, agentConfig, subResult, parentLocalContext);
+      return this.buildSubAgentToolResult(call, subWorkItem, agentConfig, delegated.subResult, parentLocalContext);
     });
   }
 
@@ -2194,7 +1931,7 @@ export class Agent {
     call: { id: string; name: string },
     subWorkItem: WorkItem,
     agentConfig: AgentConfig,
-    subResult: AgentResult,
+    subResult: AgentTerminalResult,
     parentLocalContext: ContextWindow
   ): ToolResult {
     let postProcessingError: string | null = null;
@@ -2319,7 +2056,7 @@ export class Agent {
 
   private formatSubAgentSuccessOutput(
     agentType: string,
-    subResult: AgentResult,
+    subResult: AgentTerminalResult,
     enhancedResponse: string,
     artifactCount: number,
     postProcessingError: string | null
@@ -2354,7 +2091,7 @@ export class Agent {
    */
   private formatSubAgentError(
     agentType: string,
-    subResult: AgentResult,
+    subResult: AgentTerminalResult,
     enhancedResponse: string,
     postProcessingError: string | null,
   ): string {
@@ -2393,57 +2130,6 @@ export class Agent {
   }
 
   /**
-   * Auto-read target files before execution.
-   */
-  private autoReadTargetFiles(
-    targetPaths: readonly string[],
-    localContext: ContextWindow,
-    localReadFiles: Set<string>,
-    metrics: AgentMetrics,
-    cwd: string,
-    workItemId?: string,
-    signal?: AbortSignal,
-    runControl?: AgentRunParams['runControl']
-  ): Effect.Effect<void> {
-    return Effect.gen(this, function* () {
-      const allowedTools = new Set(this.getEffectiveAllowedToolNames().map((t) => t.toLowerCase()));
-      if (!allowedTools.has('read')) {
-        return;
-      }
-
-      for (const targetPath of targetPaths) {
-        metrics.toolCallsMade++;
-        const readResult = yield* Effect.tryPromise({
-          try: () => this.toolRegistry.execute('Read', { path: targetPath }, {
-            cwd,
-            signal,
-            execution: runControl?.execution,
-            control: runControl?.control,
-          }),
-          catch: (error) => error instanceof Error ? error : new Error(String(error)),
-        }).pipe(Effect.catchAll(() => Effect.succeed<ToolResult | null>(null)));
-        if (readResult === null) {
-          metrics.toolCallsFailed++;
-          continue;
-        }
-        if (readResult.isSuccess) {
-          localReadFiles.add(targetPath);
-          metrics.toolCallsSucceeded++;
-
-          const fileContent = typeof readResult.output === 'string'
-            ? readResult.output
-            : JSON.stringify(readResult.output);
-
-          // Truncate file content at context storage (50KB limit for reads)
-          localContext.addFileContent(targetPath, truncateToolOutput(fileContent, 'Read'), undefined, workItemId);
-        } else {
-          metrics.toolCallsFailed++;
-        }
-      }
-    });
-  }
-
-  /**
    * Parse structured output if configured.
    */
   private resolveOutputSchemaId(): string | null {
@@ -2467,25 +2153,6 @@ export class Agent {
     }
 
     return null;
-  }
-
-  private buildSchemaReminder(): string {
-    if (typeof this.config.schemaReminder === 'string' && this.config.schemaReminder.trim().length > 0) {
-      return this.config.schemaReminder;
-    }
-
-    return `[SCHEMA REMINDER] You must set action, goalStateReached, and awaitingUserInput every turn. action is loop control ("done"|"continue"). goalStateReached is objective completion (true only when objective is complete). awaitingUserInput is blocking state (true only when you need user input). Valid combos: continue/false/false; done/true/false; done/false/true.`;
-  }
-
-  private buildRequiredToolCallReminder(tools: ToolDefinition[]): string {
-    const toolNames = tools
-      .map((tool) => tool.name)
-      .filter((name) => typeof name === 'string' && name.trim().length > 0)
-      .slice(0, 12);
-
-    const available = toolNames.length > 0 ? toolNames.join(', ') : 'available tools';
-
-    return `[TOOL CALL REQUIRED] Emit at least one actual tool call in your next assistant message. Do not only describe intended actions. If the task is to read a file, call Read with {"path":"..."} immediately. Available tools: ${available}.`;
   }
 
   private parseBoolean(value: unknown, fallback: boolean): boolean {
@@ -2717,7 +2384,7 @@ export class Agent {
     const schemaId = this.resolveOutputSchemaId();
     if (!schemaId) {
       // Allow plugin-owned/unknown schemas to pass through without Zod validation.
-      // Loop control still comes from `action` parsing, and invalid combinations
+      // Turn control still comes from `action` parsing, and invalid combinations
       // are rejected later (e.g., done requires goalStateReached unless awaitingUserInput).
       return parsed;
     }

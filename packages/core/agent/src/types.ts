@@ -2,6 +2,7 @@ import type { WorkItem } from 'types';
 import type {
   AgentEvent,
   StructuredOutputSchema,
+  ToolDefinition,
   ToolResult,
   ArtifactItem,
   LLMRequestConfig,
@@ -12,6 +13,8 @@ import type { ContextWindow } from 'context';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
 import type { TerminationReason } from 'types';
+import type { MemoryInjector } from './memory-bridge.js';
+import type { Effect } from 'effect';
 
 // Re-export stop hook types from shared types (to avoid orchestrator/agent coupling)
 export type {
@@ -99,23 +102,34 @@ export interface AgentConfig {
   schemaReminder?: string;
 }
 
-/**
- * Parameters for Agent.run().
- * Minimal interface - all config is at construction.
- */
-export interface AgentRunParams {
-  /** Global context window - read-only reference, agent writes to its own local context */
+/** Orchestrator-owned policy for one Agent turn. */
+export interface AgentTurnPolicy {
+  /** Current turn number, 1-based. */
+  iteration: number;
+  /** Total turn limit selected and enforced by the Orchestrator. */
+  maxIterations: number;
+  /** Whether this turn may expose and execute tools. */
+  allowToolCalls: boolean;
+  /** Maximum number of tool calls this turn may execute, allocated by Orchestrator. */
+  toolCallLimit: number;
+}
+
+/** Parameters for exactly one Agent.executeTurn() invocation. */
+export interface AgentTurnParams {
+  /** Global context window - read-only reference, agent writes to a fresh local delta. */
   globalContext: ContextWindow;
-  /** Work item defining the objective */
+  /** Work item defining the objective. */
   workItem: WorkItem;
   /** Working directory for tool execution. Required for concurrent-safe operation. */
   cwd: string;
-  /** Optional run-scoped execution metadata and control state. */
+  /** Required scheduling/final-turn policy supplied by the owning Orchestrator. */
+  turnPolicy: AgentTurnPolicy;
+  /** Optional turn-scoped execution metadata and control state. */
   runControl?: {
     execution: RunExecutionMetadata;
     control: RunControlMetadata;
   };
-  /** Optional abort signal for legacy callers; runtime should prefer runControl metadata. */
+  /** Optional abort signal. */
   signal?: AbortSignal;
 }
 
@@ -146,10 +160,7 @@ export interface AgentMetrics {
   durationMs: number;
 }
 
-/**
- * Result from Agent.run().
- * Contains all outputs; agent does not mutate input context.
- */
+/** Shared outputs from one Agent turn; the input context is never mutated. */
 export interface AgentResultBase {
   /** Whether the objective was achieved */
   success: boolean;
@@ -187,8 +198,15 @@ export interface AgentRateLimitInfo {
   message: string;
 }
 
-export type AgentResult =
+/** Terminal reasons an Agent turn may produce; execution bounds belong to Orchestrator. */
+export type AgentTerminationReason = Exclude<
+  TerminationReason,
+  'max_iterations_exceeded' | 'max_tool_calls_exceeded' | 'max_duration_exceeded'
+>;
+
+export type AgentTerminalResult =
   | (AgentResultBase & {
+      status: 'terminal';
       terminationReason: 'user_input_required';
       needsUserInput: true;
       userPrompt: UserPromptInfo;
@@ -196,6 +214,7 @@ export type AgentResult =
       rateLimitInfo?: undefined;
     })
   | (AgentResultBase & {
+      status: 'terminal';
       terminationReason: 'refusal';
       needsUserInput: false;
       userPrompt?: undefined;
@@ -203,6 +222,7 @@ export type AgentResult =
       rateLimitInfo?: undefined;
     })
   | (AgentResultBase & {
+      status: 'terminal';
       terminationReason: 'rate_limit';
       needsUserInput: false;
       userPrompt?: undefined;
@@ -210,16 +230,29 @@ export type AgentResult =
       rateLimitInfo: AgentRateLimitInfo;
     })
   | (AgentResultBase & {
-      terminationReason: Exclude<TerminationReason, 'user_input_required' | 'refusal' | 'rate_limit'>;
+      status: 'terminal';
+      terminationReason: Exclude<AgentTerminationReason, 'user_input_required' | 'refusal' | 'rate_limit'>;
       needsUserInput: false;
       userPrompt?: undefined;
       isRefusal: false;
       rateLimitInfo?: undefined;
     });
 
+export type AgentContinuationResult = AgentResultBase & {
+  status: 'continue';
+  terminationReason?: never;
+  needsUserInput: false;
+  userPrompt?: undefined;
+  isRefusal: false;
+  rateLimitInfo?: undefined;
+};
+
+/** Explicit result of one turn: either schedule another turn or stop. */
+export type AgentTurnResult = AgentContinuationResult | AgentTerminalResult;
+
 export type MutableAgentResult = AgentResultBase & {
-  /** Why execution terminated (undefined while still running) */
-  terminationReason?: TerminationReason;
+  /** Why this turn terminated (undefined when Orchestrator should schedule another turn). */
+  terminationReason?: AgentTerminationReason;
   /** Whether user input is needed */
   needsUserInput: boolean;
   /** User prompt info (if needsUserInput) */
@@ -486,7 +519,7 @@ export const noopHookQueue: InternalHookQueue = {
 export interface AgentRegistry {
   has(agentType: string): boolean;
   getConfig(agentType: string): AgentConfig;
-  listToolDefinitions(): { name: string; description: string; parameters: Record<string, unknown> }[];
+  listToolDefinitions(): ToolDefinition[];
 }
 
 /**
@@ -500,12 +533,26 @@ export interface ModelSelectionInfo {
   reasoning?: string;
 }
 
+export interface AgentToolExecutionRequest {
+  agentType: string;
+  workItem: WorkItem;
+  globalContext: ContextWindow;
+  cwd: string;
+  signal?: AbortSignal;
+  runControl?: AgentTurnParams['runControl'];
+  parentAgentType: string;
+}
+
+/** Orchestrator-owned execution callback for an agent exposed as a tool. */
+export type AgentToolExecutor = (
+  request: AgentToolExecutionRequest
+) => Effect.Effect<AgentTerminalResult, Error>;
+
 /**
  * Runtime configuration for Agent.
  * Groups all runtime dependencies into a single object.
  *
  * NOTE: llmConfig is REQUIRED - agents must receive pre-resolved config at creation.
- * getModelSelection is only needed for sub-agent spawning.
  */
 export interface AgentRuntimeConfig {
   /** LLM adapter for inference */
@@ -513,9 +560,11 @@ export interface AgentRuntimeConfig {
   /** Tool registry for tool execution */
   toolRegistry: ToolRegistry;
   /** Event emit callback */
-  emit: EventEmitCallback;
+  emit?: EventEmitCallback;
   /** Request ID for correlation */
-  requestId: string;
+  requestId?: string;
+  /** Session ID for correlation; defaults to requestId. */
+  sessionKey?: string;
   /** Optional agent registry for agent-as-tool */
   agentRegistry?: AgentRegistry;
   /** LLM configuration for this agent - REQUIRED, pre-resolved at creation */
@@ -524,6 +573,8 @@ export interface AgentRuntimeConfig {
   hooks?: AgentHooks;
   /** Optional internal hook queue */
   internalHookQueue?: InternalHookQueue;
-  /** Model selection callback for sub-agent spawning */
-  getModelSelection?: (agentType: string) => ModelSelectionInfo | null;
+  /** Orchestrator delegation callback required when an agent tool is executed. */
+  executeAgentTool?: AgentToolExecutor;
+  /** Optional run-scoped memory injector. */
+  memoryInjector?: MemoryInjector;
 }

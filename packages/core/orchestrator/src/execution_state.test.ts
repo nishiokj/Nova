@@ -10,13 +10,13 @@ import {
   updateMetrics,
   updateRunControl,
 } from './execution_state.js';
-import type { AgentResult } from 'agent';
+import type { AgentMetrics } from 'agent';
 
 // Minimal mock: only metrics are read by updateMetrics
-function mockResult(llm: number, tools: number): AgentResult {
+function mockResult(llm: number, tools: number): { metrics: AgentMetrics } {
   return {
     metrics: { llmCallsMade: llm, toolCallsMade: tools, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
-  } as unknown as AgentResult;
+  };
 }
 
 describe('createExecutionState', () => {
