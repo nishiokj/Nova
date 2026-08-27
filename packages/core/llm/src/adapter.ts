@@ -19,9 +19,18 @@ import type {
   StreamParams,
   LLMProvider,
   LLMRequestConfig,
+  ProviderModelCatalog,
+  ProviderModelCatalogOptions,
+  SupportedProvider,
 } from 'types';
 import { Effect, Exit, Stream } from 'effect';
-import { getProviderBaseUrl, isSupportedProvider, providerRequiresAuth, toGatewayModel } from 'types';
+import {
+  getProviderBaseUrl,
+  getProviderDefinition,
+  isSupportedProvider,
+  providerRequiresAuth,
+  toGatewayModel,
+} from 'types';
 import { profiler } from 'shared';
 import { getProvider } from './providers/registry.js';
 import { getCodexTokenManager } from './auth/codex-auth.js';
@@ -266,6 +275,31 @@ class LLMRouterAdapter implements LLMAdapter {
         reasoning: llm.reasoning,
       };
     });
+  }
+
+  async listModels(
+    providerName: SupportedProvider,
+    options?: ProviderModelCatalogOptions
+  ): Promise<ProviderModelCatalog | null> {
+    const definition = getProviderDefinition(providerName);
+    if (!definition) return null;
+
+    const provider = getProvider(definition.canonicalProvider);
+    if (!provider.listModels) return null;
+
+    const resolved = await Effect.runPromise(this.resolveRequestConfig({
+      provider: definition.canonicalProvider,
+      displayProvider: providerName,
+      model: 'catalog/models',
+      contextWindow: 1,
+      baseUrl: definition.baseUrl,
+    }));
+
+    return provider.listModels({
+      config: resolved,
+      logger: this.logger,
+      startTime: Date.now(),
+    }, options);
   }
 
   /**

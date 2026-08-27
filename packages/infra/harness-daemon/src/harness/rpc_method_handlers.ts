@@ -3,7 +3,7 @@ import { NOVA_PROTOCOL_VERSION } from '@nova/protocol';
 import type { AgentRunHandle, AgentRunResult, BridgeEvent } from './types.js';
 import type { AuthService } from './auth_service.js';
 import type { LocalProviderManager } from './local_providers.js';
-import { GATEWAY_MODEL_PROVIDERS, getAllModels, isOpenAICompatProvider, toGatewayModel } from 'types';
+import { DEFAULT_CONTEXT_WINDOW, GATEWAY_MODEL_PROVIDERS, getAllModels, isOpenAICompatProvider, toGatewayModel, type ProviderModelCatalog, type ProviderModelEntry } from 'types';
 import { deleteSession, getTokenUsage, listSessions } from './session_queries.js';
 import {
   loadHookDefinitions,
@@ -26,6 +26,8 @@ import type { ModelSelection } from 'agent';
 import type { HarnessLike } from './bridge_gateway.js';
 
 const GATEWAY_PROVIDER_ID = 'vercel-gateway';
+const DISCOVERABLE_PROVIDER_IDS = ['codex', GATEWAY_PROVIDER_ID] as const;
+const MODEL_CATALOG_TTL_MS = 5 * 60 * 1000;
 
 interface PersistedModelSelection {
   provider: string;
@@ -107,6 +109,11 @@ export class RpcMethodHandlers {
     onComplete?: (result?: AgentRunResult) => void,
     sessionKey?: string
   ) => void;
+  private readonly modelCatalogCache = new Map<string, {
+    catalog: ProviderModelCatalog;
+    fetchedAt: number;
+  }>();
+  private readonly availableModelEntries = new Map<string, ProviderModelEntry>();
 
   constructor(deps: RpcMethodHandlerDeps) {
     this.harness = deps.harness;
@@ -179,7 +186,30 @@ export class RpcMethodHandlers {
     };
   }
 
-  private handleGetModels(): Record<string, unknown> {
+  private async getDiscoveredCatalog(provider: string): Promise<ProviderModelCatalog | null> {
+    const cached = this.modelCatalogCache.get(provider);
+    if (cached && Date.now() - cached.fetchedAt < MODEL_CATALOG_TTL_MS) return cached.catalog;
+    if (!this.harness.listProviderModels) return cached?.catalog ?? null;
+
+    try {
+      const result = await this.harness.listProviderModels(
+        provider,
+        cached?.catalog.etag ? { etag: cached.catalog.etag } : undefined
+      );
+      if (!result) return cached?.catalog ?? null;
+      if (result.notModified) {
+        if (!cached) return null;
+        this.modelCatalogCache.set(provider, { catalog: cached.catalog, fetchedAt: Date.now() });
+        return cached.catalog;
+      }
+      this.modelCatalogCache.set(provider, { catalog: result, fetchedAt: Date.now() });
+      return result;
+    } catch {
+      return cached?.catalog ?? null;
+    }
+  }
+
+  private async handleGetModels(): Promise<Record<string, unknown>> {
     const config = this.harness.getConfig();
     const graphd = this.harness.getGraphD?.();
 
@@ -194,21 +224,48 @@ export class RpcMethodHandlers {
       return accessCache.get(provider) ?? false;
     };
 
-    const baseModels = getAllModels()
-      .filter((model) => !hiddenModelSet.has(model.id))
-      .map((model) => ({
-        id: model.id,
-        name: model.name,
-        provider: model.provider,
-        reasoning: model.reasoning,
-      }));
+    const discoveredCatalogs = new Map<string, ProviderModelCatalog>();
+    await Promise.all(DISCOVERABLE_PROVIDER_IDS.map(async (provider) => {
+      if (!hasAccess(provider)) return;
+      const catalog = await this.getDiscoveredCatalog(provider);
+      if (catalog) discoveredCatalogs.set(provider, catalog);
+    }));
 
-    const models = [...baseModels];
+    const staticModels = getAllModels();
+    const staticByKey = new Map(staticModels.map((model) => [`${model.provider}:${model.id}`, model]));
+    const mergedModels = new Map<string, ProviderModelEntry>();
+    for (const model of staticModels) {
+      if (!discoveredCatalogs.has(model.provider)) {
+        mergedModels.set(`${model.provider}:${model.id}`, model);
+      }
+    }
+    for (const [provider, catalog] of discoveredCatalogs) {
+      for (const model of catalog.models) {
+        const key = `${provider}:${model.id}`;
+        mergedModels.set(key, {
+          ...(staticByKey.get(key) ?? {}),
+          ...model,
+          provider: provider as ProviderModelEntry['provider'],
+        });
+      }
+    }
+
+    const visibleModels = [...mergedModels.values()]
+      .filter((model) => !hiddenModelSet.has(model.id));
+    this.availableModelEntries.clear();
+    for (const model of visibleModels) {
+      this.availableModelEntries.set(`${model.provider.toLowerCase()}:${model.id.toLowerCase()}`, model);
+    }
+    const baseModels = visibleModels.map((model) => ({
+      id: model.id,
+      name: model.name,
+      provider: model.provider,
+      reasoning: model.reasoning,
+    }));
     const availableModels = baseModels.filter((model) => hasAccess(model.provider));
 
     // If Vercel Gateway is configured, surface gateway variants for supported providers
-    if (hasAccess(GATEWAY_PROVIDER_ID)) {
-      const seen = new Set(models.map((model) => `${model.provider}:${model.id}`));
+    if (hasAccess(GATEWAY_PROVIDER_ID) && !discoveredCatalogs.has(GATEWAY_PROVIDER_ID)) {
       const availableSeen = new Set(availableModels.map((model) => `${model.provider}:${model.id}`));
       for (const model of baseModels) {
         if (!GATEWAY_MODEL_PROVIDERS.has(model.provider)) continue;
@@ -223,15 +280,6 @@ export class RpcMethodHandlers {
         if (hiddenModelSet.has(gatewayId)) continue;
 
         const key = `${GATEWAY_PROVIDER_ID}:${gatewayId}`;
-        if (!seen.has(key)) {
-          models.push({
-            id: gatewayId,
-            name: `${model.name} (${model.provider})`,
-            provider: GATEWAY_PROVIDER_ID,
-            reasoning: model.reasoning,
-          });
-          seen.add(key);
-        }
         if (!availableSeen.has(key)) {
           availableModels.push({
             id: gatewayId,
@@ -631,6 +679,7 @@ export class RpcMethodHandlers {
         const canonicalProvider = isOpenAICompatProvider(provider) ? 'openai-compat' : provider;
         this.harness.updateApiKey(canonicalProvider, apiKey);
       }
+      if (result.success) this.modelCatalogCache.delete(provider);
 
       return result;
     }
@@ -648,6 +697,7 @@ export class RpcMethodHandlers {
         const canonicalProvider = isOpenAICompatProvider(provider) ? 'openai-compat' : provider;
         this.harness.updateApiKey(canonicalProvider, apiKey);
       }
+      if (result.success) this.modelCatalogCache.delete(provider);
 
       return result;
     }
@@ -665,6 +715,7 @@ export class RpcMethodHandlers {
     // Use local provider manager (no auth required)
     if (this.localProviders) {
       const result = this.localProviders.deleteProviderKey(provider);
+      if (result.success) this.modelCatalogCache.delete(provider);
       return result;
     }
 
@@ -675,6 +726,7 @@ export class RpcMethodHandlers {
         return { success: false, error: 'Missing sessionToken' };
       }
       const result = this.authService.deleteProviderKey(sessionToken, provider);
+      if (result.success) this.modelCatalogCache.delete(provider);
       return result;
     }
 
@@ -1081,11 +1133,13 @@ export class RpcMethodHandlers {
     const apiKey = typeof data?.api_key === 'string' && data.api_key.trim().length > 0
       ? data.api_key.trim()
       : undefined;
+    const catalogEntry = this.availableModelEntries.get(`${provider.toLowerCase()}:${model.toLowerCase()}`);
     const requestedSelection = {
       provider,
       model,
       ...(reasoning ? { reasoning } : {}),
       ...(apiKey ? { apiKey } : {}),
+      ...(catalogEntry ? { contextWindow: catalogEntry.context_window ?? DEFAULT_CONTEXT_WINDOW } : {}),
     };
     this.harness.setSessionSelectedModel?.(sessionKey, agentType, requestedSelection);
     const selectedModel = this.getNormalizedSelection(sessionKey, agentType);

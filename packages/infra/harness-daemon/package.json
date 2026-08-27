@@ -17,8 +17,8 @@
   },
   "dependencies": {
     "@nova/protocol": "workspace:*",
-    "@substrate/runtime-darwin-arm64": "file:../../../../substrate/packages/substrate-runtime-npm-darwin-arm64",
-    "@substrate/sdk": "file:../../../../substrate/packages/substrate-js",
+    "@substrate/runtime-darwin-arm64": "file:../../../../substrate/Substrate/packages/substrate-runtime-npm-darwin-arm64",
+    "@substrate/sdk": "file:../../../../substrate/Substrate/packages/substrate-js",
     "agent": "workspace:*",
     "comms-bus": "workspace:*",
     "context": "workspace:*",

@@ -13,6 +13,9 @@ import type {
   RespondParams,
   StreamParams,
   LLMExecutionError,
+  ProviderModelCatalog,
+  ProviderModelCatalogOptions,
+  ProviderModelDefinition,
 } from 'types';
 import { Effect, Stream } from 'effect';
 import type { ProviderContext, LLMProviderAdapter } from './types.js';
@@ -32,6 +35,45 @@ function buildSchemaInstruction(schema: Record<string, unknown>): string {
 
 export class VercelGatewayProvider implements LLMProviderAdapter {
   readonly name = 'vercel-gateway' as const;
+
+  async listModels(
+    context: ProviderContext,
+    options?: ProviderModelCatalogOptions
+  ): Promise<ProviderModelCatalog> {
+    const headers: Record<string, string> = {};
+    if (options?.etag) headers['If-None-Match'] = options.etag;
+
+    const response = await fetch(`${context.config.baseUrl.replace(/\/$/, '')}/models`, {
+      headers,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (response.status === 304) {
+      return { models: [], etag: options?.etag, notModified: true };
+    }
+    if (!response.ok) {
+      throw new Error(`Vercel Gateway model discovery failed (${response.status}): ${await response.text()}`);
+    }
+
+    const payload = await response.json() as { data?: unknown[] };
+    if (!Array.isArray(payload.data)) {
+      throw new Error('Vercel Gateway model discovery returned an invalid response');
+    }
+
+    const models = payload.data.flatMap((value): ProviderModelDefinition[] => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+      const model = value as Record<string, unknown>;
+      if (model.type !== 'language' || typeof model.id !== 'string' || !model.id) return [];
+      return [{
+        id: model.id,
+        name: typeof model.name === 'string' ? model.name : model.id,
+        ...(typeof model.description === 'string' ? { description: model.description } : {}),
+        ...(typeof model.context_window === 'number' ? { context_window: model.context_window } : {}),
+        ...(typeof model.max_tokens === 'number' ? { max_tokens: model.max_tokens } : {}),
+      }];
+    });
+    const etag = response.headers.get('etag');
+    return { models, ...(etag ? { etag } : {}) };
+  }
 
   respond(context: ProviderContext, params: RespondParams): Effect.Effect<LLMResponse, LLMExecutionError> {
     return Effect.tryPromise({

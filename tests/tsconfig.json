@@ -4,7 +4,32 @@
     "types": ["vitest/globals", "node"],
     "jsx": "react-jsx",
     "noEmit": true,
-    "rootDir": ".."
+    "paths": {
+      "types": ["../packages/core/types/src/index.ts"],
+      "types/*": ["../packages/core/types/src/*"],
+      "llm": ["../packages/core/llm/src/index.ts"],
+      "llm/*": ["../packages/core/llm/src/*"],
+      "agent": ["../packages/core/agent/src/index.ts"],
+      "agent/*": ["../packages/core/agent/src/*"],
+      "context": ["../packages/core/context/src/index.ts"],
+      "context/*": ["../packages/core/context/src/*"],
+      "orchestrator": ["../packages/core/orchestrator/src/index.ts"],
+      "orchestrator/*": ["../packages/core/orchestrator/src/*"],
+      "runtime": ["../packages/core/runtime/src/index.ts"],
+      "runtime/*": ["../packages/core/runtime/src/*"],
+      "shared": ["../packages/core/shared/src/index.ts"],
+      "shared/*": ["../packages/core/shared/src/*"],
+      "tools": ["../packages/core/tools/src/index.ts"],
+      "tools/*": ["../packages/core/tools/src/*"],
+      "comms-bus": ["../packages/infra/comms-bus/src/index.ts"],
+      "comms-bus/*": ["../packages/infra/comms-bus/src/*"],
+      "graphd": ["../packages/infra/graphd/src/index.ts"],
+      "graphd/*": ["../packages/infra/graphd/src/*"],
+      "harness-daemon/*": ["../packages/infra/harness-daemon/src/*"],
+      "tui/*": ["../packages/apps/tui/src/*"],
+      "agent-memory/*": ["../packages/plugins/agent-memory/src/*"],
+      "semantic-compiler/*": ["../packages/plugins/semantic-compiler/src/*"]
+    }
   },
   "include": ["./**/*.ts", "./**/*.tsx"]
 }

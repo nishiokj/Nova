@@ -1,5 +1,7 @@
-import type { StreamParams } from 'types';
+import type { LLMResponse, StreamParams } from 'types';
+import { Effect } from 'effect';
 import { CodexProvider } from 'llm/providers/codex.js';
+import { VercelGatewayProvider } from 'llm/providers/vercel-gateway.js';
 import type { ProviderContext } from 'llm/providers/types.js';
 
 const originalFetch = globalThis.fetch;
@@ -35,27 +37,22 @@ function sseFrame(event: Record<string, unknown>, multiline = false): string {
   return `event: ${event.type}\n${dataLines}\n\n`;
 }
 
-async function consumeStream(provider: CodexProvider, context: ProviderContext, params: StreamParams) {
+async function consumeStream(
+  provider: CodexProvider,
+  context: ProviderContext,
+  params: StreamParams
+): Promise<{ chunks: string[]; response: LLMResponse }> {
   const chunks: string[] = [];
-  const stream = provider.stream(context, params);
-  let finalResponse: Awaited<ReturnType<typeof stream.next>>['value'] | undefined;
-
-  while (true) {
-    const { value, done } = await stream.next();
-    if (done) {
-      finalResponse = value;
-      break;
-    }
-    chunks.push(value);
-  }
-
-  if (!finalResponse || typeof finalResponse !== 'object') {
-    throw new Error('Expected final response object');
-  }
+  const response = await Effect.runPromise(
+    provider.respond(context, {
+      ...params,
+      onChunk: (chunk: string) => chunks.push(chunk),
+    })
+  );
 
   return {
     chunks,
-    response: finalResponse,
+    response,
   };
 }
 
@@ -318,14 +315,14 @@ describe('CodexProvider', () => {
     });
 
     expect(capturedBody).not.toBeNull();
-    const input = capturedBody?.input as Array<Record<string, unknown>>;
+    const input = (capturedBody as Record<string, unknown> | null)?.input as Array<Record<string, unknown>>;
     expect(input).toEqual([
       { type: 'message', role: 'user', content: 'Check this file' },
       {
         type: 'function_call',
         call_id: 'call_abc',
-        name: 'Read',
-        arguments: { path: 'packages/core/llm/src/providers/codex.ts' },
+        name: 'read_file',
+        arguments: JSON.stringify({ file_path: 'packages/core/llm/src/providers/codex.ts' }),
       },
       {
         type: 'function_call_output',
@@ -415,7 +412,7 @@ describe('CodexProvider', () => {
     });
 
     const outboundSchema = (
-      (capturedBody?.text as { format?: { schema?: unknown } })?.format?.schema ?? null
+      ((capturedBody as Record<string, unknown> | null)?.text as { format?: { schema?: unknown } })?.format?.schema ?? null
     ) as Record<string, unknown> | null;
 
     expect(outboundSchema).not.toBeNull();
@@ -428,5 +425,99 @@ describe('CodexProvider', () => {
 
     // Compiler must not mutate caller-owned schema objects.
     expect(JSON.stringify(originalSchema)).toContain('"anyOf"');
+  });
+
+  it('discovers visible Codex models with account-scoped auth and ETag support', async () => {
+    const provider = new CodexProvider();
+    const context = createContext();
+
+    globalThis.fetch = (async (input, init) => {
+      expect(String(input)).toContain('/models?client_version=');
+      expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer token');
+      expect(new Headers(init?.headers).get('Chatgpt-Account-Id')).toBe('acct_test');
+      expect(new Headers(init?.headers).get('If-None-Match')).toBe('old-etag');
+      return Response.json({
+        models: [
+          {
+            slug: 'gpt-visible',
+            display_name: 'GPT Visible',
+            description: 'Visible model',
+            visibility: 'list',
+            supported_in_api: true,
+            context_window: 272_000,
+            supported_reasoning_levels: [
+              { effort: 'low', description: 'Low' },
+              { effort: 'high', description: 'High' },
+            ],
+          },
+          {
+            slug: 'gpt-hidden',
+            display_name: 'GPT Hidden',
+            visibility: 'hide',
+            supported_in_api: true,
+          },
+        ],
+      }, { headers: { ETag: 'new-etag' } });
+    }) as typeof fetch;
+
+    await expect(provider.listModels?.(context, { etag: 'old-etag' })).resolves.toEqual({
+      models: [{
+        id: 'gpt-visible',
+        name: 'GPT Visible',
+        description: 'Visible model',
+        context_window: 272_000,
+        reasoning: ['low', 'high'],
+      }],
+      etag: 'new-etag',
+    });
+  });
+
+  it('returns an unchanged marker for a cached Codex catalog', async () => {
+    const provider = new CodexProvider();
+    globalThis.fetch = (async () => new Response(null, { status: 304 })) as typeof fetch;
+
+    await expect(provider.listModels?.(createContext(), { etag: 'current-etag' })).resolves.toEqual({
+      models: [],
+      etag: 'current-etag',
+      notModified: true,
+    });
+  });
+
+  it('discovers language models from the Vercel Gateway catalog', async () => {
+    const provider = new VercelGatewayProvider();
+    const context = createContext();
+    context.config = {
+      ...context.config,
+      provider: 'vercel-gateway',
+      displayProvider: 'vercel-gateway',
+      baseUrl: 'https://ai-gateway.vercel.sh/v1',
+    };
+
+    globalThis.fetch = (async (input) => {
+      expect(String(input)).toBe('https://ai-gateway.vercel.sh/v1/models');
+      return Response.json({
+        data: [
+          {
+            id: 'anthropic/claude-test',
+            name: 'Claude Test',
+            description: 'Language model',
+            type: 'language',
+            context_window: 200_000,
+            max_tokens: 64_000,
+          },
+          { id: 'openai/embed-test', name: 'Embed Test', type: 'embedding' },
+        ],
+      });
+    }) as typeof fetch;
+
+    await expect(provider.listModels?.(context)).resolves.toEqual({
+      models: [{
+        id: 'anthropic/claude-test',
+        name: 'Claude Test',
+        description: 'Language model',
+        context_window: 200_000,
+        max_tokens: 64_000,
+      }],
+    });
   });
 });

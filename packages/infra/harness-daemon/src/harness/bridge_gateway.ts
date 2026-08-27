@@ -13,6 +13,7 @@ import type { AuthService } from './auth_service.js';
 import type { LocalProviderManager } from './local_providers.js';
 import type { UnifiedHookRegistry } from 'orchestrator';
 import type { AgentType, ModelSelection } from 'agent';
+import type { ProviderModelCatalog, ProviderModelCatalogOptions } from 'types';
 import type { PermissionChecker } from './permissions.js';
 import type { GraphDManager } from 'graphd';
 import { RpcDispatcher } from './rpc_dispatcher.js';
@@ -36,6 +37,10 @@ export interface HarnessLike {
   updateApiKey?(provider: string, apiKey: string): void;
   resetCircuitBreaker?(): void;
   hasApiKey(provider: string, explicitApiKey?: string | null): boolean;
+  listProviderModels?(
+    provider: string,
+    options?: ProviderModelCatalogOptions
+  ): Promise<ProviderModelCatalog | null>;
   getLocalProviders?(): LocalProviderManager | null;
   setSessionSelectedModel?(sessionKey: string, agentType: string, selectedModel: {
     provider: string;

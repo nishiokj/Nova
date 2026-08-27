@@ -5,6 +5,8 @@
 import type {
   LLMProvider,
   LLMItem,
+  ProviderModelCatalog,
+  ProviderModelCatalogOptions,
   ToolDefinition,
   ToolCall,
   LLMResponse,
@@ -108,6 +110,11 @@ export interface LLMProviderAdapter {
     context: ProviderContext,
     params: StreamParams
   ): Stream.Stream<string, LLMExecutionError>;
+
+  listModels?(
+    context: ProviderContext,
+    options?: ProviderModelCatalogOptions
+  ): Promise<ProviderModelCatalog>;
 
   /**
    * Format tools for this provider's API.

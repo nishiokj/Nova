@@ -283,6 +283,8 @@ export type {
   ProviderResponseFormat,
   ProviderModelDefinition,
   ProviderModelEntry,
+  ProviderModelCatalog,
+  ProviderModelCatalogOptions,
   ReasoningOptions,
   ThinkingDialect,
 } from './providers.js';

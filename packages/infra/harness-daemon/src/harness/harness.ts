@@ -34,7 +34,7 @@ import { execSync } from 'child_process';
 import { createAdapter, hasCodexCredentials, type ProviderKeyService } from 'llm';
 import { classifyRecoverableError, getErrorMessage } from './error_handlers.js';
 import { DANGEROUS_PATTERNS, type ToolRegistry } from 'tools';
-import { createEvent, getProviderEnvVar, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData } from 'types';
+import { createEvent, getProviderEnvVar, isSupportedProvider, providerRequiresAuth, type AgentEvent, type ToolResult, type LLMClientConfig, type LLMProvider, type ArtifactDiscoveredData, type ArtifactKind, type GitCommitData, type ProviderModelCatalog, type ProviderModelCatalogOptions } from 'types';
 import type { ContextWindow } from 'context';
 import { profiler } from 'shared';
 import { GraphDManager, createGraphDConfig } from 'graphd';
@@ -728,6 +728,14 @@ export class AgentHarness {
     return this.providerKeyService.hasApiKey(provider);
   }
 
+  async listProviderModels(
+    provider: string,
+    options?: ProviderModelCatalogOptions
+  ): Promise<ProviderModelCatalog | null> {
+    if (!isSupportedProvider(provider) || !this.llmAdapter.listModels) return null;
+    return this.llmAdapter.listModels(provider, options);
+  }
+
   /**
    * Get the shared LocalProviderManager instance.
    * BridgeGateway uses this to avoid creating a second connection to the same GraphD database.
@@ -1337,14 +1345,14 @@ export class AgentHarness {
       entry.id.trim().toLowerCase() === model.toLowerCase()
       && entry.provider.trim().toLowerCase() === provider.toLowerCase()
     );
-    const contextWindow = Math.trunc(modelEntry?.context_window ?? NaN);
-    if (!modelEntry?.provider || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    const contextWindow = Math.trunc(modelEntry?.context_window ?? selection?.contextWindow ?? NaN);
+    if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
       return null;
     }
 
     return {
-      provider: modelEntry.provider,
-      model: modelEntry.id,
+      provider: modelEntry?.provider ?? provider,
+      model: modelEntry?.id ?? model,
       contextWindow,
       ...(apiKey ? { apiKey } : {}),
       ...(typeof selection?.reasoning === 'string' && selection.reasoning.trim().length > 0

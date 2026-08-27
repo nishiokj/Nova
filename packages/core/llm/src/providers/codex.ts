@@ -17,6 +17,9 @@ import type {
   RespondParams,
   StreamParams,
   LLMExecutionError,
+  ProviderModelCatalog,
+  ProviderModelCatalogOptions,
+  ProviderModelDefinition,
 } from 'types';
 import { Effect, Stream } from 'effect';
 import type { ProviderContext, LLMProviderAdapter } from './types.js';
@@ -32,6 +35,7 @@ import {
 
 const DEFAULT_CODEX_REQUEST_TIMEOUT_MS = 120_000;
 const DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_MS = 600_000;
+const DEFAULT_CODEX_CLIENT_VERSION = '0.146.0';
 
 function parsePositiveTimeoutMs(value: string | undefined, fallback: number): number {
   if (!value || value.trim().length === 0) {
@@ -61,6 +65,60 @@ const FUNCTION_PREFIX = 'functions.';
 
 export class CodexProvider implements LLMProviderAdapter {
   readonly name = 'codex' as const;
+
+  async listModels(
+    context: ProviderContext,
+    options?: ProviderModelCatalogOptions
+  ): Promise<ProviderModelCatalog> {
+    const { config } = context;
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${config.apiKey}`,
+    };
+    if (config.chatgptAccountId) headers['Chatgpt-Account-Id'] = config.chatgptAccountId;
+    if (options?.etag) headers['If-None-Match'] = options.etag;
+
+    const clientVersion = process.env.CODEX_CLIENT_VERSION ?? DEFAULT_CODEX_CLIENT_VERSION;
+    const url = `${config.baseUrl.replace(/\/$/, '')}/models?client_version=${encodeURIComponent(clientVersion)}`;
+    const response = await fetch(url, {
+      headers,
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (response.status === 304) {
+      return { models: [], etag: options?.etag, notModified: true };
+    }
+    if (!response.ok) {
+      throw new Error(`Codex model discovery failed (${response.status}): ${await response.text()}`);
+    }
+
+    const payload = await response.json() as { models?: unknown[] };
+    if (!Array.isArray(payload.models)) throw new Error('Codex model discovery returned an invalid response');
+
+    const models = payload.models.flatMap((value): ProviderModelDefinition[] => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+      const model = value as Record<string, unknown>;
+      if (model.supported_in_api === false) return [];
+      if (typeof model.visibility === 'string' && model.visibility !== 'list') return [];
+      if (typeof model.slug !== 'string' || !model.slug) return [];
+
+      const reasoning = Array.isArray(model.supported_reasoning_levels)
+        ? model.supported_reasoning_levels.flatMap((level): string[] => {
+          if (!level || typeof level !== 'object' || Array.isArray(level)) return [];
+          const effort = (level as Record<string, unknown>).effort;
+          return typeof effort === 'string' && effort ? [effort] : [];
+        })
+        : undefined;
+      return [{
+        id: model.slug,
+        name: typeof model.display_name === 'string' ? model.display_name : model.slug,
+        ...(typeof model.description === 'string' ? { description: model.description } : {}),
+        ...(typeof model.context_window === 'number' ? { context_window: model.context_window } : {}),
+        ...(reasoning?.length ? { reasoning } : {}),
+      }];
+    });
+    const etag = response.headers.get('etag');
+    return { models, ...(etag ? { etag } : {}) };
+  }
 
   /**
    * Non-streaming respond - internally uses streaming and collects result.

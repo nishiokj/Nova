@@ -126,7 +126,12 @@ export function getToolUseBlocks(message: Message): ToolUseContentBlock[] {
 // ============================================
 
 // Import and re-export LLMProvider from the central providers module
-import type { LLMProvider } from './providers.js';
+import type {
+  LLMProvider,
+  ProviderModelCatalog,
+  ProviderModelCatalogOptions,
+  SupportedProvider,
+} from './providers.js';
 import type { Effect, Stream } from 'effect';
 export type { LLMProvider };
 
@@ -355,6 +360,11 @@ export interface LLMAdapter {
    * Check if an API key exists for a provider.
    */
   hasApiKey?(provider: LLMProvider): boolean;
+
+  listModels?(
+    provider: SupportedProvider,
+    options?: ProviderModelCatalogOptions
+  ): Promise<ProviderModelCatalog | null>;
 
   /**
    * Reset the circuit breaker state.

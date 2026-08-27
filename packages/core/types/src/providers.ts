@@ -122,6 +122,16 @@ export interface ProviderModelEntry extends ProviderModelDefinition {
   provider: SupportedProvider;
 }
 
+export interface ProviderModelCatalog {
+  models: ProviderModelDefinition[];
+  etag?: string;
+  notModified?: boolean;
+}
+
+export interface ProviderModelCatalogOptions {
+  etag?: string;
+}
+
 export type ProviderResponseFormat = 'json_schema' | 'json_object' | 'none';
 
 /**
