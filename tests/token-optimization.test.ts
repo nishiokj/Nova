@@ -8,7 +8,7 @@
  */
 
 import { ContextWindow } from 'context/context-window.js';
-import { Effect } from 'effect';
+import { Effect, Stream } from 'effect';
 import { Agent } from 'agent/agent.js';
 import type { AgentConfig } from 'agent/types.js';
 import type { LLMAdapter, LLMResponse } from 'llm/index.js';
@@ -22,10 +22,10 @@ import type { ArtifactKind } from 'types/context.js';
 
 function createMockLLM(response: LLMResponse): LLMAdapter {
   return {
-    respond: async () => response,
-    stream: async function* () {
-      yield response.content;
-      return response;
+    respond: () => Effect.succeed(response),
+    stream: (params) => {
+      params.onComplete?.(response);
+      return Stream.fromIterable(response.content ? [response.content] : []);
     },
   } as LLMAdapter;
 }
@@ -242,52 +242,21 @@ describe('Tool Output Truncation (Fix #3)', () => {
     // Create a long output (10000 chars)
     const longOutput = 'x'.repeat(10000);
 
-    // Create mock LLM that requests a tool then completes
-    let callCount = 0;
-    const llm: LLMAdapter = {
-      respond: async () => {
-        callCount++;
-        if (callCount === 1) {
-          return {
-            content: '',
-            toolCalls: [{ id: 'call-1', name: 'Read', arguments: { path: '/file.ts' } }],
-            stopReason: 'tool_use',
-            usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
-            model: 'test-model',
-            durationMs: 100,
-          };
-        }
-        return {
-          content: JSON.stringify({
-            action: 'done',
-            response: 'done',
-            goalStateReached: true,
-            userPrompt: null,
-          }),
-          stopReason: 'end_turn',
-          usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
-          model: 'test-model',
-          durationMs: 100,
-        };
-      },
-      stream: async function* () {
-        yield '';
-        return {
-          content: '',
-          stopReason: 'end_turn',
-          usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
-          model: 'test-model',
-          durationMs: 100,
-        };
-      },
-    } as LLMAdapter;
+    const llm = createMockLLM({
+      content: '',
+      toolCalls: [{ id: 'call-1', name: 'SleepTool', arguments: {} }],
+      stopReason: 'tool_use',
+      usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
+      model: 'test-model',
+      durationMs: 100,
+    });
 
     const toolRegistry: ToolRegistry = {
       getDefinitions: () => [],
       getWorkingDir: () => process.cwd(),
       isParallelSafe: () => false,
       execute: async () => ({
-        toolName: 'Read',
+        toolName: 'SleepTool',
         status: 'success',
         output: longOutput,
         durationMs: 10,
@@ -298,26 +267,33 @@ describe('Tool Output Truncation (Fix #3)', () => {
     const config: AgentConfig = {
       type: 'standard',
       systemPrompt: 'Test',
-      tools: ['Read'],
+      tools: ['SleepTool'],
       budget: { maxIterations: 5, maxToolCalls: 10, maxDurationMs: 10000 },
+      llmParams: { maxTokens: 1024, temperature: 0 },
       outputSchema: { name: 'agent_output', schema: { type: 'object' }, strict: true },
     };
 
-    const agent = new Agent(
-      config,
+    const agent = new Agent(config, {
       llm,
       toolRegistry,
-      undefined,
-      '',
-      undefined,
-      { model: 'test-model', provider: 'openai', apiKey: 'test-key' }
-    );
+      llmConfig: {
+        model: 'test-model',
+        provider: 'openai',
+        apiKey: 'test-key',
+        contextWindow: 200_000,
+      },
+    });
 
     const context = new ContextWindow('test-session', 200_000);
     const workItem = createWorkItem({ goal: 'test', objective: 'test' });
 
     const result = await Effect.runPromise(
-      agent.run({ globalContext: context, workItem, cwd: process.cwd() })
+      agent.executeTurn({
+        globalContext: context,
+        workItem,
+        cwd: process.cwd(),
+        turnPolicy: { iteration: 1, maxIterations: 2, allowToolCalls: true, toolCallLimit: 10 },
+      })
     );
 
     // Check that the output was truncated in local context
@@ -341,51 +317,21 @@ describe('Tool Output Truncation (Fix #3)', () => {
   it('does not truncate outputs shorter than 8000 chars', async () => {
     const shortOutput = 'short output';
 
-    let callCount = 0;
-    const llm: LLMAdapter = {
-      respond: async () => {
-        callCount++;
-        if (callCount === 1) {
-          return {
-            content: '',
-            toolCalls: [{ id: 'call-1', name: 'Read', arguments: { path: '/file.ts' } }],
-            stopReason: 'tool_use',
-            usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
-            model: 'test-model',
-            durationMs: 100,
-          };
-        }
-        return {
-          content: JSON.stringify({
-            action: 'done',
-            response: 'done',
-            goalStateReached: true,
-            userPrompt: null,
-          }),
-          stopReason: 'end_turn',
-          usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
-          model: 'test-model',
-          durationMs: 100,
-        };
-      },
-      stream: async function* () {
-        yield '';
-        return {
-          content: '',
-          stopReason: 'end_turn',
-          usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
-          model: 'test-model',
-          durationMs: 100,
-        };
-      },
-    } as LLMAdapter;
+    const llm = createMockLLM({
+      content: '',
+      toolCalls: [{ id: 'call-1', name: 'SleepTool', arguments: {} }],
+      stopReason: 'tool_use',
+      usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
+      model: 'test-model',
+      durationMs: 100,
+    });
 
     const toolRegistry: ToolRegistry = {
       getDefinitions: () => [],
       getWorkingDir: () => process.cwd(),
       isParallelSafe: () => false,
       execute: async () => ({
-        toolName: 'Read',
+        toolName: 'SleepTool',
         status: 'success',
         output: shortOutput,
         durationMs: 10,
@@ -396,26 +342,33 @@ describe('Tool Output Truncation (Fix #3)', () => {
     const config: AgentConfig = {
       type: 'standard',
       systemPrompt: 'Test',
-      tools: ['Read'],
+      tools: ['SleepTool'],
       budget: { maxIterations: 5, maxToolCalls: 10, maxDurationMs: 10000 },
+      llmParams: { maxTokens: 1024, temperature: 0 },
       outputSchema: { name: 'agent_output', schema: { type: 'object' }, strict: true },
     };
 
-    const agent = new Agent(
-      config,
+    const agent = new Agent(config, {
       llm,
       toolRegistry,
-      undefined,
-      '',
-      undefined,
-      { model: 'test-model', provider: 'openai', apiKey: 'test-key' }
-    );
+      llmConfig: {
+        model: 'test-model',
+        provider: 'openai',
+        apiKey: 'test-key',
+        contextWindow: 200_000,
+      },
+    });
 
     const context = new ContextWindow('test-session', 200_000);
     const workItem = createWorkItem({ goal: 'test', objective: 'test' });
 
     const result = await Effect.runPromise(
-      agent.run({ globalContext: context, workItem, cwd: process.cwd() })
+      agent.executeTurn({
+        globalContext: context,
+        workItem,
+        cwd: process.cwd(),
+        turnPolicy: { iteration: 1, maxIterations: 2, allowToolCalls: true, toolCallLimit: 10 },
+      })
     );
 
     if (result.localContext) {
@@ -484,9 +437,11 @@ describe('Bidirectional Context Inheritance (Fix #4)', () => {
       // Transfer file content
       const fileItems = parentContext.getItemsByType<{
         type: 'file_content';
+        id: string;
         path: string;
         content: string;
         language?: string;
+        timestamp: number;
       }>('file_content');
 
       for (const fileItem of fileItems) {
@@ -511,9 +466,11 @@ describe('Bidirectional Context Inheritance (Fix #4)', () => {
       // Transfer only if not already present
       const fileItems = parentContext.getItemsByType<{
         type: 'file_content';
+        id: string;
         path: string;
         content: string;
         language?: string;
+        timestamp: number;
       }>('file_content');
 
       for (const fileItem of fileItems) {
@@ -599,9 +556,11 @@ describe('Bidirectional Context Inheritance (Fix #4)', () => {
       // Merge file content avoiding duplicates
       const subFileItems = subLocalContext.getItemsByType<{
         type: 'file_content';
+        id: string;
         path: string;
         content: string;
         language?: string;
+        timestamp: number;
       }>('file_content');
 
       for (const fileItem of subFileItems) {
@@ -613,7 +572,7 @@ describe('Bidirectional Context Inheritance (Fix #4)', () => {
       expect(parentContext.hasReadFile('/src/a.ts')).toBe(true);
       expect(parentContext.hasReadFile('/src/b.ts')).toBe(true);
 
-      const fileItems = parentContext.getItemsByType<{ path: string; content: string }>('file_content');
+      const fileItems = parentContext.getItemsByType<{ type: 'file_content'; id: string; path: string; content: string; timestamp: number }>('file_content');
       const aItem = fileItems.find(f => f.path === '/src/a.ts');
       const bItem = fileItems.find(f => f.path === '/src/b.ts');
 

@@ -2,24 +2,35 @@
  * Orchestrator — integration tests.
  *
  * Tests the full execution loop through the public execute() API,
- * mocking at the Agent.run boundary. No hooks/runtime for clarity.
+ * mocking at the Agent.executeTurn boundary. No hooks/runtime for clarity.
  */
 
 import { describe, it, expect, spyOn, afterEach } from 'bun:test';
-import { Effect } from 'effect';
+import { Effect, Queue } from 'effect';
 import { Agent } from 'agent';
-import type { AgentResult } from 'agent';
+import type {
+  AgentContinuationResult,
+  AgentResultBase,
+  AgentTerminationReason,
+  AgentTerminalResult,
+  AgentToolExecutor,
+  AgentTurnParams,
+  AgentTurnResult,
+} from 'agent';
+import type { TerminationReason } from 'types';
 import { AgentRegistry } from 'agent';
 import { ContextWindow } from 'context';
 import type { LLMAdapter } from 'llm';
 import type { ToolRegistry } from 'tools';
-import type { AgentEvent } from 'types';
+import { createWorkItem, type AgentEvent } from 'types';
 import {
   Orchestrator,
   DEFAULT_ORCHESTRATOR_CONFIG,
   type OrchestratorConfig,
   type OrchestratorLogger,
+  type OrchestratorRuntime,
 } from './orchestrator.js';
+import type { RuntimeControlMessage } from 'runtime';
 
 // ── Mock factories ───────────────────────────────────────────────
 
@@ -60,7 +71,7 @@ const defaultModelSelection = () => ({ provider: 'openai', model: 'test', contex
 
 // ── Agent result builders ────────────────────────────────────────
 
-function continueResult(overrides: Record<string, unknown> = {}): AgentResult {
+function baseResult(overrides: Partial<AgentResultBase> = {}): AgentResultBase {
   return {
     success: true,
     response: '',
@@ -68,28 +79,38 @@ function continueResult(overrides: Record<string, unknown> = {}): AgentResult {
     filesRead: [],
     invalidatedPaths: [],
     toolErrors: [],
-    terminationReason: 'user_input_required', // falls through terminal checks when needsUserInput=false
-    needsUserInput: false,
-    isRefusal: false,
     localContext: new ContextWindow('local', 10_000),
     ...overrides,
-  } as unknown as AgentResult;
+  };
 }
 
-function goalResult(response = 'done'): AgentResult {
+function continueResult(overrides: Partial<AgentResultBase> = {}): AgentContinuationResult {
   return {
-    success: true,
-    response,
-    metrics: { llmCallsMade: 1, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
-    filesRead: [],
-    invalidatedPaths: [],
-    toolErrors: [],
-    terminationReason: 'goal_state_reached',
+    ...baseResult(overrides),
+    status: 'continue',
     needsUserInput: false,
     isRefusal: false,
+  };
+}
+
+function terminalResult(
+  terminationReason: Exclude<AgentTerminationReason, 'user_input_required' | 'refusal' | 'rate_limit'>,
+  overrides: Partial<AgentResultBase> = {}
+): AgentTerminalResult {
+  return {
+    ...baseResult(overrides),
+    status: 'terminal',
+    terminationReason,
+    needsUserInput: false,
+    isRefusal: false,
+  };
+}
+
+function goalResult(response = 'done'): AgentTerminalResult {
+  return terminalResult('goal_state_reached', {
+    response,
     structuredOutput: { goalStateReached: true },
-    localContext: new ContextWindow('local', 10_000),
-  } as unknown as AgentResult;
+  });
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -143,12 +164,12 @@ describe('Orchestrator', () => {
 
   afterEach(() => { runSpy?.mockRestore(); });
 
-  function spy(fn: () => Effect.Effect<AgentResult, never>) {
-    runSpy = spyOn(Agent.prototype, 'run').mockImplementation(fn as any);
+  function spy(fn: (this: Agent, params: AgentTurnParams) => Effect.Effect<AgentTurnResult, never>) {
+    runSpy = spyOn(Agent.prototype, 'executeTurn').mockImplementation(fn);
     return runSpy;
   }
 
-  function spySequence(...results: AgentResult[]) {
+  function spySequence(...results: AgentTurnResult[]) {
     let i = 0;
     return spy(() => Effect.succeed(results[Math.min(i++, results.length - 1)]));
   }
@@ -200,6 +221,30 @@ describe('Orchestrator', () => {
       const r = await run(createOrch({ maxIterations: 1 }), new ContextWindow('t', 200_000));
       expect(r.terminationReason).toBe('max_iterations_exceeded');
       expect(calls).toBe(1);
+    });
+
+    it('supplies 1-based turn policy and disables tools only on the final turn', async () => {
+      const policies: AgentTurnParams['turnPolicy'][] = [];
+      spy((params) => {
+        policies.push(params.turnPolicy);
+        return Effect.succeed(continueResult());
+      });
+
+      await run(createOrch({ maxIterations: 3 }), new ContextWindow('t', 200_000));
+
+      expect(policies).toEqual([
+        { iteration: 1, maxIterations: 3, allowToolCalls: true, toolCallLimit: 250 },
+        { iteration: 2, maxIterations: 3, allowToolCalls: true, toolCallLimit: 250 },
+        { iteration: 3, maxIterations: 3, allowToolCalls: false, toolCallLimit: 0 },
+      ]);
+    });
+
+    it('checks duration before invoking an Agent turn', async () => {
+      const turn = spy(() => Effect.succeed(goalResult()));
+      const r = await run(createOrch({ maxDurationMs: 0 }), new ContextWindow('t', 200_000));
+      expect(r.terminationReason).toBe('max_duration_exceeded');
+      expect(turn).not.toHaveBeenCalled();
+      expect(r.metrics.iterations).toBe(0);
     });
   });
 
@@ -330,21 +375,16 @@ describe('Orchestrator', () => {
 
   describe('terminal conditions', () => {
     it('goal via structuredOutput.goalStateReached', async () => {
-      spySequence({
-        ...continueResult(),
-        terminationReason: 'user_input_required', // NOT via terminationReason
+      spySequence(terminalResult('goal_state_reached', {
         structuredOutput: { goalStateReached: true },
-      } as unknown as AgentResult);
+      }));
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
       expect(r.terminationReason).toBe('goal_state_reached');
       expect(r.success).toBe(true);
     });
 
     it('goal via terminationReason string', async () => {
-      spySequence({
-        ...continueResult(),
-        terminationReason: 'goal_state_reached',
-      } as unknown as AgentResult);
+      spySequence(terminalResult('goal_state_reached'));
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
       expect(r.terminationReason).toBe('goal_state_reached');
       expect(r.success).toBe(true);
@@ -366,6 +406,7 @@ describe('Orchestrator', () => {
 
     it('user_input_required pauses', async () => {
       spySequence({
+        status: 'terminal',
         success: false,
         response: 'Which option?',
         metrics: { llmCallsMade: 1, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
@@ -375,7 +416,7 @@ describe('Orchestrator', () => {
         userPrompt: { questions: [{ question: 'Pick one', options: [{ label: 'A' }, { label: 'B' }] }] },
         isRefusal: false,
         localContext: new ContextWindow('l', 10_000),
-      } as unknown as AgentResult);
+      });
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
       expect(r.terminationReason).toBe('user_input_required');
       expect(r.success).toBe(false);
@@ -384,6 +425,7 @@ describe('Orchestrator', () => {
 
     it('refusal terminates', async () => {
       spySequence({
+        status: 'terminal',
         success: false,
         response: 'I cannot do this',
         metrics: { llmCallsMade: 1, toolCallsMade: 0, toolCallsSucceeded: 0, toolCallsFailed: 0, durationMs: 0 },
@@ -392,17 +434,16 @@ describe('Orchestrator', () => {
         needsUserInput: false,
         isRefusal: true,
         localContext: new ContextWindow('l', 10_000),
-      } as unknown as AgentResult);
+      });
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
       expect(r.terminationReason).toBe('refusal');
       expect(r.success).toBe(false);
     });
 
     it('agent_error terminates', async () => {
-      spySequence(continueResult({
+      spySequence(terminalResult('agent_error', {
         success: false,
         error: 'Something broke',
-        terminationReason: 'agent_error',
       }));
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
       expect(r.terminationReason).toBe('agent_error');
@@ -410,10 +451,9 @@ describe('Orchestrator', () => {
     });
 
     it('hard error catch-all: error + !success + action≠continue', async () => {
-      spySequence(continueResult({
+      spySequence(terminalResult('agent_error', {
         success: false,
         error: 'Generic failure',
-        terminationReason: 'user_input_required', // not a specific check
         structuredOutput: { action: 'done' },
       }));
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
@@ -428,7 +468,6 @@ describe('Orchestrator', () => {
         if (call === 1) return Effect.succeed(continueResult({
           success: false,
           error: 'Recoverable',
-          terminationReason: 'user_input_required',
           structuredOutput: { action: 'continue' },
         }));
         return Effect.succeed(goalResult());
@@ -457,10 +496,10 @@ describe('Orchestrator', () => {
       expect(r.metrics.totalToolCalls).toBe(3 * 3); // goal has 0 tool calls
     });
 
-    it('max_iterations reports iterations - 1', async () => {
+    it('max_iterations reports the exact number of executed turns', async () => {
       spy(() => Effect.succeed(continueResult()));
       const r = await run(createOrch({ maxIterations: 3 }), new ContextWindow('t', 200_000));
-      expect(r.metrics.iterations).toBe(3); // bound fires at iteration 4, reports 4-1=3
+      expect(r.metrics.iterations).toBe(3); // bound is checked before a fourth turn
     });
 
     it('goal_state_reached reports actual iteration', async () => {
@@ -567,15 +606,34 @@ describe('Orchestrator', () => {
       addSpy.mockRestore();
     });
 
-    it('merges context each continue iteration', async () => {
+    it('merges context each continue iteration exactly once', async () => {
       const ctx = new ContextWindow('t', 200_000);
       const addSpy = spyOn(ctx, 'addAgentResultContext');
       let call = 0;
       spy(() => { call++; return call === 3 ? Effect.succeed(goalResult()) : Effect.succeed(continueResult()); });
       await run(createOrch(), ctx);
-      // 2 continue merges + 1 goal merge = 3
+      // 2 continuation deltas + 1 terminal delta = exactly 3 merges.
       expect(addSpy).toHaveBeenCalledTimes(3);
       addSpy.mockRestore();
+    });
+
+    it('makes continuation tool history available on the next turn', async () => {
+      let call = 0;
+      spy((params) => {
+        call++;
+        if (call === 1) {
+          const localContext = new ContextWindow('local-turn-1', 10_000);
+          localContext.addFunctionCall('call-1', 'Read', { path: '/tmp/a' });
+          localContext.addFunctionCallOutput('call-1', 'contents', false);
+          return Effect.succeed(continueResult({ localContext }));
+        }
+        expect(params.globalContext.getItemsByType('function_call')).toHaveLength(1);
+        expect(params.globalContext.getItemsByType('function_call_output')).toHaveLength(1);
+        return Effect.succeed(goalResult());
+      });
+
+      await run(createOrch(), new ContextWindow('t', 200_000));
+      expect(call).toBe(2);
     });
 
     it('updateMetrics called each iteration', async () => {
@@ -595,9 +653,8 @@ describe('Orchestrator', () => {
     it('work queue exhausted without goal → agent_error fallback', async () => {
       // When the main item errors out and no goal was ever reached,
       // the post-loop fallback creates an agent_error.
-      spy(() => Effect.succeed(continueResult({
+      spy(() => Effect.succeed(terminalResult('agent_error', {
         success: false,
-        terminationReason: 'agent_error',
         error: 'Something broke',
       })));
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
@@ -643,14 +700,14 @@ describe('Orchestrator', () => {
   // ── Defect handling ──────────────────────────────────────────
 
   describe('defect handling', () => {
-    it('Agent.run Effect.die is caught by catchAllDefect → agent_error', async () => {
+    it('Agent.executeTurn Effect.die is caught by catchAllDefect → agent_error', async () => {
       spy(() => Effect.die(new Error('Agent exploded')));
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
       expect(r.terminationReason).toBe('agent_error');
       expect(r.error).toContain('Agent exploded');
     });
 
-    it('Agent.run throwing synchronously is caught → agent_error', async () => {
+    it('Agent.executeTurn throwing synchronously is caught → agent_error', async () => {
       spy(() => { throw new Error('Sync boom'); });
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
       expect(r.terminationReason).toBe('agent_error');
@@ -684,28 +741,87 @@ describe('Orchestrator', () => {
     });
   });
 
+  // ── Agent-as-tool delegation ─────────────────────────────────
+
+  describe('agent-as-tool delegation', () => {
+    it('runs delegated work through a nested Orchestrator with the child budget', async () => {
+      const registry = new AgentRegistry([
+        {
+          type: 'standard',
+          systemPrompt: 'parent',
+          tools: ['explorer'],
+          budget: { maxIterations: 5, maxToolCalls: 10, maxDurationMs: 10_000 },
+          llmParams: { maxTokens: 4096, temperature: 0 },
+        },
+        {
+          type: 'explorer',
+          systemPrompt: 'child',
+          tools: [],
+          budget: { maxIterations: 2, maxToolCalls: 3, maxDurationMs: 5_000 },
+          llmParams: { maxTokens: 4096, temperature: 0 },
+        },
+      ]);
+      const childPolicies: AgentTurnParams['turnPolicy'][] = [];
+
+      spy(function (params) {
+        if (params.workItem.agent === 'explorer') {
+          childPolicies.push(params.turnPolicy);
+          return Effect.succeed(childPolicies.length === 1 ? continueResult() : goalResult('child done'));
+        }
+
+        const executor = Reflect.get(this, 'executeAgentTool') as AgentToolExecutor;
+        const childWorkItem = createWorkItem({
+          goal: params.workItem.goal,
+          objective: 'delegate this',
+          agent: 'explorer',
+        });
+        return executor({
+          agentType: 'explorer',
+          workItem: childWorkItem,
+          globalContext: params.globalContext,
+          cwd: params.cwd,
+          signal: params.signal,
+          runControl: params.runControl,
+          parentAgentType: 'standard',
+        }).pipe(
+          Effect.map((child) => goalResult(child.response)),
+          Effect.orDie
+        );
+      });
+
+      const result = await run(createOrch({ maxIterations: 5 }, { registry }), new ContextWindow('t', 200_000));
+      expect(result.response).toBe('child done');
+      expect(childPolicies).toEqual([
+        { iteration: 1, maxIterations: 2, allowToolCalls: true, toolCallLimit: 3 },
+        { iteration: 2, maxIterations: 2, allowToolCalls: false, toolCallLimit: 0 },
+      ]);
+    });
+  });
+
   // ── Additional terminal conditions ────────────────────────────
 
   describe('additional terminal conditions', () => {
     it('rate_limit terminates', async () => {
-      spySequence(continueResult({
+      spySequence({
+        ...baseResult(),
+        status: 'terminal',
         terminationReason: 'rate_limit',
-      }));
+        needsUserInput: false,
+        isRefusal: false,
+        rateLimitInfo: { provider: 'test', model: 'test', type: 'requests', message: 'limited' },
+      });
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
       expect(r.terminationReason).toBe('rate_limit');
     });
 
     it('circuit_open terminates', async () => {
-      spySequence(continueResult({
-        terminationReason: 'circuit_open',
-      }));
+      spySequence(terminalResult('circuit_open'));
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
       expect(r.terminationReason).toBe('circuit_open');
     });
 
     it('timeout terminates with error', async () => {
-      spySequence(continueResult({
-        terminationReason: 'timeout',
+      spySequence(terminalResult('timeout', {
         error: 'Stream timeout',
       }));
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
@@ -714,17 +830,14 @@ describe('Orchestrator', () => {
     });
 
     it('timeout with no error gets fallback', async () => {
-      spySequence(continueResult({
-        terminationReason: 'timeout',
-      }));
+      spySequence(terminalResult('timeout'));
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
       expect(r.terminationReason).toBe('timeout');
       expect(r.error).toBe('timeout');
     });
 
     it('user_stopped terminates', async () => {
-      spySequence(continueResult({
-        terminationReason: 'user_stopped',
+      spySequence(terminalResult('user_stopped', {
         response: 'User cancelled',
       }));
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
@@ -734,8 +847,7 @@ describe('Orchestrator', () => {
     it('no_action terminates without hooks', async () => {
       // Without hook registry, no_action hits the fallback path → terminal.
       // It's only "continuable" when hooks provide recovery guidance.
-      spySequence(continueResult({
-        terminationReason: 'no_action',
+      spySequence(terminalResult('no_action', {
         error: 'No action taken',
       }));
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
@@ -744,13 +856,42 @@ describe('Orchestrator', () => {
     });
 
     it('invalid_action terminates without hooks', async () => {
-      spySequence(continueResult({
-        terminationReason: 'invalid_action',
+      spySequence(terminalResult('invalid_action', {
         error: 'Bad action',
       }));
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
       expect(r.terminationReason).toBe('invalid_action');
       expect(r.error).toBe('Bad action');
+    });
+  });
+
+  // ── Runtime-control cancellation ──────────────────────────────
+
+  describe('runtime-control cancellation', () => {
+    it('cancel via control queue terminates with user_stopped', async () => {
+      // Agent returns continuation so the loop would run forever without cancellation.
+      let callCount = 0;
+      spy(() => {
+        callCount++;
+        return Effect.succeed(continueResult());
+      });
+
+      const queue = Effect.runSync(Queue.unbounded<RuntimeControlMessage>());
+      // Publish cancel before execution starts so it is drained on the first syncRuntimeControlState call.
+      Effect.runSync(Queue.offer(queue, {
+        action: 'cancel',
+        cancellation: { reason: 'user requested', requestedAt: Date.now(), requestedBy: 'user', scope: 'run' },
+      }));
+
+      const orch = createOrch();
+      const ctx = new ContextWindow('t', 200_000);
+      const runtime: OrchestratorRuntime = { controlQueue: queue };
+
+      const r = await Effect.runPromise(orch.execute(ctx, 'goal', 'standard', '/tmp', runtime));
+      expect(r.terminationReason).toBe('user_stopped');
+      expect(r.runControl.state).toBe('cancelled');
+      // Agent may or may not have been called once before the cancel was observed.
+      expect(callCount).toBeGreaterThanOrEqual(0);
     });
   });
 
@@ -802,7 +943,7 @@ describe('Orchestrator', () => {
       let agentCalls = 0;
       spy(() => { agentCalls++; return Effect.succeed(goalResult()); });
       const r = await run(createOrch(), new ContextWindow('t', 200_000));
-      // Only the main work item triggers agent.run, not the hook work item
+      // Only the main work item triggers agent.executeTurn, not the hook work item
       expect(agentCalls).toBe(1);
       expect(r.success).toBe(true);
     });
