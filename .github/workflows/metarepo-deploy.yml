@@ -62,7 +62,7 @@ jobs:
       METAREPO_WORKDIR: /tmp/metarepo
       METAREPO_SECRET_MASTER_KEY: ci-test-master-key
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -88,7 +88,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: verify
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Compute image name
         id: image
